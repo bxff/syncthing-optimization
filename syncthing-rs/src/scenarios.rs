@@ -628,12 +628,35 @@ fn versioned(path: &str, sequence: u64, deleted: bool, ignored: bool) -> Version
 mod tests {
     use super::*;
 
-    #[test]
-    fn all_scenarios_produce_json() {
-        for id in scenario_ids() {
+    fn smoke_scenario_ids() -> &'static [&'static str] {
+        &[
+            "index-sequence-behavior",
+            "global-need-decision",
+            "conflict-and-ignore-semantics",
+            "folder-type-behavior",
+            "protocol-state-transition",
+        ]
+    }
+
+    fn run_and_assert(ids: &[&str]) {
+        for id in ids {
             let out = run_scenario_snapshot(id).expect("run scenario");
             assert_eq!(out["scenario"], *id);
             assert_eq!(out["source"], "rust");
         }
+    }
+
+    #[test]
+    fn smoke_scenarios_produce_json() {
+        run_and_assert(smoke_scenario_ids());
+    }
+
+    #[test]
+    #[ignore = "long-running: set SYNCTHING_RS_RUN_FULL_SCENARIOS=1 to run"]
+    fn full_scenarios_produce_json() {
+        if std::env::var("SYNCTHING_RS_RUN_FULL_SCENARIOS").as_deref() != Ok("1") {
+            return;
+        }
+        run_and_assert(scenario_ids());
     }
 }

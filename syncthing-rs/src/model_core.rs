@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub(crate) static ErrFolderMissing: &str = "folder missing";
@@ -314,6 +315,12 @@ impl Default for model {
 }
 
 fn model_with_runtime(db_root: PathBuf, db_memory_cap_mb: usize) -> model {
+    if let Err(err) = fs::create_dir_all(&db_root) {
+        panic!(
+            "failed to create runtime db root {}: {err}",
+            db_root.display()
+        );
+    }
     let sdb = db::WalFreeDb::open_runtime(&db_root, db_memory_cap_mb)
         .unwrap_or_else(|err| panic!("failed to open runtime db at {}: {err}", db_root.display()));
     model {
@@ -360,8 +367,11 @@ fn runtime_db_root() -> PathBuf {
             return PathBuf::from(trimmed);
         }
     }
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let suffix = COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut root = std::env::temp_dir();
-    root.push("syncthing-rs-db");
+    root.push(format!("syncthing-rs-db-{}-{suffix}", std::process::id()));
     root
 }
 
@@ -475,6 +485,22 @@ impl model {
             out.insert(
                 "memoryPullHardBlocked".to_string(),
                 Value::from(telemetry.pull_hard_blocked),
+            );
+            out.insert(
+                "memoryRuntimeReservedBytes".to_string(),
+                Value::from(telemetry.runtime_reserved_bytes as u64),
+            );
+            out.insert(
+                "memoryRuntimeBudgetBytes".to_string(),
+                Value::from(telemetry.runtime_budget_bytes as u64),
+            );
+            out.insert(
+                "memoryRuntimeThrottleEvents".to_string(),
+                Value::from(telemetry.runtime_throttle_events as u64),
+            );
+            out.insert(
+                "memoryRuntimeHardBlockEvents".to_string(),
+                Value::from(telemetry.runtime_hard_block_events as u64),
             );
             if let Some(last) = telemetry.last_cap_violation {
                 out.insert("memoryLastCapViolation".to_string(), Value::from(last));

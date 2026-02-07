@@ -13,7 +13,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::UNIX_EPOCH;
 
 pub(crate) const deletedBatchSize: usize = 1000;
@@ -77,6 +78,79 @@ pub(crate) struct MemoryTelemetry {
     pub(crate) last_cap_violation: Option<String>,
     pub(crate) pull_throttled: bool,
     pub(crate) pull_hard_blocked: bool,
+    pub(crate) runtime_reserved_bytes: usize,
+    pub(crate) runtime_budget_bytes: usize,
+    pub(crate) runtime_throttle_events: u64,
+    pub(crate) runtime_hard_block_events: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct RuntimeMemoryBudget {
+    pub(crate) key: String,
+    pub(crate) max_bytes: usize,
+    used_bytes: AtomicUsize,
+    throttle_events: AtomicU64,
+    hard_block_events: AtomicU64,
+}
+
+impl Default for RuntimeMemoryBudget {
+    fn default() -> Self {
+        Self {
+            key: "default".to_string(),
+            max_bytes: usize::MAX,
+            used_bytes: AtomicUsize::new(0),
+            throttle_events: AtomicU64::new(0),
+            hard_block_events: AtomicU64::new(0),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct MemoryPermit {
+    budget: Arc<RuntimeMemoryBudget>,
+    bytes: usize,
+}
+
+impl RuntimeMemoryBudget {
+    fn reserved_bytes(&self) -> usize {
+        self.used_bytes.load(Ordering::Acquire)
+    }
+
+    fn try_acquire(self: &Arc<Self>, bytes: usize) -> Option<MemoryPermit> {
+        if bytes == 0 || self.max_bytes == usize::MAX {
+            return Some(MemoryPermit {
+                budget: self.clone(),
+                bytes: 0,
+            });
+        }
+        loop {
+            let current = self.used_bytes.load(Ordering::Acquire);
+            let next = current.saturating_add(bytes);
+            if next > self.max_bytes {
+                return None;
+            }
+            if self
+                .used_bytes
+                .compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Some(MemoryPermit {
+                    budget: self.clone(),
+                    bytes,
+                });
+            }
+        }
+    }
+}
+
+impl Drop for MemoryPermit {
+    fn drop(&mut self) {
+        if self.bytes > 0 {
+            self.budget
+                .used_bytes
+                .fetch_sub(self.bytes, Ordering::AcqRel);
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -268,6 +342,7 @@ impl streamingCFiler {
 pub(crate) struct folder {
     pub(crate) config: FolderConfiguration,
     pub(crate) db: Arc<Mutex<db::WalFreeDb>>,
+    pub(crate) runtimeMemoryBudget: Arc<RuntimeMemoryBudget>,
     pub(crate) forcedRescanPaths: BTreeSet<String>,
     pub(crate) scanScheduled: bool,
     pub(crate) pullScheduled: bool,
@@ -335,6 +410,42 @@ struct ScanScope {
     prefix: String,
     dir: Option<PathBuf>,
     file: Option<String>,
+}
+
+fn runtime_memory_budget_registry() -> &'static Mutex<BTreeMap<String, Arc<RuntimeMemoryBudget>>> {
+    static REGISTRY: OnceLock<Mutex<BTreeMap<String, Arc<RuntimeMemoryBudget>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn runtime_budget_key(db: &Arc<Mutex<db::WalFreeDb>>, cfg: &FolderConfiguration) -> String {
+    let runtime_root = db
+        .lock()
+        .map(|guard| guard.runtime_root().to_string_lossy().to_string())
+        .unwrap_or_else(|_| "unknown-runtime".to_string());
+    format!("{runtime_root}:{}MB", cfg.memory_max_mb.max(1))
+}
+
+fn runtime_budget_for_folder(
+    db: &Arc<Mutex<db::WalFreeDb>>,
+    cfg: &FolderConfiguration,
+) -> Arc<RuntimeMemoryBudget> {
+    let key = runtime_budget_key(db, cfg);
+    let mut registry = runtime_memory_budget_registry()
+        .lock()
+        .expect("runtime memory budget registry lock");
+    if let Some(existing) = registry.get(&key) {
+        return existing.clone();
+    }
+
+    let budget = Arc::new(RuntimeMemoryBudget {
+        key: key.clone(),
+        max_bytes: (cfg.memory_max_mb.max(1) as usize).saturating_mul(1024 * 1024),
+        used_bytes: AtomicUsize::new(0),
+        throttle_events: AtomicU64::new(0),
+        hard_block_events: AtomicU64::new(0),
+    });
+    registry.insert(key, budget.clone());
+    budget
 }
 
 impl folder {
@@ -579,6 +690,46 @@ impl folder {
                 break;
             }
 
+            let batch_runtime_bytes = estimate_needed_batch_runtime_bytes(&needed_batch);
+            let batch_permit: Option<MemoryPermit> = match self.config.memory_policy {
+                MemoryPolicy::Fail => match self.runtimeMemoryBudget.try_acquire(batch_runtime_bytes) {
+                    Some(permit) => Some(permit),
+                    None => {
+                        self.memoryHardBlockEvents = self.memoryHardBlockEvents.saturating_add(1);
+                        self.runtimeMemoryBudget
+                            .hard_block_events
+                            .fetch_add(1, Ordering::AcqRel);
+                        self.lastCapViolation = Some(format!(
+                            "runtime budget exceeded: reserved={} requested={} budget={} folder={} key={}",
+                            self.runtimeMemoryBudget.reserved_bytes(),
+                            batch_runtime_bytes,
+                            self.runtimeMemoryBudget.max_bytes,
+                            self.config.id,
+                            self.runtimeMemoryBudget.key
+                        ));
+                        self.pullStats = PullStats {
+                            hard_blocked: true,
+                            ..Default::default()
+                        };
+                        return Err("memory cap exceeded".to_string());
+                    }
+                },
+                MemoryPolicy::Throttle => match self.runtimeMemoryBudget.try_acquire(batch_runtime_bytes)
+                {
+                    Some(permit) => Some(permit),
+                    None => {
+                        throttled = true;
+                        self.memoryThrottleEvents = self.memoryThrottleEvents.saturating_add(1);
+                        self.runtimeMemoryBudget
+                            .throttle_events
+                            .fetch_add(1, Ordering::AcqRel);
+                        query_limit = query_limit.saturating_div(2).max(1);
+                        continue;
+                    }
+                },
+                MemoryPolicy::BestEffort => self.runtimeMemoryBudget.try_acquire(batch_runtime_bytes),
+            };
+
             total_blocks = total_blocks.saturating_add(batch_total_blocks);
             reused_same_path_blocks = reused_same_path_blocks.saturating_add(batch_reused_blocks);
 
@@ -611,6 +762,8 @@ impl folder {
             if cursor.is_none() {
                 break;
             }
+
+            drop(batch_permit);
         }
 
         let fetched_blocks = total_blocks.saturating_sub(reused_same_path_blocks);
@@ -650,6 +803,16 @@ impl folder {
             last_cap_violation: self.lastCapViolation.clone(),
             pull_throttled: self.pullStats.throttled,
             pull_hard_blocked: self.pullStats.hard_blocked,
+            runtime_reserved_bytes: self.runtimeMemoryBudget.reserved_bytes(),
+            runtime_budget_bytes: self.runtimeMemoryBudget.max_bytes,
+            runtime_throttle_events: self
+                .runtimeMemoryBudget
+                .throttle_events
+                .load(Ordering::Acquire),
+            runtime_hard_block_events: self
+                .runtimeMemoryBudget
+                .hard_block_events
+                .load(Ordering::Acquire),
         }
     }
 
@@ -1098,6 +1261,25 @@ fn count_same_path_reuse_blocks(local_prev: &db::FileInfo, target: &db::FileInfo
     reused
 }
 
+fn estimate_needed_batch_runtime_bytes(files: &[db::FileInfo]) -> usize {
+    files
+        .iter()
+        .map(|file| {
+            let hash_bytes = file.block_hashes.iter().map(String::len).sum::<usize>();
+            let file_type_len = match file.file_type {
+                db::FileInfoType::File => 4,
+                db::FileInfoType::Directory => 9,
+                db::FileInfoType::Symlink => 7,
+            };
+            file.folder.len()
+                + file.path.len()
+                + file_type_len
+                + hash_bytes
+                + 128
+        })
+        .sum()
+}
+
 fn apply_remote_file_to_disk(root: &Path, file: &db::FileInfo) -> Result<(), String> {
     let abs = safe_join_relative_path(root, &file.path)?;
     if file.deleted {
@@ -1479,9 +1661,11 @@ impl receiveEncryptedFolder {
 }
 
 pub(crate) fn newFolder(config: FolderConfiguration, db: Arc<Mutex<db::WalFreeDb>>) -> folder {
+    let runtimeMemoryBudget = runtime_budget_for_folder(&db, &config);
     folder {
         config,
         db,
+        runtimeMemoryBudget,
         ..Default::default()
     }
 }
@@ -1766,6 +1950,34 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(db_root);
+    }
+
+    #[test]
+    fn folders_share_runtime_budget_for_same_db_root_and_cap() {
+        let root_a = temp_root("shared-budget-a");
+        let root_b = temp_root("shared-budget-b");
+        let db_root = temp_root("shared-budget-db");
+        let db = Arc::new(Mutex::new(
+            db::WalFreeDb::open_runtime(&db_root, 64).expect("open runtime db"),
+        ));
+
+        let mut cfg_a = scan_cfg(&root_a);
+        cfg_a.id = "folder-a".to_string();
+        cfg_a.memory_max_mb = 64;
+        let mut cfg_b = scan_cfg(&root_b);
+        cfg_b.id = "folder-b".to_string();
+        cfg_b.memory_max_mb = 64;
+
+        let f_a = newFolder(cfg_a, db.clone());
+        let f_b = newFolder(cfg_b, db);
+        assert!(
+            Arc::ptr_eq(&f_a.runtimeMemoryBudget, &f_b.runtimeMemoryBudget),
+            "folders on same runtime DB root and cap should share runtime memory manager"
+        );
+
+        let _ = fs::remove_dir_all(root_a);
+        let _ = fs::remove_dir_all(root_b);
         let _ = fs::remove_dir_all(db_root);
     }
 

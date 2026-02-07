@@ -17,10 +17,18 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+
+      - name: Parity PR drift guard
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch origin "${GITHUB_BASE_REF}" --depth=1
+          go run ./script/parity_pr_guard.go --base "origin/${GITHUB_BASE_REF}" --head "HEAD"
 
       - name: Generate parity artifacts
         run: go run ./script/parity.go generate

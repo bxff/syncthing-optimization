@@ -43,6 +43,13 @@ var sourcePatterns = []string{
 
 var parityCriticalRoots = []string{"rust", "crates", "surf"}
 
+var allowedExceptionRules = map[string]struct{}{
+	"status-missing":        {},
+	"rust-surface-missing":  {},
+	"rust-surface-unmapped": {},
+	"todo-fixme":            {},
+}
+
 type featureManifest struct {
 	SchemaVersion int           `json:"schema_version"`
 	Sources       []string      `json:"sources"`
@@ -348,6 +355,8 @@ func runCheck(args []string) {
 		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
 		Mode:          *mode,
 	}
+
+	validateExceptions(&report, exceptions, *mode)
 
 	for _, feat := range manifest.Items {
 		mi, ok := mappingByID[feat.ID]
@@ -804,6 +813,66 @@ func validateImplementedLike(report *guardrailReport, mi mappingItem) {
 			ID:      mi.ID,
 			Message: "implemented feature has no required_tests",
 		})
+	}
+}
+
+func validateExceptions(report *guardrailReport, ex exceptionsFile, mode string) {
+	now := time.Now().UTC()
+
+	if mode == "release" && len(ex.Items) > 0 {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "release-exceptions",
+			Path:    "parity/exceptions.json",
+			Message: "release mode requires parity/exceptions.json to be empty",
+		})
+	}
+
+	for i, item := range ex.Items {
+		loc := fmt.Sprintf("parity/exceptions.json:item[%d]", i)
+		if _, ok := allowedExceptionRules[item.Rule]; !ok {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "exception-invalid-rule",
+				Path:    loc,
+				Message: fmt.Sprintf("unsupported exception rule %q", item.Rule),
+			})
+		}
+		if strings.TrimSpace(item.Reason) == "" {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "exception-metadata",
+				Path:    loc,
+				Message: "exception missing reason",
+			})
+		}
+		if strings.TrimSpace(item.ApprovedBy) == "" {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "exception-metadata",
+				Path:    loc,
+				Message: "exception missing approved_by",
+			})
+		}
+		if strings.TrimSpace(item.DecisionRecord) == "" {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "exception-metadata",
+				Path:    loc,
+				Message: "exception missing decision_record",
+			})
+		}
+		if item.ExpiresAt != "" {
+			expires, err := time.Parse(time.RFC3339, item.ExpiresAt)
+			if err != nil {
+				report.Failures = append(report.Failures, reportFailure{
+					Rule:    "exception-expiry",
+					Path:    loc,
+					Message: fmt.Sprintf("invalid expires_at %q", item.ExpiresAt),
+				})
+			} else if now.After(expires) {
+				report.Failures = append(report.Failures, reportFailure{
+					Rule:    "exception-expiry",
+					Path:    loc,
+					Message: "exception is expired",
+				})
+			}
+		}
 	}
 }
 

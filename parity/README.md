@@ -50,6 +50,12 @@ Generate dashboard:
 go run ./script/parity.go dashboard
 ```
 
+Run PR drift guard (require parity artifacts when Rust/parity-critical files change):
+
+```bash
+GOCACHE=/tmp/go-cache go run ./script/parity_pr_guard.go --base origin/main --head HEAD
+```
+
 ## Status values
 
 - `missing`: feature not implemented in Rust.
@@ -67,3 +73,5 @@ No implicit exceptions are allowed. Any exception must be entered in `exceptions
 - optional `expires_at` (RFC3339)
 
 Expired exceptions are ignored by guardrail checks.
+
+In `release` mode, `exceptions.json` must be empty.

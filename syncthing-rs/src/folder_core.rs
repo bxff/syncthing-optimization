@@ -696,7 +696,8 @@ impl folder {
         let mut spill_dir = root.join(".stfolder");
         spill_dir.push("scan-spill");
         fs::create_dir_all(&spill_dir).map_err(|e| format!("create spill dir: {e}"))?;
-        let walk_cfg = WalkConfig::new(&spill_dir);
+        let spill_threshold = self.config.memory_scan_spill_threshold_entries.max(1) as usize;
+        let walk_cfg = WalkConfig::new(&spill_dir).with_spill_threshold_entries(spill_threshold);
         let scopes = resolve_scan_scopes(&root, subdirs)?;
 
         let mut db = self

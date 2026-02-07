@@ -1,4 +1,5 @@
 use crate::folder_modes::all_mode_actions;
+use crate::index_engine::{FolderUpdate, IndexEngine};
 use crate::planner::{classify_paths, compute_need, VersionedFile};
 use crate::protocol::{default_sequence, run_events};
 use crate::store::{FileMetadata, PageCursor, Store, StoreConfig, JOURNAL_FILE_NAME};
@@ -38,16 +39,62 @@ pub(crate) fn scenario_ids() -> &'static [&'static str] {
 fn scenario_index_sequence_behavior() -> Result<Value, String> {
     let root = scenario_root("index-sequence-behavior")?;
     let mut store = Store::open(StoreConfig::new(&root)).map_err(err_to_string)?;
+    let mut index = IndexEngine::new();
+    let mut rejected_updates = 0_usize;
 
     store
         .upsert_file(meta("default", "c.txt", 3, false, 300, vec!["h3"]))
         .map_err(err_to_string)?;
+    if let Err(_err) = index.apply_update(
+        "default",
+        FolderUpdate {
+            path: "c.txt".to_string(),
+            sequence: 3,
+            deleted: false,
+            ignored: false,
+        },
+    ) {
+        rejected_updates += 1;
+    }
     store
         .upsert_file(meta("default", "a.txt", 1, false, 100, vec!["h1"]))
         .map_err(err_to_string)?;
+    if let Err(_err) = index.apply_update(
+        "default",
+        FolderUpdate {
+            path: "a.txt".to_string(),
+            sequence: 1,
+            deleted: false,
+            ignored: false,
+        },
+    ) {
+        rejected_updates += 1;
+    }
     store
         .upsert_file(meta("default", "b.txt", 2, false, 200, vec!["h2"]))
         .map_err(err_to_string)?;
+    if let Err(_err) = index.apply_update(
+        "default",
+        FolderUpdate {
+            path: "b.txt".to_string(),
+            sequence: 2,
+            deleted: false,
+            ignored: false,
+        },
+    ) {
+        rejected_updates += 1;
+    }
+    if let Err(_err) = index.apply_update(
+        "default",
+        FolderUpdate {
+            path: "late.txt".to_string(),
+            sequence: 2,
+            deleted: false,
+            ignored: false,
+        },
+    ) {
+        rejected_updates += 1;
+    }
     let prefix_hits = store.all_files_in_folder_prefix("default", "a");
 
     let ordered: Vec<Value> = store
@@ -74,7 +121,10 @@ fn scenario_index_sequence_behavior() -> Result<Value, String> {
         "status": "prototype",
         "prefix_a_count": prefix_hits.len(),
         "ordered_files": ordered,
-        "paged_paths": paged_paths
+        "paged_paths": paged_paths,
+        "index_folder_sequence": index.folder_sequence("default"),
+        "index_file_count": index.ordered_files(Some("default")).len(),
+        "rejected_updates": rejected_updates
     });
 
     cleanup(root);

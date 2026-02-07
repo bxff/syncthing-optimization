@@ -1,4 +1,6 @@
 {
+  "index_file_count": 1,
+  "index_folder_sequence": 3,
   "ordered_files": [
     {
       "folder": "default",
@@ -22,6 +24,7 @@
     "c.txt"
   ],
   "prefix_a_count": 1,
+  "rejected_updates": 3,
   "scenario": "index-sequence-behavior",
   "source": "rust",
   "status": "prototype"

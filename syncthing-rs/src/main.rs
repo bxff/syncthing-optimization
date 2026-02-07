@@ -1,4 +1,5 @@
 mod folder_modes;
+mod index_engine;
 mod planner;
 mod protocol;
 mod scenarios;

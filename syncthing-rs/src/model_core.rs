@@ -306,45 +306,47 @@ pub(crate) struct BepExchangeResult {
 
 impl Default for model {
     fn default() -> Self {
-        let db_root = runtime_db_root();
-        let db_memory_cap_mb = runtime_db_memory_cap_mb();
-        let sdb = db::WalFreeDb::open_runtime(&db_root, db_memory_cap_mb)
-            .unwrap_or_else(|err| panic!("failed to open runtime db at {}: {err}", db_root.display()));
-        Self {
-            id: "local-device".to_string(),
-            shortID: "local".to_string(),
-            started: true,
-            closed: false,
-            cfg: BTreeMap::new(),
-            foldersRunning: BTreeMap::new(),
-            folderCfgs: BTreeMap::new(),
-            folderRunners: BTreeMap::new(),
-            folderIgnores: BTreeMap::new(),
-            folderEncryptionPasswordTokens: BTreeMap::new(),
-            folderEncryptionFailures: BTreeMap::new(),
-            folderVersioners: BTreeMap::new(),
-            folderRestartMuts: syncMutexMap::default(),
-            folderIOLimiter: BTreeMap::new(),
-            connections: BTreeMap::new(),
-            deviceConnIDs: BTreeMap::new(),
-            connRequestLimiters: BTreeMap::new(),
-            deviceDownloads: BTreeMap::new(),
-            deviceStatRefs: BTreeMap::new(),
-            remoteFolderStates: BTreeMap::new(),
-            protectedFiles: BTreeSet::new(),
-            observed: deviceIDSet::default(),
-            helloMessages: BTreeMap::new(),
-            progressEmitter: true,
-            promotedConnID: String::new(),
-            promotionTimer: 0,
-            keyGen: 0,
-            indexHandlers: BTreeMap::new(),
-            globalRequestLimiter: 4,
-            mut_count: 0,
-            sdb: Arc::new(Mutex::new(sdb)),
-            evLogger: Vec::new(),
-            fatalChan: None,
-        }
+        model_with_runtime(runtime_db_root(), runtime_db_memory_cap_mb())
+    }
+}
+
+fn model_with_runtime(db_root: PathBuf, db_memory_cap_mb: usize) -> model {
+    let sdb = db::WalFreeDb::open_runtime(&db_root, db_memory_cap_mb)
+        .unwrap_or_else(|err| panic!("failed to open runtime db at {}: {err}", db_root.display()));
+    model {
+        id: "local-device".to_string(),
+        shortID: "local".to_string(),
+        started: true,
+        closed: false,
+        cfg: BTreeMap::new(),
+        foldersRunning: BTreeMap::new(),
+        folderCfgs: BTreeMap::new(),
+        folderRunners: BTreeMap::new(),
+        folderIgnores: BTreeMap::new(),
+        folderEncryptionPasswordTokens: BTreeMap::new(),
+        folderEncryptionFailures: BTreeMap::new(),
+        folderVersioners: BTreeMap::new(),
+        folderRestartMuts: syncMutexMap::default(),
+        folderIOLimiter: BTreeMap::new(),
+        connections: BTreeMap::new(),
+        deviceConnIDs: BTreeMap::new(),
+        connRequestLimiters: BTreeMap::new(),
+        deviceDownloads: BTreeMap::new(),
+        deviceStatRefs: BTreeMap::new(),
+        remoteFolderStates: BTreeMap::new(),
+        protectedFiles: BTreeSet::new(),
+        observed: deviceIDSet::default(),
+        helloMessages: BTreeMap::new(),
+        progressEmitter: true,
+        promotedConnID: String::new(),
+        promotionTimer: 0,
+        keyGen: 0,
+        indexHandlers: BTreeMap::new(),
+        globalRequestLimiter: 4,
+        mut_count: 0,
+        sdb: Arc::new(Mutex::new(sdb)),
+        evLogger: Vec::new(),
+        fatalChan: None,
     }
 }
 
@@ -1259,6 +1261,12 @@ pub(crate) fn NewModel() -> model {
     model::default()
 }
 
+pub(crate) fn NewModelWithRuntime(db_root: Option<PathBuf>, memory_cap_mb: Option<usize>) -> model {
+    let root = db_root.unwrap_or_else(runtime_db_root);
+    let cap_mb = memory_cap_mb.unwrap_or_else(runtime_db_memory_cap_mb);
+    model_with_runtime(root, cap_mb)
+}
+
 pub(crate) fn newFolderCompletion() -> FolderCompletion {
     FolderCompletion::default()
 }
@@ -1409,6 +1417,24 @@ mod tests {
         assert!(stats.contains_key("memoryBudgetBytes"));
         m.removeFolder("default");
         assert_eq!(m.State("default"), "idle");
+    }
+
+    #[test]
+    fn new_model_with_runtime_uses_explicit_root_and_memory_cap() {
+        let root = std::env::temp_dir().join(format!(
+            "syncthing-rs-runtime-config-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("mkdir");
+
+        let m = NewModelWithRuntime(Some(root.clone()), Some(7));
+        let db = m.sdb.lock().expect("lock db");
+        assert_eq!(db.runtime_root(), &root);
+        assert_eq!(db.memory_budget_bytes(), 7 * 1024 * 1024);
+
+        drop(db);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -75,5 +75,7 @@ fn usage() {
     eprintln!("usage:");
     eprintln!("  syncthing-rs scenario <scenario-id>");
     eprintln!("  syncthing-rs scenario-list");
-    eprintln!("  syncthing-rs daemon --folder-path <path> [--folder-id <id>] [--listen <addr>] [--once]");
+    eprintln!(
+        "  syncthing-rs daemon --folder-path <path> [--folder-id <id>] [--listen <addr>] [--db-root <path>] [--memory-max-mb <n>] [--max-peers <n>] [--once]"
+    );
 }

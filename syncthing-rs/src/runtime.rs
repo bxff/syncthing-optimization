@@ -334,32 +334,110 @@ fn start_api_server(addr: &str, runtime: DaemonApiRuntime) -> Result<thread::Joi
 }
 
 fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) -> ApiReply {
-    if method != &Method::Get {
-        return ApiReply::json(405, json!({ "error": "method not allowed" }));
-    }
-
     let (path, query) = split_url(url);
     match path {
-        "/rest/system/ping" => ApiReply::json(200, json!({ "ping": "pong" })),
-        "/rest/system/version" => ApiReply::json(
-            200,
-            json!({
-                "version": env!("CARGO_PKG_VERSION"),
-                "longVersion": format!("syncthing-rs {}", env!("CARGO_PKG_VERSION")),
-                "os": std::env::consts::OS,
-                "arch": std::env::consts::ARCH,
-            }),
-        ),
-        "/rest/system/status" => match system_status(runtime) {
-            Ok(payload) => ApiReply::json(200, payload),
-            Err(err) => ApiReply::json(500, json!({ "error": err })),
-        },
+        "/rest/system/ping" => {
+            if method != &Method::Get {
+                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+            }
+            ApiReply::json(200, json!({ "ping": "pong" }))
+        }
+        "/rest/system/version" => {
+            if method != &Method::Get {
+                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+            }
+            ApiReply::json(
+                200,
+                json!({
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "longVersion": format!("syncthing-rs {}", env!("CARGO_PKG_VERSION")),
+                    "os": std::env::consts::OS,
+                    "arch": std::env::consts::ARCH,
+                }),
+            )
+        }
+        "/rest/system/status" => {
+            if method != &Method::Get {
+                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+            }
+            match system_status(runtime) {
+                Ok(payload) => ApiReply::json(200, payload),
+                Err(err) => ApiReply::json(500, json!({ "error": err })),
+            }
+        }
+        "/rest/system/connections" => {
+            if method != &Method::Get {
+                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+            }
+            match system_connections(runtime) {
+                Ok(payload) => ApiReply::json(200, payload),
+                Err(err) => ApiReply::json(500, json!({ "error": err })),
+            }
+        }
         "/rest/db/status" => {
+            if method != &Method::Get {
+                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+            }
             let params = parse_query(query);
             let Some(folder) = params.get("folder") else {
                 return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
             };
             match folder_status(runtime, folder) {
+                Ok(payload) => ApiReply::json(200, payload),
+                Err(ApiFolderStatusError::MissingFolder) => {
+                    ApiReply::json(404, json!({ "error": "folder not found", "folder": folder }))
+                }
+                Err(ApiFolderStatusError::Internal(err)) => {
+                    ApiReply::json(500, json!({ "error": err }))
+                }
+            }
+        }
+        "/rest/db/jobs" => {
+            if method != &Method::Get {
+                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+            }
+            let params = parse_query(query);
+            let Some(folder) = params.get("folder") else {
+                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+            };
+            match folder_jobs(runtime, folder) {
+                Ok(payload) => ApiReply::json(200, payload),
+                Err(ApiFolderStatusError::MissingFolder) => {
+                    ApiReply::json(404, json!({ "error": "folder not found", "folder": folder }))
+                }
+                Err(ApiFolderStatusError::Internal(err)) => {
+                    ApiReply::json(500, json!({ "error": err }))
+                }
+            }
+        }
+        "/rest/db/scan" => {
+            if method != &Method::Post {
+                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+            }
+            let params = parse_query(query);
+            let Some(folder) = params.get("folder") else {
+                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+            };
+            let subdirs = parse_subdirs(&params);
+            match scan_folder(runtime, folder, &subdirs) {
+                Ok(payload) => ApiReply::json(200, payload),
+                Err(ApiFolderStatusError::MissingFolder) => {
+                    ApiReply::json(404, json!({ "error": "folder not found", "folder": folder }))
+                }
+                Err(ApiFolderStatusError::Internal(err)) => {
+                    ApiReply::json(500, json!({ "error": err }))
+                }
+            }
+        }
+        "/rest/db/pull" => {
+            if method != &Method::Post {
+                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+            }
+            let params = parse_query(query);
+            let Some(folder) = params.get("folder") else {
+                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+            };
+            match pull_folder(runtime, folder) {
                 Ok(payload) => ApiReply::json(200, payload),
                 Err(ApiFolderStatusError::MissingFolder) => {
                     ApiReply::json(404, json!({ "error": "folder not found", "folder": folder }))
@@ -396,6 +474,19 @@ fn parse_query(query: &str) -> BTreeMap<String, String> {
         out.insert(key.to_string(), value.to_string());
     }
     out
+}
+
+fn parse_subdirs(params: &BTreeMap<String, String>) -> Vec<String> {
+    params
+        .get("sub")
+        .map(|v| {
+            v.split(',')
+                .map(str::trim)
+                .filter(|segment| !segment.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
 
 fn system_status(runtime: &DaemonApiRuntime) -> Result<Value, String> {
@@ -439,6 +530,33 @@ fn system_status(runtime: &DaemonApiRuntime) -> Result<Value, String> {
     }))
 }
 
+fn system_connections(runtime: &DaemonApiRuntime) -> Result<Value, String> {
+    let guard = runtime
+        .model
+        .lock()
+        .map_err(|_| "model lock poisoned".to_string())?;
+    let mut connections = BTreeMap::new();
+    for (device, conn) in &guard.connections {
+        connections.insert(
+            device.clone(),
+            json!({
+                "address": conn.Address,
+                "type": conn.Type,
+                "crypto": conn.Crypto,
+                "connected": conn.Connected,
+                "paused": conn.Paused,
+                "primary": conn.Primary,
+                "secondary": conn.Secondary,
+                "clientVersion": conn.ClientVersion,
+            }),
+        );
+    }
+    Ok(json!({
+        "total": connections.len(),
+        "connections": connections,
+    }))
+}
+
 enum ApiFolderStatusError {
     MissingFolder,
     Internal(String),
@@ -470,6 +588,107 @@ fn folder_status(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiF
         "needBytes": need_bytes,
         "receiveOnlyChangedFiles": receive_only_files,
         "receiveOnlyChangedBytes": receive_only_bytes,
+        "stats": stats,
+    }))
+}
+
+fn folder_jobs(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiFolderStatusError> {
+    let guard = runtime
+        .model
+        .lock()
+        .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
+    if !guard.folderCfgs.contains_key(folder) {
+        return Err(ApiFolderStatusError::MissingFolder);
+    }
+    let jobs = guard
+        .folderRunners
+        .get(folder)
+        .ok_or(ApiFolderStatusError::MissingFolder)?
+        .Jobs();
+    let stats = guard.FolderStatistics(folder);
+    Ok(json!({
+        "folder": folder,
+        "state": guard.State(folder),
+        "jobs": jobs,
+        "stats": stats,
+    }))
+}
+
+fn scan_folder(
+    runtime: &DaemonApiRuntime,
+    folder: &str,
+    subdirs: &[String],
+) -> Result<Value, ApiFolderStatusError> {
+    let mut guard = runtime
+        .model
+        .lock()
+        .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
+    if !guard.folderCfgs.contains_key(folder) {
+        return Err(ApiFolderStatusError::MissingFolder);
+    }
+    let scan_result = if subdirs.is_empty() {
+        guard.ScanFolder(folder)
+    } else {
+        guard.ScanFolderSubdirs(folder, subdirs)
+    };
+    if let Err(err) = scan_result {
+        return Err(ApiFolderStatusError::Internal(err));
+    }
+    guard.serve();
+    let sequence = guard.Sequence(folder);
+    let state = guard.State(folder);
+    let jobs = guard
+        .folderRunners
+        .get(folder)
+        .ok_or(ApiFolderStatusError::MissingFolder)?
+        .Jobs();
+    let stats = guard.FolderStatistics(folder);
+    Ok(json!({
+        "folder": folder,
+        "scannedSubdirs": subdirs,
+        "sequence": sequence,
+        "state": state,
+        "jobs": jobs,
+        "stats": stats,
+    }))
+}
+
+fn pull_folder(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiFolderStatusError> {
+    let mut guard = runtime
+        .model
+        .lock()
+        .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
+    if !guard.folderCfgs.contains_key(folder) {
+        return Err(ApiFolderStatusError::MissingFolder);
+    }
+    {
+        let runner = guard
+            .folderRunners
+            .get_mut(folder)
+            .ok_or(ApiFolderStatusError::MissingFolder)?;
+        runner.SchedulePull();
+    }
+    guard.serve();
+    let runner = guard
+        .folderRunners
+        .get(folder)
+        .ok_or(ApiFolderStatusError::MissingFolder)?;
+    let pull = runner.PullStats();
+    let jobs = runner.Jobs();
+    let stats = guard.FolderStatistics(folder);
+    Ok(json!({
+        "folder": folder,
+        "state": guard.State(folder),
+        "sequence": guard.Sequence(folder),
+        "pull": {
+            "neededFiles": pull.needed_files,
+            "totalBlocks": pull.total_blocks,
+            "reusedSamePathBlocks": pull.reused_same_path_blocks,
+            "fetchedBlocks": pull.fetched_blocks,
+            "throttled": pull.throttled,
+            "hardBlocked": pull.hard_blocked,
+        },
+        "jobs": jobs,
         "stats": stats,
     }))
 }
@@ -637,6 +856,7 @@ fn write_frame(writer: &mut impl Write, message: &BepMessage) -> Result<(), Stri
 mod tests {
     use super::*;
     use crate::bep::{default_exchange, BepMessage};
+    use crate::db;
     use serde_json::Value;
     use std::fs;
     use std::net::{Shutdown, TcpStream};
@@ -877,6 +1097,125 @@ mod tests {
         assert!(payload["stats"].is_object());
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn api_system_connections_returns_empty_map() {
+        let runtime = test_api_runtime(
+            Arc::new(Mutex::new(NewModel())),
+            vec![FolderSpec {
+                id: "default".to_string(),
+                path: "/tmp/default".to_string(),
+            }],
+            0,
+        );
+        let reply = build_api_response(&Method::Get, "/rest/system/connections", &runtime);
+        assert_eq!(reply.status_code, StatusCode(200));
+        let payload: Value = serde_json::from_slice(&reply.body).expect("decode json");
+        assert_eq!(payload["total"], 0);
+        assert!(payload["connections"].is_object());
+    }
+
+    #[test]
+    fn api_db_scan_and_jobs_endpoints_work() {
+        let root = temp_root("api-db-scan-jobs");
+        fs::write(root.join("a.txt"), b"hello").expect("write");
+        let model = Arc::new(Mutex::new(NewModelWithRuntime(Some(root.clone()), Some(50))));
+        {
+            let mut guard = model.lock().expect("lock");
+            guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+        }
+
+        let runtime = test_api_runtime(
+            model,
+            vec![FolderSpec {
+                id: "default".to_string(),
+                path: root.to_string_lossy().to_string(),
+            }],
+            0,
+        );
+        let scan = build_api_response(
+            &Method::Post,
+            "/rest/db/scan?folder=default&sub=docs,images",
+            &runtime,
+        );
+        assert_eq!(scan.status_code, StatusCode(200));
+        let scan_payload: Value = serde_json::from_slice(&scan.body).expect("decode json");
+        assert_eq!(scan_payload["folder"], "default");
+        assert_eq!(scan_payload["state"], "running");
+        assert_eq!(scan_payload["scannedSubdirs"][0], "docs");
+        assert_eq!(scan_payload["scannedSubdirs"][1], "images");
+        assert!(scan_payload["jobs"].is_object());
+
+        let jobs = build_api_response(&Method::Get, "/rest/db/jobs?folder=default", &runtime);
+        assert_eq!(jobs.status_code, StatusCode(200));
+        let jobs_payload: Value = serde_json::from_slice(&jobs.body).expect("decode json");
+        assert_eq!(jobs_payload["folder"], "default");
+        assert!(jobs_payload["jobs"].is_object());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn api_db_pull_endpoint_applies_remote_file() {
+        let root = temp_root("api-db-pull");
+        let model = Arc::new(Mutex::new(NewModelWithRuntime(Some(root.clone()), Some(50))));
+        {
+            let mut guard = model.lock().expect("lock");
+            guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+            guard
+                .Index(
+                    "default",
+                    &[db::FileInfo {
+                        folder: "default".to_string(),
+                        path: "remote.bin".to_string(),
+                        sequence: 1,
+                        modified_ns: 1,
+                        size: 9,
+                        deleted: false,
+                        ignored: false,
+                        local_flags: 0,
+                        file_type: db::FileInfoType::File,
+                        block_hashes: vec!["a".to_string()],
+                    }],
+                )
+                .expect("index remote");
+        }
+
+        let runtime = test_api_runtime(
+            model,
+            vec![FolderSpec {
+                id: "default".to_string(),
+                path: root.to_string_lossy().to_string(),
+            }],
+            0,
+        );
+        let pull = build_api_response(&Method::Post, "/rest/db/pull?folder=default", &runtime);
+        assert_eq!(pull.status_code, StatusCode(200));
+        let pull_payload: Value = serde_json::from_slice(&pull.body).expect("decode json");
+        assert_eq!(pull_payload["folder"], "default");
+        assert!(pull_payload["pull"]["neededFiles"].as_u64().unwrap_or(0) >= 1);
+
+        let meta = fs::metadata(root.join("remote.bin")).expect("metadata");
+        assert_eq!(meta.len(), 9);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn api_control_endpoints_reject_wrong_methods() {
+        let runtime = test_api_runtime(
+            Arc::new(Mutex::new(NewModel())),
+            vec![FolderSpec {
+                id: "default".to_string(),
+                path: "/tmp/default".to_string(),
+            }],
+            0,
+        );
+        let pull_get = build_api_response(&Method::Get, "/rest/db/pull?folder=default", &runtime);
+        assert_eq!(pull_get.status_code, StatusCode(405));
+        let status_post =
+            build_api_response(&Method::Post, "/rest/db/status?folder=default", &runtime);
+        assert_eq!(status_post.status_code, StatusCode(405));
     }
 
     #[test]

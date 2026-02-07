@@ -486,7 +486,8 @@ func scenarioWALFreeDurability() map[string]any {
 	return baseScenario("wal-free-durability", map[string]any{
 		"file_count":              2,
 		"deleted_tombstone_count": 1,
-		"journal_file":            "events.log",
+		"manifest_file":           "MANIFEST",
+		"active_segment":          "CSEG-00000001.log",
 		"paths":                   []string{"one.txt", "two.txt"},
 	})
 }

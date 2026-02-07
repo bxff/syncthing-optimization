@@ -4,7 +4,7 @@ use crate::folder_modes::all_mode_actions;
 use crate::index_engine::{FolderUpdate, IndexEngine};
 use crate::model_core::{newFolderConfiguration, NewModel};
 use crate::planner::{classify_paths, compute_need, VersionedFile};
-use crate::store::{FileMetadata, PageCursor, Store, StoreConfig, JOURNAL_FILE_NAME};
+use crate::store::{FileMetadata, PageCursor, Store, StoreConfig, MANIFEST_FILE_NAME};
 use crate::walker::{walk_deterministic, WalkConfig};
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
@@ -434,13 +434,19 @@ fn scenario_wal_free_durability() -> Result<Value, String> {
 
     let store = Store::open(StoreConfig::new(&root)).map_err(err_to_string)?;
     let stats = store.stats();
+    let active_segment = store
+        .journal_path()
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
     let out = json!({
         "scenario": "wal-free-durability",
         "source": "rust",
         "status": "validated",
         "file_count": store.file_count(),
         "deleted_tombstone_count": stats.deleted_tombstone_count,
-        "journal_file": JOURNAL_FILE_NAME,
+        "manifest_file": MANIFEST_FILE_NAME,
+        "active_segment": active_segment,
         "paths": store
             .all_files_lexicographic()
             .into_iter()

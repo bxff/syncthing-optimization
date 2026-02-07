@@ -1,7 +1,8 @@
 {
+  "active_segment": "CSEG-00000001.log",
   "deleted_tombstone_count": 1,
   "file_count": 2,
-  "journal_file": "events.log",
+  "manifest_file": "MANIFEST",
   "paths": [
     "one.txt",
     "two.txt"

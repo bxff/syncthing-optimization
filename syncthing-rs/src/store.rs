@@ -9,8 +9,15 @@ use std::path::{Path, PathBuf};
 
 const LOG_RECORD_MAX_BYTES: u32 = 32 * 1024 * 1024;
 pub(crate) const JOURNAL_FILE_NAME: &str = "events.log";
+pub(crate) const MANIFEST_FILE_NAME: &str = "MANIFEST";
 const BLOCK_BLOB_FILE_NAME: &str = "blocks.blob";
 const BLOCK_BLOB_MARKER_PREFIX: &str = "__stblob__:";
+const MANIFEST_TMP_FILE_NAME: &str = "MANIFEST.tmp";
+const COMMIT_SEGMENT_PREFIX: &str = "CSEG-";
+const COMMIT_SEGMENT_SUFFIX: &str = ".log";
+const COMPACT_SEGMENT_TMP_NAME: &str = "CSEG-compact.tmp";
+const MANIFEST_SCHEMA_VERSION: u32 = 1;
+const ACTIVE_SEGMENT_ROTATE_BYTES: u64 = 8 * 1024 * 1024;
 const KEY_SEP: char = '\u{001f}';
 const PATH_SEG_SEP: char = '\u{001e}';
 
@@ -71,6 +78,8 @@ pub(crate) struct StoreStats {
 #[derive(Debug)]
 pub(crate) struct Store {
     config: StoreConfig,
+    manifest_path: PathBuf,
+    manifest: StoreManifest,
     journal_path: PathBuf,
     block_blob_path: PathBuf,
     files: BTreeMap<String, FileMetadata>,
@@ -102,16 +111,29 @@ enum JournalOp {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct StoreManifest {
+    schema_version: u32,
+    segments: Vec<String>,
+    active_segment: String,
+    next_segment_id: u64,
+}
+
 impl Store {
     pub(crate) fn open(config: StoreConfig) -> io::Result<Self> {
         fs::create_dir_all(&config.root)?;
-        let journal_path = config.root.join(JOURNAL_FILE_NAME);
-        let block_blob_path = config.root.join(BLOCK_BLOB_FILE_NAME);
-        if !journal_path.exists() {
-            let file = File::create(&journal_path)?;
-            file.sync_all()?;
-            sync_dir(&config.root)?;
+        let manifest_path = config.root.join(MANIFEST_FILE_NAME);
+        let manifest = load_or_init_manifest(&config.root, &manifest_path)?;
+        for segment in &manifest.segments {
+            let path = config.root.join(segment);
+            if !path.exists() {
+                let file = File::create(&path)?;
+                file.sync_all()?;
+            }
         }
+        sync_dir(&config.root)?;
+        let journal_path = config.root.join(&manifest.active_segment);
+        let block_blob_path = config.root.join(BLOCK_BLOB_FILE_NAME);
         // The block-hash blob cache is rebuilt from the authoritative journal at open time.
         let blob = OpenOptions::new()
             .create(true)
@@ -120,8 +142,9 @@ impl Store {
             .open(&block_blob_path)?;
         blob.sync_all()?;
 
-        let (files, deleted_tombstones, approx_memory_bytes) = Self::load_from_journal(
-            &journal_path,
+        let (files, deleted_tombstones, approx_memory_bytes) = Self::load_from_segments(
+            &config.root,
+            &manifest.segments,
             &block_blob_path,
             config.max_deleted_tombstones,
         )?;
@@ -139,6 +162,8 @@ impl Store {
 
         Ok(Self {
             config,
+            manifest_path,
+            manifest,
             journal_path,
             block_blob_path,
             files,
@@ -463,7 +488,7 @@ impl Store {
     }
 
     pub(crate) fn compact(&mut self) -> io::Result<()> {
-        let tmp = self.config.root.join("events.log.compact.tmp");
+        let tmp = self.config.root.join(COMPACT_SEGMENT_TMP_NAME);
         let mut file = File::create(&tmp)?;
 
         for record in self.files.values() {
@@ -485,12 +510,25 @@ impl Store {
         }
 
         file.sync_all()?;
-
-        if self.journal_path.exists() {
-            fs::remove_file(&self.journal_path)?;
-        }
-        fs::rename(&tmp, &self.journal_path)?;
         sync_dir(&self.config.root)?;
+
+        let compact_segment = self.allocate_next_segment_name();
+        let compact_segment_path = self.config.root.join(&compact_segment);
+        fs::rename(&tmp, &compact_segment_path)?;
+        sync_dir(&self.config.root)?;
+
+        let old_segments = self.manifest.segments.clone();
+        self.manifest.segments = vec![compact_segment.clone()];
+        self.manifest.active_segment = compact_segment;
+        persist_manifest(&self.config.root, &self.manifest_path, &self.manifest)?;
+        self.journal_path = compact_segment_path;
+
+        for old in old_segments {
+            let old_path = self.config.root.join(old);
+            if old_path != self.journal_path {
+                let _ = fs::remove_file(old_path);
+            }
+        }
 
         Ok(())
     }
@@ -508,13 +546,12 @@ impl Store {
         &self.journal_path
     }
 
-    fn load_from_journal(
-        path: &Path,
+    fn load_from_segments(
+        root: &Path,
+        segments: &[String],
         block_blob_path: &Path,
         max_tombstones: usize,
     ) -> io::Result<(BTreeMap<String, FileMetadata>, VecDeque<String>, usize)> {
-        let file = File::open(path)?;
-        let mut reader = BufReader::new(file);
         let mut block_blob = OpenOptions::new()
             .create(true)
             .append(true)
@@ -524,58 +561,102 @@ impl Store {
         let mut tombstone_set = HashSet::new();
         let mut payload_buf: Vec<u8> = Vec::new();
 
-        loop {
-            let mut hdr = [0_u8; 8];
-            match reader.read_exact(&mut hdr) {
-                Ok(()) => {}
-                Err(err) if err.kind() == ErrorKind::UnexpectedEof => break,
-                Err(err) => return Err(err),
+        for segment in segments {
+            let path = root.join(segment);
+            if !path.exists() {
+                return Err(io::Error::new(
+                    ErrorKind::NotFound,
+                    format!("manifest segment missing: {}", path.display()),
+                ));
             }
+            let file = File::open(path)?;
+            let mut reader = BufReader::new(file);
 
-            let len = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
-            let expected_checksum = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
+            loop {
+                let mut hdr = [0_u8; 8];
+                match reader.read_exact(&mut hdr) {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == ErrorKind::UnexpectedEof => break,
+                    Err(err) => return Err(err),
+                }
 
-            if len == 0 || len > LOG_RECORD_MAX_BYTES {
-                break;
+                let len = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
+                let expected_checksum = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
+
+                if len == 0 || len > LOG_RECORD_MAX_BYTES {
+                    break;
+                }
+
+                payload_buf.resize(len as usize, 0);
+                match reader.read_exact(&mut payload_buf) {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == ErrorKind::UnexpectedEof => break,
+                    Err(err) => return Err(err),
+                }
+
+                if checksum(&payload_buf) != expected_checksum {
+                    break;
+                }
+
+                let op = match decode_op(&payload_buf) {
+                    Some(op) => op,
+                    None => break,
+                };
+                apply_op(
+                    &mut files,
+                    &mut deleted_tombstones,
+                    &mut tombstone_set,
+                    max_tombstones,
+                    op,
+                    &mut block_blob,
+                )?;
             }
-
-            payload_buf.resize(len as usize, 0);
-            match reader.read_exact(&mut payload_buf) {
-                Ok(()) => {}
-                Err(err) if err.kind() == ErrorKind::UnexpectedEof => break,
-                Err(err) => return Err(err),
-            }
-
-            if checksum(&payload_buf) != expected_checksum {
-                break;
-            }
-
-            let op = match decode_op(&payload_buf) {
-                Some(op) => op,
-                None => break,
-            };
-            apply_op(
-                &mut files,
-                &mut deleted_tombstones,
-                &mut tombstone_set,
-                max_tombstones,
-                op,
-                &mut block_blob,
-            )?;
         }
 
         let approx_bytes = files.values().map(estimate_file_bytes).sum();
         Ok((files, deleted_tombstones, approx_bytes))
     }
 
-    fn append_op(&self, op: &JournalOp) -> io::Result<()> {
+    fn append_op(&mut self, op: &JournalOp) -> io::Result<()> {
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.journal_path)?;
         Self::write_record(&mut file, op)?;
         file.sync_data()?;
+        self.rotate_active_segment_if_needed()?;
         Ok(())
+    }
+
+    fn rotate_active_segment_if_needed(&mut self) -> io::Result<()> {
+        let size = fs::metadata(&self.journal_path)?.len();
+        if size < ACTIVE_SEGMENT_ROTATE_BYTES {
+            return Ok(());
+        }
+
+        let new_segment_name = self.allocate_next_segment_name();
+        let new_segment_path = self.config.root.join(&new_segment_name);
+        let file = File::create(&new_segment_path)?;
+        file.sync_all()?;
+
+        self.manifest.segments.push(new_segment_name.clone());
+        self.manifest.active_segment = new_segment_name;
+        persist_manifest(&self.config.root, &self.manifest_path, &self.manifest)?;
+        self.journal_path = new_segment_path;
+        Ok(())
+    }
+
+    fn allocate_next_segment_name(&mut self) -> String {
+        loop {
+            let candidate = format!(
+                "{COMMIT_SEGMENT_PREFIX}{:08}{COMMIT_SEGMENT_SUFFIX}",
+                self.manifest.next_segment_id
+            );
+            self.manifest.next_segment_id = self.manifest.next_segment_id.saturating_add(1);
+            if !self.manifest.segments.iter().any(|v| v == &candidate) {
+                return candidate;
+            }
+        }
     }
 
     fn write_record(file: &mut File, op: &JournalOp) -> io::Result<()> {
@@ -627,6 +708,132 @@ impl Store {
             }
         }
     }
+}
+
+fn load_or_init_manifest(root: &Path, manifest_path: &Path) -> io::Result<StoreManifest> {
+    if manifest_path.exists() {
+        let raw = fs::read_to_string(manifest_path)?;
+        let mut manifest: StoreManifest = serde_json::from_str(&raw).map_err(|err| {
+            io::Error::new(
+                ErrorKind::InvalidData,
+                format!("decode manifest {}: {err}", manifest_path.display()),
+            )
+        })?;
+        normalize_manifest(root, &mut manifest);
+        persist_manifest(root, manifest_path, &manifest)?;
+        return Ok(manifest);
+    }
+
+    let mut manifest = StoreManifest {
+        schema_version: MANIFEST_SCHEMA_VERSION,
+        segments: vec![JOURNAL_FILE_NAME.to_string()],
+        active_segment: JOURNAL_FILE_NAME.to_string(),
+        next_segment_id: 1,
+    };
+    normalize_manifest(root, &mut manifest);
+    persist_manifest(root, manifest_path, &manifest)?;
+    Ok(manifest)
+}
+
+fn normalize_manifest(root: &Path, manifest: &mut StoreManifest) {
+    manifest.schema_version = MANIFEST_SCHEMA_VERSION;
+
+    if manifest.segments.is_empty() {
+        manifest.segments.push(JOURNAL_FILE_NAME.to_string());
+    }
+    if manifest.active_segment.trim().is_empty() {
+        manifest.active_segment = manifest
+            .segments
+            .last()
+            .cloned()
+            .unwrap_or_else(|| JOURNAL_FILE_NAME.to_string());
+    }
+    if !manifest
+        .segments
+        .iter()
+        .any(|v| v == &manifest.active_segment)
+    {
+        manifest.segments.push(manifest.active_segment.clone());
+    }
+
+    let mut seen = HashSet::new();
+    manifest.segments.retain(|segment| seen.insert(segment.clone()));
+
+    let mut max_segment_id = 0_u64;
+    for segment in &manifest.segments {
+        if let Some(id) = parse_segment_id(segment) {
+            max_segment_id = max_segment_id.max(id);
+        }
+    }
+    if manifest.next_segment_id <= max_segment_id {
+        manifest.next_segment_id = max_segment_id.saturating_add(1);
+    }
+    if manifest.next_segment_id == 0 {
+        manifest.next_segment_id = 1;
+    }
+
+    // Manifest recovery path: if manifest was lost but segmented commits exist, include them.
+    let mut discovered = fs::read_dir(root)
+        .ok()
+        .into_iter()
+        .flat_map(|it| it.flatten())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if parse_segment_id(&name).is_some() {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    discovered.sort();
+    for segment in discovered {
+        if !manifest.segments.iter().any(|v| v == &segment) {
+            manifest.segments.push(segment);
+        }
+    }
+    if parse_segment_id(&manifest.active_segment).is_none() {
+        let active_exists = root.join(&manifest.active_segment).exists();
+        if !active_exists {
+            if let Some(last_segment) = manifest
+                .segments
+                .iter()
+                .filter(|name| parse_segment_id(name).is_some())
+                .max()
+                .cloned()
+            {
+                manifest.active_segment = last_segment;
+            }
+        }
+    }
+}
+
+fn parse_segment_id(name: &str) -> Option<u64> {
+    if !name.starts_with(COMMIT_SEGMENT_PREFIX) || !name.ends_with(COMMIT_SEGMENT_SUFFIX) {
+        return None;
+    }
+    let raw = &name[COMMIT_SEGMENT_PREFIX.len()..name.len() - COMMIT_SEGMENT_SUFFIX.len()];
+    raw.parse::<u64>().ok()
+}
+
+fn persist_manifest(root: &Path, manifest_path: &Path, manifest: &StoreManifest) -> io::Result<()> {
+    let tmp = root.join(MANIFEST_TMP_FILE_NAME);
+    let payload = serde_json::to_vec_pretty(manifest).map_err(|err| {
+        io::Error::new(
+            ErrorKind::InvalidData,
+            format!("encode manifest {}: {err}", manifest_path.display()),
+        )
+    })?;
+
+    {
+        let mut file = File::create(&tmp)?;
+        file.write_all(&payload)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+    }
+    fs::rename(&tmp, manifest_path)?;
+    sync_dir(root)?;
+    Ok(())
 }
 
 fn apply_op(
@@ -1134,6 +1341,11 @@ mod tests {
         }
     }
 
+    fn read_manifest(root: &Path) -> StoreManifest {
+        let raw = fs::read_to_string(root.join(MANIFEST_FILE_NAME)).expect("read manifest");
+        serde_json::from_str(&raw).expect("parse manifest")
+    }
+
     #[test]
     fn round_trip_recovery_and_lexicographic_prefix_scan() {
         let root = temp_root("roundtrip");
@@ -1229,6 +1441,54 @@ mod tests {
 
         assert_eq!(store.file_count(), 100);
         assert!(after_size <= before_size);
+        let manifest = read_manifest(&root);
+        assert_eq!(manifest.segments.len(), 1);
+        assert!(manifest.active_segment.starts_with(COMMIT_SEGMENT_PREFIX));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn creates_manifest_with_active_segment() {
+        let root = temp_root("manifest-init");
+        let cfg = StoreConfig::new(&root);
+        let _store = Store::open(cfg).expect("open");
+
+        let manifest = read_manifest(&root);
+        assert_eq!(manifest.schema_version, MANIFEST_SCHEMA_VERSION);
+        assert_eq!(manifest.active_segment, JOURNAL_FILE_NAME);
+        assert_eq!(manifest.segments, vec![JOURNAL_FILE_NAME.to_string()]);
+        assert_eq!(manifest.next_segment_id, 1);
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn rotates_active_segment_after_threshold() {
+        let root = temp_root("segment-rotation");
+        let cfg = StoreConfig::new(&root).with_memory_cap_mb(256);
+        let mut store = Store::open(cfg).expect("open");
+
+        let long_path_tail = "x".repeat(50_000);
+        let mut rotated = false;
+        for i in 0_u64..512 {
+            let path = format!("bulk/{i:04}-{long_path_tail}.bin");
+            store
+                .upsert_file(meta("alpha", &path, i + 1))
+                .expect("upsert");
+            if let Some(file_name) = store.journal_path.file_name() {
+                let file_name = file_name.to_string_lossy();
+                if file_name.starts_with(COMMIT_SEGMENT_PREFIX) {
+                    rotated = true;
+                    break;
+                }
+            }
+        }
+
+        assert!(rotated, "store should rotate into CSEG segment");
+        let manifest = read_manifest(&root);
+        assert!(manifest.segments.len() >= 2);
+        assert!(manifest.active_segment.starts_with(COMMIT_SEGMENT_PREFIX));
 
         fs::remove_dir_all(root).expect("cleanup");
     }

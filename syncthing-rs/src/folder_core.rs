@@ -1398,6 +1398,14 @@ pub(crate) struct sendReceiveFolder {
 }
 
 impl sendReceiveFolder {
+    fn resolve_abs_path(&self, path: &str) -> Result<Option<PathBuf>, String> {
+        if self.folder.config.path.trim().is_empty() {
+            return Ok(None);
+        }
+        let root = PathBuf::from(&self.folder.config.path);
+        safe_join_relative_path(&root, path).map(Some)
+    }
+
     pub(crate) fn BringToFront(&mut self) {
         self.folder.BringToFront();
     }
@@ -1409,6 +1417,7 @@ impl sendReceiveFolder {
         if path.contains("../") {
             return Err(errDirPrefix.to_string());
         }
+        let _ = self.resolve_abs_path(path)?;
         Ok(())
     }
 
@@ -1423,8 +1432,9 @@ impl sendReceiveFolder {
     pub(crate) fn copierRoutine(&mut self) -> usize {
         let mut copied = 0;
         while let Some(path) = self.queue.pop_front() {
-            if self.copyBlock(&path).is_ok() {
-                copied += 1;
+            match self.copyBlock(&path) {
+                Ok(()) => copied += 1,
+                Err(err) => self.tempPullErrors.push(self.newPullError(&path, &err)),
             }
         }
         copied
@@ -1436,15 +1446,42 @@ impl sendReceiveFolder {
     }
 
     pub(crate) fn copyBlockFromFile(&mut self, path: &str) -> Result<(), String> {
-        self.withLimiter(path.len())?;
-        self.blockPullReorderer.insert(path.to_string(), path.len());
+        let reservation = path.len().max(1);
+        self.withLimiter(reservation)?;
+        if let Some(abs) = self.resolve_abs_path(path)? {
+            match fs::metadata(&abs) {
+                Ok(meta) => {
+                    if meta.is_dir() {
+                        return Err(errUnexpectedDirOnFileDel.to_string());
+                    }
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(errNotAvailable.to_string());
+                }
+                Err(err) => return Err(format!("stat {}: {err}", abs.display())),
+            }
+        }
+        self.blockPullReorderer.insert(path.to_string(), reservation);
         Ok(())
     }
 
     pub(crate) fn copyBlockFromFolder(&mut self, path: &str) -> Result<(), String> {
-        self.withLimiter(path.len() / 2 + 1)?;
-        self.blockPullReorderer
-            .insert(path.to_string(), path.len() / 2 + 1);
+        let reservation = path.len() / 2 + 1;
+        self.withLimiter(reservation)?;
+        if let Some(abs) = self.resolve_abs_path(path)? {
+            if abs.exists() && abs.is_dir() {
+                return Err(errUnexpectedDirOnFileDel.to_string());
+            }
+            if let Some(parent) = abs.parent() {
+                fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+            }
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&abs)
+                .map_err(|e| format!("open {}: {e}", abs.display()))?;
+        }
+        self.blockPullReorderer.insert(path.to_string(), reservation);
         Ok(())
     }
 
@@ -1464,11 +1501,46 @@ impl sendReceiveFolder {
         if path.is_empty() {
             return Err(errDirNotEmpty.to_string());
         }
+        let Some(abs) = self.resolve_abs_path(path)? else {
+            return Ok(());
+        };
+        match fs::symlink_metadata(&abs) {
+            Ok(meta) => {
+                if !meta.is_dir() {
+                    return Err(errUnexpectedDirOnFileDel.to_string());
+                }
+                let mut entries =
+                    fs::read_dir(&abs).map_err(|e| format!("read dir {}: {e}", abs.display()))?;
+                if entries.next().is_some() {
+                    return Err(errDirNotEmpty.to_string());
+                }
+                fs::remove_dir(&abs).map_err(|e| format!("remove dir {}: {e}", abs.display()))?;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(format!("stat {}: {err}", abs.display())),
+        }
         Ok(())
     }
 
     pub(crate) fn deleteDirOnDiskHandleChildren(&mut self, path: &str) -> Result<(), String> {
-        self.deleteDirOnDisk(path)
+        if path.is_empty() {
+            return Err(errDirNotEmpty.to_string());
+        }
+        let Some(abs) = self.resolve_abs_path(path)? else {
+            return Ok(());
+        };
+        match fs::symlink_metadata(&abs) {
+            Ok(meta) => {
+                if !meta.is_dir() {
+                    return Err(errUnexpectedDirOnFileDel.to_string());
+                }
+                fs::remove_dir_all(&abs)
+                    .map_err(|e| format!("remove dir tree {}: {e}", abs.display()))?;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(format!("stat {}: {err}", abs.display())),
+        }
+        Ok(())
     }
 
     pub(crate) fn deleteFile(&mut self, path: &str) -> Result<(), String> {
@@ -1479,10 +1551,34 @@ impl sendReceiveFolder {
         if path.ends_with('/') {
             return Err(errUnexpectedDirOnFileDel.to_string());
         }
+        let Some(abs) = self.resolve_abs_path(path)? else {
+            return Ok(());
+        };
+        match fs::symlink_metadata(&abs) {
+            Ok(meta) => {
+                if meta.is_dir() {
+                    return Err(errUnexpectedDirOnFileDel.to_string());
+                }
+                fs::remove_file(&abs).map_err(|e| format!("remove file {}: {e}", abs.display()))?;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(format!("stat {}: {err}", abs.display())),
+        }
         Ok(())
     }
 
     pub(crate) fn deleteItemOnDisk(&mut self, path: &str) -> Result<(), String> {
+        if let Some(abs) = self.resolve_abs_path(path)? {
+            match fs::symlink_metadata(&abs) {
+                Ok(meta) => {
+                    if meta.is_dir() {
+                        return self.deleteDirOnDiskHandleChildren(path);
+                    }
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(err) => return Err(format!("stat {}: {err}", abs.display())),
+            }
+        }
         self.deleteFile(path)
     }
 
@@ -1491,7 +1587,11 @@ impl sendReceiveFolder {
     }
 
     pub(crate) fn handleDir(&mut self, path: &str) -> Result<(), String> {
-        self.checkParent(path)
+        self.checkParent(path)?;
+        if let Some(abs) = self.resolve_abs_path(path)? {
+            ensure_directory_path(&abs)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn handleFile(&mut self, path: &str) -> Result<(), String> {
@@ -1506,6 +1606,26 @@ impl sendReceiveFolder {
     pub(crate) fn handleSymlinkCheckExisting(&mut self, path: &str) -> Result<(), String> {
         if path.ends_with('/') {
             return Err(errIncompatibleSymlink.to_string());
+        }
+        if let Some(abs) = self.resolve_abs_path(path)? {
+            if let Some(parent) = abs.parent() {
+                fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+            }
+            match fs::symlink_metadata(&abs) {
+                Ok(meta) => {
+                    if meta.is_dir() {
+                        fs::remove_dir_all(&abs)
+                            .map_err(|e| format!("remove dir {}: {e}", abs.display()))?;
+                    }
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(format!("stat {}: {err}", abs.display())),
+            }
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&abs)
+                .map_err(|e| format!("open {}: {e}", abs.display()))?;
         }
         Ok(())
     }
@@ -1585,7 +1705,18 @@ impl sendReceiveFolder {
     }
 
     pub(crate) fn renameFile(&self, old_name: &str, new_name: &str) -> Option<(String, String)> {
-        self.folder.findRename(old_name, new_name)
+        let renamed = self.folder.findRename(old_name, new_name)?;
+        let old_abs = self.resolve_abs_path(&renamed.0).ok().flatten();
+        let new_abs = self.resolve_abs_path(&renamed.1).ok().flatten();
+        if let (Some(old_abs), Some(new_abs)) = (old_abs, new_abs) {
+            if let Some(parent) = new_abs.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if old_abs.exists() {
+                let _ = fs::rename(old_abs, new_abs);
+            }
+        }
+        Some(renamed)
     }
 
     pub(crate) fn reuseBlocks(&mut self, candidate: &str) -> bool {
@@ -1866,6 +1997,76 @@ mod tests {
         f.pullBlock("a.txt").expect("queue");
         let copied = f.pullerRoutine().expect("puller");
         assert_eq!(copied, 1);
+    }
+
+    #[test]
+    fn sendrecv_applies_disk_mutations_for_file_and_dir_paths() {
+        let root = temp_root("sendrecv-disk-mutations");
+        let db = Arc::new(Mutex::new(db::WalFreeDb::default()));
+        let mut f = newSendReceiveFolder(scan_cfg(&root), db);
+
+        f.handleDir("dir/sub").expect("create dir");
+        f.handleFile("dir/sub/a.txt").expect("queue file");
+        let copied = f.pullerRoutine().expect("apply queued writes");
+        assert_eq!(copied, 1);
+        assert!(root.join("dir").join("sub").join("a.txt").exists());
+
+        f.deleteFile("dir/sub/a.txt").expect("delete file");
+        assert!(!root.join("dir").join("sub").join("a.txt").exists());
+
+        fs::create_dir_all(root.join("dir").join("sub").join("nested")).expect("mkdir nested");
+        fs::write(root.join("dir").join("sub").join("nested").join("x.txt"), b"x")
+            .expect("write nested");
+        let err = f.deleteDirOnDisk("dir/sub").expect_err("must reject non-empty dir");
+        assert_eq!(err, errDirNotEmpty);
+        f.deleteDirOnDiskHandleChildren("dir/sub")
+            .expect("recursive delete");
+        assert!(!root.join("dir").join("sub").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sendrecv_rename_file_updates_disk_state() {
+        let root = temp_root("sendrecv-rename");
+        let db = Arc::new(Mutex::new(db::WalFreeDb::default()));
+        let f = newSendReceiveFolder(scan_cfg(&root), db);
+
+        let old_path = root.join("old.txt");
+        let new_path = root.join("new").join("name.txt");
+        fs::write(&old_path, b"data").expect("write old file");
+        let renamed = f
+            .renameFile("old.txt", "new/name.txt")
+            .expect("rename result");
+        assert_eq!(
+            renamed,
+            ("old.txt".to_string(), "new/name.txt".to_string())
+        );
+        assert!(!old_path.exists());
+        assert!(new_path.exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sendrecv_records_copy_errors_when_disk_target_is_directory() {
+        let root = temp_root("sendrecv-copy-errors");
+        let db = Arc::new(Mutex::new(db::WalFreeDb::default()));
+        let mut f = newSendReceiveFolder(scan_cfg(&root), db);
+
+        fs::create_dir_all(root.join("dir")).expect("mkdir dir");
+        f.pullBlock("dir").expect("queue target");
+        let err = f.pullerRoutine().expect_err("must fail");
+        assert_eq!(err, errNotAvailable);
+        assert_eq!(f.tempPullErrors.len(), 1);
+        assert_eq!(f.tempPullErrors[0].Path, "dir");
+        assert!(
+            f.tempPullErrors[0].Err.contains(errUnexpectedDirOnFileDel),
+            "expected directory-copy failure, got {}",
+            f.tempPullErrors[0].Err
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

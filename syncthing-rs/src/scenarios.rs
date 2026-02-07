@@ -1,8 +1,9 @@
 use crate::bep::{decode_frame, default_exchange, encode_frame, message_name};
-use crate::config::demo_configs;
+use crate::config::{demo_configs, MemoryPolicy};
+use crate::db;
 use crate::folder_modes::all_mode_actions;
 use crate::index_engine::{FolderUpdate, IndexEngine};
-use crate::model_core::{newFolderConfiguration, NewModel};
+use crate::model_core::{newFolderConfiguration, NewModel, NewModelWithRuntime};
 use crate::planner::{classify_paths, compute_need, VersionedFile};
 use crate::store::{FileMetadata, PageCursor, Store, StoreConfig, MANIFEST_FILE_NAME};
 use crate::walker::{walk_deterministic, WalkConfig};
@@ -21,6 +22,7 @@ pub(crate) fn run_scenario_snapshot(id: &str) -> Result<Value, String> {
         "protocol-state-transition" => scenario_protocol_state_transition(),
         "path-order-invariant" => scenario_path_order_invariant(),
         "memory-cap-50mb" => scenario_memory_cap_50mb(),
+        "memory-cap-diagnostics" => scenario_memory_cap_diagnostics(),
         "wal-free-durability" => scenario_wal_free_durability(),
         "crash-recovery" => scenario_crash_recovery(),
         _ => Err(format!("unknown scenario id: {id}")),
@@ -36,6 +38,7 @@ pub(crate) fn scenario_ids() -> &'static [&'static str] {
         "protocol-state-transition",
         "path-order-invariant",
         "memory-cap-50mb",
+        "memory-cap-diagnostics",
         "wal-free-durability",
         "crash-recovery",
     ]
@@ -406,6 +409,66 @@ fn scenario_memory_cap_50mb() -> Result<Value, String> {
         "scanned_entries": scanned_entries,
         "page_count": page_count,
         "under_budget": stats.estimated_memory_bytes <= stats.memory_budget_bytes
+    });
+
+    cleanup(root);
+    Ok(out)
+}
+
+fn scenario_memory_cap_diagnostics() -> Result<Value, String> {
+    let root = scenario_root("memory-cap-diagnostics")?;
+    let folder_root = root.join("folder");
+    fs::create_dir_all(&folder_root).map_err(err_to_string)?;
+
+    let mut model = NewModelWithRuntime(Some(root.join("runtime-db")), Some(128));
+    let mut cfg = newFolderConfiguration("default", &folder_root.to_string_lossy());
+    cfg.memory_policy = MemoryPolicy::Fail;
+    cfg.memory_max_mb = 1;
+    model.newFolder(cfg);
+
+    let large_hashes = (0..35_000)
+        .map(|_| "0123456789abcdef0123456789abcdef".to_string())
+        .collect::<Vec<_>>();
+    let remote = db::FileInfo {
+        folder: "default".to_string(),
+        path: "hot.bin".to_string(),
+        sequence: 1,
+        modified_ns: 1,
+        size: 1,
+        deleted: false,
+        ignored: false,
+        local_flags: 0,
+        file_type: db::FileInfoType::File,
+        block_hashes: large_hashes,
+    };
+    model.Index("default", &[remote])?;
+    let _ = model
+        .folderRunners
+        .get_mut("default")
+        .ok_or_else(|| "missing folder runner".to_string())?
+        .pull();
+
+    let stats = model.FolderStatistics("default");
+    let report = stats
+        .get("memoryCapViolationReport")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let out = json!({
+        "scenario": "memory-cap-diagnostics",
+        "source": "rust",
+        "status": "validated",
+        "structured_report_present": !report.is_empty(),
+        "hard_block_events": stats.get("memoryHardBlockEvents").and_then(Value::as_u64).unwrap_or_default(),
+        "runtime_hard_block_events": stats.get("memoryRuntimeHardBlockEvents").and_then(Value::as_u64).unwrap_or_default(),
+        "report": {
+            "folder": report.get("folder").and_then(Value::as_str).unwrap_or_default(),
+            "subsystem": report.get("subsystem").and_then(Value::as_str).unwrap_or_default(),
+            "policy": report.get("policy").and_then(Value::as_str).unwrap_or_default(),
+            "budget_bytes": report.get("budgetBytes").and_then(Value::as_u64).unwrap_or_default(),
+            "queue_items": report.get("queueItems").and_then(Value::as_u64).unwrap_or_default(),
+            "query_limit": report.get("queryLimit").and_then(Value::as_u64).unwrap_or_default()
+        }
     });
 
     cleanup(root);

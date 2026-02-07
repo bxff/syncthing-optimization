@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-02-07T15:03:41Z",
+  "generated_at": "2026-02-07T15:25:17Z",
   "produced_by": "parity-harness",
   "match": true,
   "mismatches": [],
@@ -43,6 +43,13 @@
     {
       "id": "memory-cap-50mb",
       "severity": "P0",
+      "required": true,
+      "status": "pass",
+      "message": "go and rust outputs match"
+    },
+    {
+      "id": "memory-cap-diagnostics",
+      "severity": "P1",
       "required": true,
       "status": "pass",
       "message": "go and rust outputs match"

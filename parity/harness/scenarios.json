@@ -236,6 +236,39 @@
       }
     },
     {
+      "id": "memory-cap-diagnostics",
+      "description": "Validate structured memory cap diagnostics are emitted on hard cap events.",
+      "severity": "P1",
+      "required": true,
+      "tags": [
+        "memory-cap"
+      ],
+      "comparator": "json-equal",
+      "go": {
+        "command": [
+          "go",
+          "run",
+          "./script/parity_harness_go.go",
+          "scenario",
+          "memory-cap-diagnostics"
+        ],
+        "snapshot_path": "parity/harness/snapshots/go-memory-cap-diagnostics.json"
+      },
+      "rust": {
+        "command": [
+          "cargo",
+          "run",
+          "--quiet",
+          "--manifest-path",
+          "syncthing-rs/Cargo.toml",
+          "--",
+          "scenario",
+          "memory-cap-diagnostics"
+        ],
+        "snapshot_path": "parity/harness/snapshots/rust-memory-cap-diagnostics.json"
+      }
+    },
+    {
       "id": "wal-free-durability",
       "description": "Validate WAL-free store durability semantics under normal operation.",
       "severity": "P0",

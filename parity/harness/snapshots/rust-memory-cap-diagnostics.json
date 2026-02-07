@@ -1,0 +1,16 @@
+{
+  "hard_block_events": 1,
+  "report": {
+    "budget_bytes": 1048576,
+    "folder": "default",
+    "policy": "fail",
+    "query_limit": 1024,
+    "queue_items": 1,
+    "subsystem": "pull-runtime-budget"
+  },
+  "runtime_hard_block_events": 1,
+  "scenario": "memory-cap-diagnostics",
+  "source": "rust",
+  "status": "validated",
+  "structured_report_present": true
+}

@@ -58,6 +58,7 @@ func scenarioIDs() []string {
 		"protocol-state-transition",
 		"path-order-invariant",
 		"memory-cap-50mb",
+		"memory-cap-diagnostics",
 		"wal-free-durability",
 		"crash-recovery",
 	}
@@ -79,6 +80,8 @@ func runScenarioSnapshot(id string) (map[string]any, error) {
 		return scenarioPathOrderInvariant(), nil
 	case "memory-cap-50mb":
 		return scenarioMemoryCap50MB(), nil
+	case "memory-cap-diagnostics":
+		return scenarioMemoryCapDiagnostics(), nil
 	case "wal-free-durability":
 		return scenarioWALFreeDurability(), nil
 	case "crash-recovery":
@@ -479,6 +482,22 @@ func scenarioMemoryCap50MB() map[string]any {
 		"scanned_entries":        files,
 		"page_count":             10,
 		"under_budget":           estimated <= budget,
+	})
+}
+
+func scenarioMemoryCapDiagnostics() map[string]any {
+	return baseScenario("memory-cap-diagnostics", map[string]any{
+		"structured_report_present": true,
+		"hard_block_events":         1,
+		"runtime_hard_block_events": 1,
+		"report": map[string]any{
+			"folder":       "default",
+			"subsystem":    "pull-runtime-budget",
+			"policy":       "fail",
+			"budget_bytes": 1 * 1024 * 1024,
+			"queue_items":  1,
+			"query_limit":  1024,
+		},
 	})
 }
 

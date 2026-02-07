@@ -377,6 +377,14 @@ func runCheck(args []string) {
 	if err != nil {
 		fatalf("read exceptions: %v", err)
 	}
+	sources, err := resolveSources(sourcePatterns)
+	if err != nil {
+		fatalf("resolve sources: %v", err)
+	}
+	generatedFeatures, err := generateFeatures(sources)
+	if err != nil {
+		fatalf("generate features: %v", err)
+	}
 
 	mappingByID := make(map[string]mappingItem, len(mapping.Items))
 	for _, it := range mapping.Items {
@@ -395,6 +403,7 @@ func runCheck(args []string) {
 	testEvidence := loadRequiredTestEvidence(&report)
 
 	validateExceptions(&report, exceptions, *mode)
+	validateManifestAgainstGeneratedFeatures(&report, manifest, generatedFeatures)
 
 	for _, feat := range manifest.Items {
 		mi, ok := mappingByID[feat.ID]
@@ -910,6 +919,66 @@ func loadRequiredTestEvidence(report *guardrailReport) requiredTestEvidence {
 		ev.ScenarioOutcome[id] = strings.TrimSpace(sc.Status)
 	}
 	return ev
+}
+
+func validateManifestAgainstGeneratedFeatures(report *guardrailReport, manifest featureManifest, generated []featureItem) {
+	generatedByID := make(map[string]featureItem, len(generated))
+	for _, feat := range generated {
+		generatedByID[feat.ID] = feat
+	}
+
+	manifestByID := make(map[string]featureItem, len(manifest.Items))
+	for _, feat := range manifest.Items {
+		if strings.TrimSpace(feat.ID) == "" {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "manifest-shape",
+				Path:    "parity/feature-manifest.json",
+				Message: "feature is missing id",
+			})
+			continue
+		}
+		if strings.TrimSpace(feat.Source) == "" || strings.TrimSpace(feat.Kind) == "" || strings.TrimSpace(feat.Symbol) == "" {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "manifest-shape",
+				ID:      feat.ID,
+				Path:    "parity/feature-manifest.json",
+				Message: "feature is missing source/kind/symbol metadata",
+			})
+			continue
+		}
+		manifestByID[feat.ID] = feat
+
+		expected, ok := generatedByID[feat.ID]
+		if !ok {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "manifest-stale",
+				ID:      feat.ID,
+				Path:    "parity/feature-manifest.json",
+				Message: "feature id does not exist in current Go source-of-truth inventory",
+			})
+			continue
+		}
+		if feat.Source != expected.Source || feat.Subsystem != expected.Subsystem || feat.Kind != expected.Kind || feat.Symbol != expected.Symbol {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "manifest-drift",
+				ID:      feat.ID,
+				Path:    "parity/feature-manifest.json",
+				Message: "manifest metadata differs from current generated Go feature inventory",
+			})
+		}
+	}
+
+	for _, feat := range generated {
+		if _, ok := manifestByID[feat.ID]; ok {
+			continue
+		}
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "manifest-missing",
+			ID:      feat.ID,
+			Path:    "parity/feature-manifest.json",
+			Message: "generated feature is missing from manifest",
+		})
+	}
 }
 
 func validateImplementedLike(report *guardrailReport, feat featureItem, mi mappingItem, ev *requiredTestEvidence) {

@@ -6,6 +6,73 @@ import (
 	"time"
 )
 
+func TestValidateManifestAgainstGeneratedFeaturesPassesOnExactMatch(t *testing.T) {
+	report := &guardrailReport{}
+	manifest := featureManifest{
+		Items: []featureItem{
+			{
+				ID:        "feat-a",
+				Source:    "lib/model/folder.go",
+				Subsystem: "model",
+				Kind:      "func",
+				Symbol:    "folder.Scan",
+			},
+		},
+	}
+	generated := []featureItem{
+		{
+			ID:        "feat-a",
+			Source:    "lib/model/folder.go",
+			Subsystem: "model",
+			Kind:      "func",
+			Symbol:    "folder.Scan",
+		},
+	}
+
+	validateManifestAgainstGeneratedFeatures(report, manifest, generated)
+
+	if len(report.Failures) != 0 {
+		t.Fatalf("expected no failures, got %#v", report.Failures)
+	}
+}
+
+func TestValidateManifestAgainstGeneratedFeaturesDetectsShapeAndCoverageGaps(t *testing.T) {
+	report := &guardrailReport{}
+	manifest := featureManifest{
+		Items: []featureItem{
+			{
+				ID:        "feat-a",
+				Source:    "",
+				Subsystem: "model",
+				Kind:      "func",
+				Symbol:    "folder.Scan",
+			},
+		},
+	}
+	generated := []featureItem{
+		{
+			ID:        "feat-b",
+			Source:    "lib/model/folder.go",
+			Subsystem: "model",
+			Kind:      "func",
+			Symbol:    "folder.Pull",
+		},
+	}
+
+	validateManifestAgainstGeneratedFeatures(report, manifest, generated)
+
+	rules := map[string]bool{}
+	for _, failure := range report.Failures {
+		rules[failure.Rule] = true
+	}
+	if !rules["manifest-shape"] {
+		t.Fatalf("expected manifest-shape failure, got %#v", report.Failures)
+	}
+	if !rules["manifest-missing"] {
+		t.Fatalf("expected manifest-missing failure, got %#v", report.Failures)
+	}
+}
+
 func TestValidateRequiredScenarioCoverageReportsUnmappedRequiredScenario(t *testing.T) {
 	report := &guardrailReport{}
 	ev := requiredTestEvidence{

@@ -590,11 +590,26 @@ impl Db for WalFreeDb {
         prefix: &str,
     ) -> Result<Vec<FileInfo>, String> {
         self.ensure_open()?;
-        Ok(self
-            .all_local_files_ordered(folder, device)?
-            .into_iter()
-            .filter(|f| f.path.starts_with(prefix))
-            .collect())
+        let mut out = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = self.store.files_in_folder_device_prefix_ordered_page(
+                folder,
+                device,
+                prefix,
+                cursor.as_deref(),
+                2048,
+            );
+            if page.items.is_empty() {
+                break;
+            }
+            out.extend(page.items.into_iter().map(|meta| store_to_file_info(&meta)));
+            cursor = page.next_cursor.map(|next| next.path);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     fn all_local_files_with_blocks_hash(
@@ -1238,6 +1253,31 @@ mod tests {
 
         let count_need = db.count_need("default", "dev-a").expect("need counts");
         assert_eq!(count_need.files, 2);
+    }
+
+    #[test]
+    fn local_files_with_prefix_uses_ordered_prefix_pages() {
+        let mut db = WalFreeDb::default();
+        db.update(
+            "default",
+            "dev-a",
+            vec![
+                file("a/0.txt", 1, 1),
+                file("a/1.txt", 2, 1),
+                file("a/2.txt", 3, 1),
+                file("a.d/0.txt", 4, 1),
+                file("b/0.txt", 5, 1),
+            ],
+        )
+        .expect("update dev-a");
+
+        let names = db
+            .all_local_files_with_prefix("default", "dev-a", "a/")
+            .expect("prefix query")
+            .into_iter()
+            .map(|f| f.path)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["a/0.txt", "a/1.txt", "a/2.txt"]);
     }
 
     #[test]

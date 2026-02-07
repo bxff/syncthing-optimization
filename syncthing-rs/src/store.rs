@@ -371,6 +371,51 @@ impl Store {
         finalize_page(items, limit)
     }
 
+    pub(crate) fn files_in_folder_device_prefix_ordered_page(
+        &self,
+        folder: &str,
+        device: &str,
+        prefix: &str,
+        start_after_path: Option<&str>,
+        limit: usize,
+    ) -> FilePage {
+        if limit == 0 {
+            return FilePage {
+                items: Vec::new(),
+                next_cursor: None,
+            };
+        }
+
+        let mut items = Vec::with_capacity(limit.saturating_add(1));
+        let device_prefix = folder_device_prefix(folder, device);
+        let start_key = match start_after_path {
+            Some(path) => composite_key(folder, device, path),
+            None => composite_key(folder, device, prefix),
+        };
+        let range_start = match start_after_path {
+            Some(_) => Bound::Excluded(start_key),
+            None => Bound::Included(start_key),
+        };
+
+        for (entry_key, value) in self.files.range((range_start, Bound::Unbounded)) {
+            if !entry_key.starts_with(&device_prefix) {
+                break;
+            }
+            if !value.path.starts_with(prefix) {
+                if compare_path_order(&value.path, prefix) == Ordering::Greater {
+                    break;
+                }
+                continue;
+            }
+            items.push(value.clone());
+            if items.len() > limit {
+                break;
+            }
+        }
+
+        finalize_page(items, limit)
+    }
+
     pub(crate) fn compact(&mut self) -> io::Result<()> {
         let tmp = self.config.root.join("events.log.compact.tmp");
         let mut file = File::create(&tmp)?;
@@ -1204,6 +1249,45 @@ mod tests {
             .map(|i| format!("{i:04}.dat"))
             .collect::<Vec<_>>();
         assert_eq!(out, expected);
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn device_prefix_pagination_uses_ordered_range_bounds() {
+        let root = temp_root("device-prefix-paging");
+        let cfg = StoreConfig::new(&root);
+        let mut store = Store::open(cfg).expect("open");
+
+        for (idx, path) in ["a/0.dat", "a/1.dat", "a/2.dat", "a.d/0.dat", "b/0.dat"]
+            .into_iter()
+            .enumerate()
+        {
+            store
+                .upsert_file(meta("alpha", path, (idx + 1) as u64))
+                .expect("upsert");
+        }
+
+        let mut cursor_path: Option<String> = None;
+        let mut out = Vec::new();
+        loop {
+            let page = store.files_in_folder_device_prefix_ordered_page(
+                "alpha",
+                "local",
+                "a/",
+                cursor_path.as_deref(),
+                2,
+            );
+            for item in &page.items {
+                out.push(item.path.clone());
+            }
+            match page.next_cursor {
+                Some(next) => cursor_path = Some(next.path),
+                None => break,
+            }
+        }
+
+        assert_eq!(out, vec!["a/0.dat", "a/1.dat", "a/2.dat"]);
 
         fs::remove_dir_all(root).expect("cleanup");
     }

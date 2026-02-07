@@ -50,6 +50,7 @@ type sideConfig struct {
 
 type latestReport struct {
 	SchemaVersion int               `json:"schema_version"`
+	GeneratedAt   string            `json:"generated_at"`
 	ProducedBy    string            `json:"produced_by"`
 	Match         bool              `json:"match"`
 	Mismatches    []latestMismatch  `json:"mismatches"`
@@ -73,6 +74,7 @@ type scenarioOutcome struct {
 
 type testStatusReport struct {
 	SchemaVersion int             `json:"schema_version"`
+	GeneratedAt   string          `json:"generated_at"`
 	MemoryCap     memoryCapStatus `json:"memory_cap"`
 }
 
@@ -83,12 +85,14 @@ type memoryCapStatus struct {
 }
 
 type interopReport struct {
-	SchemaVersion int  `json:"schema_version"`
-	Pass          bool `json:"pass"`
+	SchemaVersion int    `json:"schema_version"`
+	GeneratedAt   string `json:"generated_at"`
+	Pass          bool   `json:"pass"`
 }
 
 type durabilityReport struct {
 	SchemaVersion int    `json:"schema_version"`
+	GeneratedAt   string `json:"generated_at"`
 	Durability    string `json:"durability"`
 	CrashRecovery string `json:"crash_recovery"`
 }
@@ -127,9 +131,11 @@ func run(args []string) {
 	if cfg.TimeoutSec <= 0 {
 		defaultTimeout = 120 * time.Second
 	}
+	now := time.Now().UTC().Format(time.RFC3339)
 
 	report := latestReport{
 		SchemaVersion: harnessSchemaVersion,
+		GeneratedAt:   now,
 		ProducedBy:    "parity-harness",
 		Match:         true,
 		Mismatches:    []latestMismatch{},
@@ -231,6 +237,7 @@ func run(args []string) {
 
 	testStatus := testStatusReport{
 		SchemaVersion: harnessSchemaVersion,
+		GeneratedAt:   now,
 		MemoryCap: memoryCapStatus{
 			Status:    evaluateStatus(memoryTotal, memoryPass),
 			Flaky:     false,
@@ -239,10 +246,12 @@ func run(args []string) {
 	}
 	interop := interopReport{
 		SchemaVersion: harnessSchemaVersion,
+		GeneratedAt:   now,
 		Pass:          interopTotal > 0 && interopPass == interopTotal,
 	}
 	durability := durabilityReport{
 		SchemaVersion: harnessSchemaVersion,
+		GeneratedAt:   now,
 		Durability:    evaluateStatus(durTotal, durPass),
 		CrashRecovery: evaluateStatus(crashTotal, crashPass),
 	}

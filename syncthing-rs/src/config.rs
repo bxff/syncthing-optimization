@@ -492,7 +492,8 @@ impl FolderConfiguration {
             self.memory_pull_page_items = default_memory_pull_page_items();
         }
         if self.memory_scan_spill_threshold_entries <= 0 {
-            self.memory_scan_spill_threshold_entries = default_memory_scan_spill_threshold_entries();
+            self.memory_scan_spill_threshold_entries =
+                default_memory_scan_spill_threshold_entries();
         }
         if self.folder_type == FolderType::ReceiveEncrypted {
             self.ignore_perms = true;

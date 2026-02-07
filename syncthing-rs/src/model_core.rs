@@ -23,10 +23,13 @@ pub(crate) static errDeviceUnknown: &str = "device unknown";
 pub(crate) static errEncryptionInvConfigLocal: &str = "local encryption config invalid";
 pub(crate) static errEncryptionInvConfigRemote: &str = "remote encryption config invalid";
 pub(crate) static errEncryptionNotEncryptedLocal: &str = "local folder is not encrypted";
-pub(crate) static errEncryptionNotEncryptedUntrusted: &str = "untrusted remote folder is not encrypted";
+pub(crate) static errEncryptionNotEncryptedUntrusted: &str =
+    "untrusted remote folder is not encrypted";
 pub(crate) static errEncryptionPassword: &str = "invalid encryption password";
-pub(crate) static errEncryptionPlainForReceiveEncrypted: &str = "receive encrypted folder has plain data";
-pub(crate) static errEncryptionPlainForRemoteEncrypted: &str = "remote encrypted folder has plain data";
+pub(crate) static errEncryptionPlainForReceiveEncrypted: &str =
+    "receive encrypted folder has plain data";
+pub(crate) static errEncryptionPlainForRemoteEncrypted: &str =
+    "remote encrypted folder has plain data";
 pub(crate) static errEncryptionTokenRead: &str = "failed reading encryption token";
 pub(crate) static errEncryptionTokenWrite: &str = "failed writing encryption token";
 pub(crate) static errMissingLocalInClusterConfig: &str = "local device missing in cluster config";
@@ -382,14 +385,19 @@ impl model {
         format!("model:{}", self.id)
     }
 
-    pub(crate) fn Closed(&self) -> bool { self.closed }
+    pub(crate) fn Closed(&self) -> bool {
+        self.closed
+    }
 
     pub(crate) fn AddConnection(&mut self, device: &str, stats: ConnectionStats) {
         self.connections.insert(device.to_string(), stats);
     }
 
     pub(crate) fn ConnectedTo(&self, device: &str) -> bool {
-        self.connections.get(device).map(|s| s.Connected).unwrap_or(false)
+        self.connections
+            .get(device)
+            .map(|s| s.Connected)
+            .unwrap_or(false)
     }
 
     pub(crate) fn ConnectionStats(&self, device: &str) -> Option<ConnectionStats> {
@@ -416,7 +424,10 @@ impl model {
         Ok(())
     }
 
-    pub(crate) fn FolderErrors(&self, folder_id: &str) -> Result<Vec<folder_core::FileError>, String> {
+    pub(crate) fn FolderErrors(
+        &self,
+        folder_id: &str,
+    ) -> Result<Vec<folder_core::FileError>, String> {
         Ok(self
             .folderRunners
             .get(folder_id)
@@ -486,7 +497,11 @@ impl model {
             NeedDeletes: 0,
             NeedBytes: need.1,
             Sequence: self.Sequence(folder_id),
-            RemoteState: self.remoteFolderStates.get(folder_id).cloned().unwrap_or_else(|| "idle".to_string()),
+            RemoteState: self
+                .remoteFolderStates
+                .get(folder_id)
+                .cloned()
+                .unwrap_or_else(|| "idle".to_string()),
             ..Default::default()
         };
         c.setCompletionPct();
@@ -494,15 +509,28 @@ impl model {
     }
 
     pub(crate) fn CurrentFolderFile(&self, folder_id: &str, path: &str) -> Option<db::FileInfo> {
-        self.sdb.lock().ok()?.get_device_file(folder_id, "local", path).ok().flatten()
+        self.sdb
+            .lock()
+            .ok()?
+            .get_device_file(folder_id, "local", path)
+            .ok()
+            .flatten()
     }
 
     pub(crate) fn CurrentGlobalFile(&self, folder_id: &str, path: &str) -> Option<db::FileInfo> {
-        self.sdb.lock().ok()?.get_global_file(folder_id, path).ok().flatten()
+        self.sdb
+            .lock()
+            .ok()?
+            .get_global_file(folder_id, path)
+            .ok()
+            .flatten()
     }
 
     pub(crate) fn CurrentIgnores(&self, folder_id: &str) -> Vec<String> {
-        self.folderIgnores.get(folder_id).cloned().unwrap_or_default()
+        self.folderIgnores
+            .get(folder_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub(crate) fn LoadIgnores(&mut self, folder_id: &str, ignores: Vec<String>) {
@@ -528,11 +556,19 @@ impl model {
             .unwrap_or_default()
     }
 
-    pub(crate) fn LocalFilesSequenced(&self, folder_id: &str, from: i64, limit: usize) -> Vec<db::FileInfo> {
+    pub(crate) fn LocalFilesSequenced(
+        &self,
+        folder_id: &str,
+        from: i64,
+        limit: usize,
+    ) -> Vec<db::FileInfo> {
         self.sdb
             .lock()
             .ok()
-            .and_then(|db| db.all_local_files_by_sequence(folder_id, "local", from, limit).ok())
+            .and_then(|db| {
+                db.all_local_files_by_sequence(folder_id, "local", from, limit)
+                    .ok()
+            })
             .unwrap_or_default()
     }
 
@@ -610,7 +646,11 @@ impl model {
         (files.len(), files.iter().map(|f| f.size).sum())
     }
 
-    pub(crate) fn RemoteNeedFolderFiles(&self, folder_id: &str, _device: &str) -> Vec<db::FileInfo> {
+    pub(crate) fn RemoteNeedFolderFiles(
+        &self,
+        folder_id: &str,
+        _device: &str,
+    ) -> Vec<db::FileInfo> {
         self.NeedFolderFiles(folder_id)
     }
 
@@ -726,7 +766,8 @@ impl model {
                 let stats = self.deviceStatRefs.entry(device.to_string()).or_default();
                 *stats.entry("responses".to_string()).or_insert(0) += 1;
                 *stats.entry("response_bytes".to_string()).or_insert(0) += i64::from(*data_len);
-                *stats.entry("response_errors".to_string()).or_insert(0) += if *code == 0 { 0 } else { 1 };
+                *stats.entry("response_errors".to_string()).or_insert(0) +=
+                    if *code == 0 { 0 } else { 1 };
                 Ok(None)
             }
             BepMessage::DownloadProgress { folder, updates } => {
@@ -798,7 +839,11 @@ impl model {
         Ok(())
     }
 
-    pub(crate) fn ScanFolderSubdirs(&mut self, folder_id: &str, subs: &[String]) -> Result<(), String> {
+    pub(crate) fn ScanFolderSubdirs(
+        &mut self,
+        folder_id: &str,
+        subs: &[String],
+    ) -> Result<(), String> {
         self.folderRunners
             .get_mut(folder_id)
             .ok_or_else(|| ErrFolderMissing.to_string())?
@@ -869,8 +914,14 @@ impl model {
     pub(crate) fn UsageReportingStats(&self) -> BTreeMap<String, Value> {
         BTreeMap::from([
             ("folders".to_string(), Value::from(self.folderCfgs.len())),
-            ("connections".to_string(), Value::from(self.connections.len())),
-            ("observedDevices".to_string(), Value::from(self.observed.AsSlice().len())),
+            (
+                "connections".to_string(),
+                Value::from(self.connections.len()),
+            ),
+            (
+                "observedDevices".to_string(),
+                Value::from(self.observed.AsSlice().len()),
+            ),
         ])
     }
 
@@ -883,7 +934,11 @@ impl model {
         for f in self.AllGlobalFiles(folder_id) {
             root.Children.push(TreeEntry {
                 Name: f.name,
-                Type: if f.deleted { "deleted".to_string() } else { "file".to_string() },
+                Type: if f.deleted {
+                    "deleted".to_string()
+                } else {
+                    "file".to_string()
+                },
                 Size: f.size,
                 ModTime: f.mod_nanos,
                 Children: Vec::new(),
@@ -893,7 +948,9 @@ impl model {
     }
 
     pub(crate) fn WatchError(&self, folder_id: &str) -> Option<String> {
-        self.folderRunners.get(folder_id).and_then(|f| f.WatchError())
+        self.folderRunners
+            .get(folder_id)
+            .and_then(|f| f.WatchError())
     }
 
     pub(crate) fn ClusterConfig(&self, device: &str) -> ClusterConfigReceivedEventData {
@@ -917,19 +974,30 @@ impl model {
     }
 
     pub(crate) fn OnHello(&mut self, device: &str, hello: &str) {
-        self.helloMessages.insert(device.to_string(), hello.to_string());
+        self.helloMessages
+            .insert(device.to_string(), hello.to_string());
     }
 
     pub(crate) fn DownloadProgress(&self, device: &str) -> Vec<String> {
-        self.deviceDownloads.get(device).cloned().unwrap_or_default()
+        self.deviceDownloads
+            .get(device)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub(crate) fn Index(&mut self, folder_id: &str, files: &[db::FileInfo]) -> Result<(), String> {
-        let mut db = self.sdb.lock().map_err(|_| "db lock poisoned".to_string())?;
+        let mut db = self
+            .sdb
+            .lock()
+            .map_err(|_| "db lock poisoned".to_string())?;
         db.update(folder_id, "remote", files.to_vec())
     }
 
-    pub(crate) fn IndexUpdate(&mut self, folder_id: &str, files: &[db::FileInfo]) -> Result<(), String> {
+    pub(crate) fn IndexUpdate(
+        &mut self,
+        folder_id: &str,
+        files: &[db::FileInfo],
+    ) -> Result<(), String> {
         self.Index(folder_id, files)
     }
 
@@ -937,7 +1005,11 @@ impl model {
         self.addAndStartFolderLockedWithIgnores(cfg, Vec::new());
     }
 
-    pub(crate) fn addAndStartFolderLockedWithIgnores(&mut self, cfg: FolderConfiguration, ignores: Vec<String>) {
+    pub(crate) fn addAndStartFolderLockedWithIgnores(
+        &mut self,
+        cfg: FolderConfiguration,
+        ignores: Vec<String>,
+    ) {
         let id = cfg.id.clone();
         self.folderCfgs.insert(id.clone(), cfg.clone());
         self.folderIgnores.insert(id.clone(), ignores);
@@ -950,7 +1022,11 @@ impl model {
         self.blockAvailabilityRLocked(folder_id, path)
     }
 
-    pub(crate) fn blockAvailabilityFromTemporaryRLocked(&self, folder_id: &str, path: &str) -> Vec<Availability> {
+    pub(crate) fn blockAvailabilityFromTemporaryRLocked(
+        &self,
+        folder_id: &str,
+        path: &str,
+    ) -> Vec<Availability> {
         self.Availability(folder_id, path)
             .into_iter()
             .map(|mut a| {
@@ -960,16 +1036,16 @@ impl model {
             .collect()
     }
 
-    pub(crate) fn blockAvailabilityRLocked(&self, folder_id: &str, path: &str) -> Vec<Availability> {
+    pub(crate) fn blockAvailabilityRLocked(
+        &self,
+        folder_id: &str,
+        path: &str,
+    ) -> Vec<Availability> {
         self.Availability(folder_id, path)
     }
 
     pub(crate) fn ccCheckEncryption(&self, folder_id: &str) -> Result<(), String> {
-        if self
-            .folderEncryptionFailures
-            .get(folder_id)
-            .is_some()
-        {
+        if self.folderEncryptionFailures.get(folder_id).is_some() {
             return Err(errEncryptionInvConfigLocal.to_string());
         }
         Ok(())
@@ -1048,7 +1124,11 @@ impl model {
         }
     }
 
-    pub(crate) fn handleIndex(&mut self, folder_id: &str, files: &[db::FileInfo]) -> Result<(), String> {
+    pub(crate) fn handleIndex(
+        &mut self,
+        folder_id: &str,
+        files: &[db::FileInfo],
+    ) -> Result<(), String> {
         self.IndexUpdate(folder_id, files)
     }
 
@@ -1076,7 +1156,10 @@ impl model {
     }
 
     pub(crate) fn numHashers(&self, folder_id: &str) -> i32 {
-        self.folderCfgs.get(folder_id).map(|c| c.hashers).unwrap_or(0)
+        self.folderCfgs
+            .get(folder_id)
+            .map(|c| c.hashers)
+            .unwrap_or(0)
     }
 
     pub(crate) fn promoteConnections(&mut self, device: &str) {
@@ -1217,7 +1300,11 @@ impl service {
             .ScanFolderSubdirs(folder_id, subs)
     }
 
-    pub(crate) fn ScheduleForceRescan(&self, folder_id: &str, subs: &[String]) -> Result<(), String> {
+    pub(crate) fn ScheduleForceRescan(
+        &self,
+        folder_id: &str,
+        subs: &[String],
+    ) -> Result<(), String> {
         self.Scan(folder_id, subs)
     }
 
@@ -1241,10 +1328,7 @@ impl service {
     }
 
     pub(crate) fn WatchError(&self, folder_id: &str) -> Option<String> {
-        self.model
-            .lock()
-            .ok()
-            .and_then(|m| m.WatchError(folder_id))
+        self.model.lock().ok().and_then(|m| m.WatchError(folder_id))
     }
 
     pub(crate) fn getState(&self, folder_id: &str) -> String {
@@ -1254,7 +1338,9 @@ impl service {
             .unwrap_or_else(|_| "error".to_string())
     }
 
-    pub(crate) fn Service(&self) -> &'static str { "service" }
+    pub(crate) fn Service(&self) -> &'static str {
+        "service"
+    }
 }
 
 pub(crate) fn NewModel() -> model {
@@ -1290,7 +1376,10 @@ pub(crate) fn newLimitedRequestResponse(limit: usize) -> requestResponse {
 }
 
 pub(crate) fn newPager(keys: Vec<String>) -> pager {
-    pager { get: keys, toSkip: 0 }
+    pager {
+        get: keys,
+        toSkip: 0,
+    }
 }
 
 pub(crate) fn observedDeviceSet(devices: &[String]) -> deviceIDSet {
@@ -1338,7 +1427,11 @@ pub(crate) fn readEncryptionToken(folder_id: &str) -> Result<String, String> {
     fs::read_to_string(path).map_err(|e| format!("{errEncryptionTokenRead}: {e}"))
 }
 
-pub(crate) fn readOffsetIntoBuf(path: &PathBuf, offset: u64, len: usize) -> Result<Vec<u8>, String> {
+pub(crate) fn readOffsetIntoBuf(
+    path: &PathBuf,
+    offset: u64,
+    len: usize,
+) -> Result<Vec<u8>, String> {
     let mut f = fs::File::open(path).map_err(|e| format!("open: {e}"))?;
     f.seek(SeekFrom::Start(offset))
         .map_err(|e| format!("seek: {e}"))?;
@@ -1384,11 +1477,7 @@ pub(crate) fn redactPathError(path: &str, err: &str) -> redactedError {
 
 pub(crate) fn without(items: &[String], remove: &[String]) -> Vec<String> {
     let rm: BTreeSet<_> = remove.iter().collect();
-    items
-        .iter()
-        .filter(|i| !rm.contains(i))
-        .cloned()
-        .collect()
+    items.iter().filter(|i| !rm.contains(i)).cloned().collect()
 }
 
 #[cfg(test)]
@@ -1446,7 +1535,8 @@ mod tests {
 
     #[test]
     fn request_data_reads_expected_slice() {
-        let root = std::env::temp_dir().join(format!("syncthing-rs-request-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("syncthing-rs-request-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("mkdir");
         fs::write(root.join("a.txt"), b"hello-world").expect("write");
@@ -1483,10 +1573,8 @@ mod tests {
 
     #[test]
     fn bep_exchange_applies_remote_index_and_request_flow() {
-        let root = std::env::temp_dir().join(format!(
-            "syncthing-rs-bep-flow-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("syncthing-rs-bep-flow-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("mkdir");
         fs::write(root.join("a.txt"), b"hello-world").expect("write");
@@ -1495,9 +1583,7 @@ mod tests {
         m.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
         let exchange = crate::bep::default_exchange();
 
-        let result = m
-            .RunBepExchange("peer-a", &exchange)
-            .expect("run exchange");
+        let result = m.RunBepExchange("peer-a", &exchange).expect("run exchange");
 
         assert_eq!(
             result.transitions,

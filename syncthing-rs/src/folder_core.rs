@@ -194,7 +194,10 @@ impl scanBatch {
         (updates, removes)
     }
 
-    pub(crate) fn FlushIfFull(&mut self, threshold: usize) -> Option<(Vec<db::FileInfo>, Vec<String>)> {
+    pub(crate) fn FlushIfFull(
+        &mut self,
+        threshold: usize,
+    ) -> Option<(Vec<db::FileInfo>, Vec<String>)> {
         if self.updateBatch.len() + self.toRemove.len() >= threshold {
             return Some(self.Flush());
         }
@@ -308,12 +311,8 @@ impl LocalFileCursor {
             if self.done {
                 return Ok(None);
             }
-            let page = db.all_local_files_ordered_page(
-                folder,
-                device,
-                self.next_cursor.as_deref(),
-                1024,
-            )?;
+            let page =
+                db.all_local_files_ordered_page(folder, device, self.next_cursor.as_deref(), 1024)?;
             self.page = page.items;
             self.index = 0;
             self.next_cursor = page.next_cursor;
@@ -426,7 +425,10 @@ impl folder {
     }
 
     pub(crate) fn doInSync(&self) -> bool {
-        self.watchErr.is_none() && self.errorsMut.is_empty() && !self.pullScheduled && !self.scanScheduled
+        self.watchErr.is_none()
+            && self.errorsMut.is_empty()
+            && !self.pullScheduled
+            && !self.scanScheduled
     }
 
     pub(crate) fn emitDiskChangeEvents(&self, paths: &[String]) -> Vec<String> {
@@ -452,7 +454,9 @@ impl folder {
     }
 
     pub(crate) fn getHealthErrorWithoutIgnores(&self) -> Option<String> {
-        self.watchErr.clone().or_else(|| self.errorsMut.first().map(|e| e.Err.clone()))
+        self.watchErr
+            .clone()
+            .or_else(|| self.errorsMut.first().map(|e| e.Err.clone()))
     }
 
     pub(crate) fn handleForcedRescans(&mut self, paths: &[String]) {
@@ -503,9 +507,7 @@ impl folder {
         let soft_limit = if budget == 0 {
             0
         } else {
-            budget
-                .saturating_mul(self.config.memory_soft_percent.max(1) as usize)
-                / 100
+            budget.saturating_mul(self.config.memory_soft_percent.max(1) as usize) / 100
         };
 
         let mut throttled = false;
@@ -631,9 +633,7 @@ impl folder {
         let soft_limit_bytes = if budget_bytes == 0 {
             0
         } else {
-            budget_bytes
-                .saturating_mul(self.config.memory_soft_percent.max(1) as usize)
-                / 100
+            budget_bytes.saturating_mul(self.config.memory_soft_percent.max(1) as usize) / 100
         };
         MemoryTelemetry {
             estimated_bytes,
@@ -700,10 +700,7 @@ impl folder {
         let walk_cfg = WalkConfig::new(&spill_dir).with_spill_threshold_entries(spill_threshold);
         let scopes = resolve_scan_scopes(&root, subdirs)?;
 
-        let mut db = self
-            .db
-            .lock()
-            .map_err(|_| "db lock poisoned".to_string())?;
+        let mut db = self.db.lock().map_err(|_| "db lock poisoned".to_string())?;
         let mut cursor = LocalFileCursor::default();
         let mut current_local = cursor.next(&db, &self.config.id, LOCAL_DEVICE_ID)?;
         let mut next_sequence = db
@@ -808,7 +805,11 @@ impl folder {
         self.watchRunning = false;
     }
 
-    pub(crate) fn updateLocals(&mut self, local: &[VersionedFile], remote: &[VersionedFile]) -> Vec<String> {
+    pub(crate) fn updateLocals(
+        &mut self,
+        local: &[VersionedFile],
+        remote: &[VersionedFile],
+    ) -> Vec<String> {
         let need = compute_need(local, remote);
         for p in &need.need_paths {
             self.forcedRescanPaths.insert(p.clone());
@@ -959,14 +960,15 @@ fn process_scanned_file(
     }
 
     let abs = root.join(&relative_path);
-    let metadata = fs::symlink_metadata(&abs)
-        .map_err(|e| format!("stat {}: {e}", abs.display()))?;
+    let metadata =
+        fs::symlink_metadata(&abs).map_err(|e| format!("stat {}: {e}", abs.display()))?;
     if !metadata.is_file() {
         return Ok(());
     }
     stats.files_seen = stats.files_seen.saturating_add(1);
 
-    let modified_ns = file_modified_ns(&metadata).map_err(|e| format!("mtime {}: {e}", abs.display()))?;
+    let modified_ns =
+        file_modified_ns(&metadata).map_err(|e| format!("mtime {}: {e}", abs.display()))?;
     let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
 
     if let Some(existing) = current_local.clone() {
@@ -1169,8 +1171,12 @@ pub(crate) struct sendReceiveFolder {
 }
 
 impl sendReceiveFolder {
-    pub(crate) fn BringToFront(&mut self) { self.folder.BringToFront(); }
-    pub(crate) fn Jobs(&self) -> BTreeMap<&'static str, bool> { self.folder.Jobs() }
+    pub(crate) fn BringToFront(&mut self) {
+        self.folder.BringToFront();
+    }
+    pub(crate) fn Jobs(&self) -> BTreeMap<&'static str, bool> {
+        self.folder.Jobs()
+    }
 
     pub(crate) fn checkParent(&self, path: &str) -> Result<(), String> {
         if path.contains("../") {
@@ -1210,11 +1216,14 @@ impl sendReceiveFolder {
 
     pub(crate) fn copyBlockFromFolder(&mut self, path: &str) -> Result<(), String> {
         self.withLimiter(path.len() / 2 + 1)?;
-        self.blockPullReorderer.insert(path.to_string(), path.len() / 2 + 1);
+        self.blockPullReorderer
+            .insert(path.to_string(), path.len() / 2 + 1);
         Ok(())
     }
 
-    pub(crate) fn copyOwnershipFromParent(&self, _path: &str) -> bool { true }
+    pub(crate) fn copyOwnershipFromParent(&self, _path: &str) -> bool {
+        true
+    }
 
     pub(crate) fn dbUpdaterRoutine(&mut self, jobs: &[dbUpdateJob]) -> usize {
         jobs.len()
@@ -1298,7 +1307,8 @@ impl sendReceiveFolder {
     }
 
     pub(crate) fn processDeletions(&mut self, paths: &[String]) -> usize {
-        paths.iter()
+        paths
+            .iter()
             .filter_map(|p| self.deleteItemOnDisk(p).ok())
             .count()
     }
@@ -1407,7 +1417,12 @@ impl deleteQueue {
     }
 
     pub(crate) fn flush(&mut self) -> usize {
-        let batch = self.dirs.iter().take(deletedBatchSize).cloned().collect::<Vec<_>>();
+        let batch = self
+            .dirs
+            .iter()
+            .take(deletedBatchSize)
+            .cloned()
+            .collect::<Vec<_>>();
         if let Ok(mut h) = self.handler.lock() {
             let _ = h.processDeletions(&batch);
         }
@@ -1422,7 +1437,9 @@ pub(crate) struct receiveOnlyFolder {
 }
 
 impl receiveOnlyFolder {
-    pub(crate) fn Revert(&mut self) { self.revert(); }
+    pub(crate) fn Revert(&mut self) {
+        self.revert();
+    }
 
     pub(crate) fn revert(&mut self) {
         self.sendReceiveFolder.folder.Revert();
@@ -1435,7 +1452,9 @@ pub(crate) struct receiveEncryptedFolder {
 }
 
 impl receiveEncryptedFolder {
-    pub(crate) fn Revert(&mut self) { self.revert(); }
+    pub(crate) fn Revert(&mut self) {
+        self.revert();
+    }
 
     pub(crate) fn revert(&mut self) {
         self.sendReceiveFolder.folder.Revert();
@@ -1461,7 +1480,10 @@ pub(crate) fn newFolder(config: FolderConfiguration, db: Arc<Mutex<db::WalFreeDb
     }
 }
 
-pub(crate) fn newSendReceiveFolder(config: FolderConfiguration, db: Arc<Mutex<db::WalFreeDb>>) -> sendReceiveFolder {
+pub(crate) fn newSendReceiveFolder(
+    config: FolderConfiguration,
+    db: Arc<Mutex<db::WalFreeDb>>,
+) -> sendReceiveFolder {
     sendReceiveFolder {
         folder: newFolder(config, db),
         writeLimiter: defaultPullerPendingKiB,
@@ -1469,13 +1491,19 @@ pub(crate) fn newSendReceiveFolder(config: FolderConfiguration, db: Arc<Mutex<db
     }
 }
 
-pub(crate) fn newReceiveOnlyFolder(config: FolderConfiguration, db: Arc<Mutex<db::WalFreeDb>>) -> receiveOnlyFolder {
+pub(crate) fn newReceiveOnlyFolder(
+    config: FolderConfiguration,
+    db: Arc<Mutex<db::WalFreeDb>>,
+) -> receiveOnlyFolder {
     receiveOnlyFolder {
         sendReceiveFolder: newSendReceiveFolder(config, db),
     }
 }
 
-pub(crate) fn newReceiveEncryptedFolder(config: FolderConfiguration, db: Arc<Mutex<db::WalFreeDb>>) -> receiveEncryptedFolder {
+pub(crate) fn newReceiveEncryptedFolder(
+    config: FolderConfiguration,
+    db: Arc<Mutex<db::WalFreeDb>>,
+) -> receiveEncryptedFolder {
     let mut f = newSendReceiveFolder(config, db);
     f.folder.localFlags |= FlagMode::Encrypted as u32;
     receiveEncryptedFolder {
@@ -1525,7 +1553,10 @@ pub(crate) fn populateOffsets(entries: &mut [db::BlockMapEntry]) {
     }
 }
 
-pub(crate) fn blockDiff(local: &[db::BlockMapEntry], remote: &[db::BlockMapEntry]) -> Vec<db::BlockMapEntry> {
+pub(crate) fn blockDiff(
+    local: &[db::BlockMapEntry],
+    remote: &[db::BlockMapEntry],
+) -> Vec<db::BlockMapEntry> {
     let local_keys = local
         .iter()
         .map(|b| (b.block_index, b.size, b.blocklist_hash.clone()))
@@ -1656,7 +1687,9 @@ mod tests {
             .expect("local same.txt");
         assert_eq!(synced.sequence, 2);
         assert_eq!(synced.block_hashes, vec!["h1", "h2", "h3"]);
-        let need = guard.count_need("default", "local").expect("count need after pull");
+        let need = guard
+            .count_need("default", "local")
+            .expect("count need after pull");
         assert_eq!(need.files, 0);
         let disk_file = root.join("same.txt");
         assert!(disk_file.exists());
@@ -1705,12 +1738,8 @@ mod tests {
         let root = temp_root("fail-policy");
         let db_root = temp_root("fail-policy-db");
         let mut dbv = db::WalFreeDb::open_runtime(&db_root, 0).expect("open runtime db");
-        dbv.update(
-            "default",
-            "local",
-            vec![file("same.txt", 1, &["h1"])],
-        )
-        .expect("update local");
+        dbv.update("default", "local", vec![file("same.txt", 1, &["h1"])])
+            .expect("update local");
         dbv.update(
             "default",
             "remote",
@@ -1739,12 +1768,8 @@ mod tests {
         let root = temp_root("pull-delete");
         let db_root = temp_root("pull-delete-db");
         let mut dbv = db::WalFreeDb::open_runtime(&db_root, 50).expect("open runtime db");
-        dbv.update(
-            "default",
-            "local",
-            vec![file("gone.txt", 1, &["h1"])],
-        )
-        .expect("update local");
+        dbv.update("default", "local", vec![file("gone.txt", 1, &["h1"])])
+            .expect("update local");
         let mut deleted = file("gone.txt", 2, &[]);
         deleted.deleted = true;
         dbv.update("default", "remote", vec![deleted])
@@ -1781,12 +1806,8 @@ mod tests {
         let root = temp_root("telemetry-cap");
         let db_root = temp_root("telemetry-cap-db");
         let mut dbv = db::WalFreeDb::open_runtime(&db_root, 0).expect("open runtime db");
-        dbv.update(
-            "default",
-            "local",
-            vec![file("same.txt", 1, &["h1"])],
-        )
-        .expect("update local");
+        dbv.update("default", "local", vec![file("same.txt", 1, &["h1"])])
+            .expect("update local");
         dbv.update(
             "default",
             "remote",
@@ -1856,10 +1877,7 @@ mod tests {
         dbv.update("default", "remote", vec![remote])
             .expect("update remote");
 
-        let outside = root
-            .parent()
-            .expect("parent")
-            .join("outside.txt");
+        let outside = root.parent().expect("parent").join("outside.txt");
         let _ = fs::remove_file(&outside);
 
         let db = Arc::new(Mutex::new(dbv));

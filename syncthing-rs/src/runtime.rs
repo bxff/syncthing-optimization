@@ -211,7 +211,9 @@ pub(crate) fn run_daemon(config: DaemonConfig) -> Result<(), String> {
         config.memory_max_mb,
     )));
     {
-        let mut guard = model.lock().map_err(|_| "model lock poisoned".to_string())?;
+        let mut guard = model
+            .lock()
+            .map_err(|_| "model lock poisoned".to_string())?;
         for folder in &config.folders {
             guard.newFolder(newFolderConfiguration(&folder.id, &folder.path));
         }
@@ -324,7 +326,9 @@ pub(crate) fn handle_peer_connection(
         };
         let inbound = decode_frame(&frame)?;
         let outbound = {
-            let mut guard = model.lock().map_err(|_| "model lock poisoned".to_string())?;
+            let mut guard = model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
             guard.ApplyBepMessage(peer_id, &inbound)?
         };
         if let Some(message) = outbound {
@@ -370,7 +374,9 @@ fn write_frame(writer: &mut impl Write, message: &BepMessage) -> Result<(), Stri
     writer
         .write_all(&frame)
         .map_err(|err| format!("write frame: {err}"))?;
-    writer.flush().map_err(|err| format!("flush frame: {err}"))?;
+    writer
+        .flush()
+        .map_err(|err| format!("flush frame: {err}"))?;
     Ok(())
 }
 
@@ -545,8 +551,11 @@ mod tests {
 
         let root = temp_root("bad-config");
         let config_path = root.join("daemon.json");
-        fs::write(&config_path, r#"{"max_peers":0,"folders":[{"id":"a","path":"/tmp/a"}]}"#)
-            .expect("write config");
+        fs::write(
+            &config_path,
+            r#"{"max_peers":0,"folders":[{"id":"a","path":"/tmp/a"}]}"#,
+        )
+        .expect("write config");
         let args = vec![
             "--config".to_string(),
             config_path.to_string_lossy().to_string(),
@@ -599,7 +608,10 @@ mod tests {
 
         server.join().expect("join server");
         let guard = model.lock().expect("lock");
-        assert_eq!(guard.RemoteSequences("default").get("remote").copied(), Some(2));
+        assert_eq!(
+            guard.RemoteSequences("default").get("remote").copied(),
+            Some(2)
+        );
         assert_eq!(guard.DownloadProgress("peer-a"), vec!["default:a.txt:2"]);
 
         let _ = fs::remove_dir_all(root);

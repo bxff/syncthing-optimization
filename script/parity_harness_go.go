@@ -9,8 +9,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -434,10 +436,27 @@ func scenarioPathOrderInvariant() map[string]any {
 }
 
 func scenarioMemoryCap50MB() map[string]any {
-	// Mirror the current Rust prototype estimation: per-file fixed + string/hash lengths.
+	// Mirror syncthing-rs/store.rs estimate_file_bytes + block marker spill shape.
 	const files = 10000
-	const perFile = 96 // 7(folder) + 13(path) + 12(hash) + 64(overhead)
-	estimated := files * perFile
+	const (
+		folderLen    = len("default")
+		pathLen      = len("dir/00000.bin")
+		deviceLen    = len("local")
+		fileTypeLen  = len("file")
+		markerPrefix = "__stblob__:"
+	)
+	payload := []byte(`["a1b2c3d4e5f6"]`)
+	payloadLen := len(payload)
+	checksumDigits := len(strconv.FormatUint(uint64(crc32.ChecksumIEEE(payload)), 10))
+	recordBytes := 8 + payloadLen // u32 len + u32 checksum + payload
+
+	estimated := 0
+	for i := 0; i < files; i++ {
+		offset := i * recordBytes
+		offsetDigits := len(strconv.Itoa(offset))
+		markerLen := len(markerPrefix) + offsetDigits + 1 + len(strconv.Itoa(payloadLen)) + 1 + checksumDigits
+		estimated += folderLen + pathLen + deviceLen + fileTypeLen + markerLen + 64
+	}
 	budget := 50 * 1024 * 1024
 
 	return baseScenario("memory-cap-50mb", map[string]any{

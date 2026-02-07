@@ -251,9 +251,62 @@ pub(crate) struct WalFreeDb {
     closed: bool,
 }
 
+const GLOBAL_DEVICE_PAGE_SIZE: usize = 256;
+
+#[derive(Debug)]
+struct DevicePathPager {
+    device: String,
+    start_after: Option<String>,
+    has_more_pages: bool,
+    page: Vec<StoreFileMetadata>,
+    idx: usize,
+}
+
 impl Default for WalFreeDb {
     fn default() -> Self {
         Self::open_default_runtime().expect("open default wal-free runtime store")
+    }
+}
+
+impl DevicePathPager {
+    fn new(device: String) -> Self {
+        Self {
+            device,
+            start_after: None,
+            has_more_pages: true,
+            page: Vec::new(),
+            idx: 0,
+        }
+    }
+
+    fn current<'a>(&'a mut self, store: &'a Store, folder: &str) -> Option<&'a StoreFileMetadata> {
+        self.ensure_loaded(store, folder);
+        self.page.get(self.idx)
+    }
+
+    fn advance(&mut self) {
+        if self.idx < self.page.len() {
+            self.idx += 1;
+        }
+    }
+
+    fn ensure_loaded(&mut self, store: &Store, folder: &str) {
+        while self.idx >= self.page.len() && self.has_more_pages {
+            let page = store.files_in_folder_device_ordered_page(
+                folder,
+                &self.device,
+                self.start_after.as_deref(),
+                GLOBAL_DEVICE_PAGE_SIZE,
+            );
+            self.page = page.items;
+            self.idx = 0;
+            self.start_after = page.next_cursor.map(|cursor| cursor.path);
+            self.has_more_pages = self.start_after.is_some();
+            if self.page.is_empty() {
+                self.has_more_pages = false;
+                break;
+            }
+        }
     }
 }
 
@@ -272,7 +325,10 @@ impl WalFreeDb {
         })
     }
 
-    pub(crate) fn open_runtime(root: impl Into<PathBuf>, memory_cap_mb: usize) -> Result<Self, String> {
+    pub(crate) fn open_runtime(
+        root: impl Into<PathBuf>,
+        memory_cap_mb: usize,
+    ) -> Result<Self, String> {
         let config = StoreConfig::new(root).with_memory_cap_mb(memory_cap_mb);
         Self::open(config)
     }
@@ -297,9 +353,9 @@ impl WalFreeDb {
         limit: usize,
     ) -> Result<LocalFilePage, String> {
         self.ensure_open()?;
-        let page = self
-            .store
-            .files_in_folder_device_ordered_page(folder, device, start_after, limit);
+        let page =
+            self.store
+                .files_in_folder_device_ordered_page(folder, device, start_after, limit);
         Ok(LocalFilePage {
             items: page
                 .items
@@ -325,34 +381,27 @@ impl WalFreeDb {
             });
         }
 
-        let globals = self.global_file_map(folder)?;
         let mut items = Vec::new();
         let mut has_more = false;
-
-        for (path, global) in globals.iter() {
+        self.for_each_global_winner(folder, true, |global| {
             if let Some(cursor) = start_after {
-                if path.as_str() <= cursor {
-                    continue;
+                if crate::store::compare_path_order(&global.path, cursor)
+                    != std::cmp::Ordering::Greater
+                {
+                    return Ok(true);
                 }
             }
-            let local = self.get_device_file_light(folder, device, path);
-            let requires_update = match local {
-                Some(current) => {
-                    global.sequence > current.sequence
-                        || (global.deleted != current.deleted
-                            && global.sequence >= current.sequence)
-                }
-                None => true,
-            };
-            if !requires_update {
-                continue;
+            let local = self.get_device_file_light(folder, device, &global.path);
+            if !requires_update(&global, local.as_ref()) {
+                return Ok(true);
             }
             if items.len() >= limit {
                 has_more = true;
-                break;
+                return Ok(false);
             }
-            items.push(global.clone());
-        }
+            items.push(global);
+            Ok(true)
+        })?;
 
         let next_cursor = if has_more {
             items.last().map(|f| f.path.clone())
@@ -419,6 +468,113 @@ impl WalFreeDb {
         Ok(())
     }
 
+    fn global_winner_for_path(
+        &self,
+        folder: &str,
+        path: &str,
+        include_hashes: bool,
+    ) -> Result<Option<FileInfo>, String> {
+        let mut best_meta: Option<StoreFileMetadata> = None;
+        let mut best_info: Option<FileInfo> = None;
+        for device in self.store.devices_in_folder(folder) {
+            let Some(meta) = self.store.get_file(folder, &device, path) else {
+                continue;
+            };
+            if meta.ignored {
+                continue;
+            }
+            let candidate = store_to_file_info_without_blocks(meta);
+            let use_candidate = match best_info.as_ref() {
+                Some(current) => prefer_global(&candidate, current),
+                None => true,
+            };
+            if use_candidate {
+                best_meta = Some(meta.clone());
+                best_info = Some(candidate);
+            }
+        }
+
+        let Some(mut winner) = best_info else {
+            return Ok(None);
+        };
+        if include_hashes {
+            let Some(meta) = best_meta.as_ref() else {
+                return Ok(None);
+            };
+            winner.block_hashes = self
+                .store
+                .resolve_file_block_hashes(meta)
+                .map_err(|err| format!("load block hashes for {}/{}: {err}", folder, path))?;
+        }
+        Ok(Some(winner))
+    }
+
+    fn for_each_global_winner<F>(
+        &self,
+        folder: &str,
+        include_hashes: bool,
+        mut visit: F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(FileInfo) -> Result<bool, String>,
+    {
+        let devices = self.store.devices_in_folder(folder);
+        if devices.is_empty() {
+            return Ok(());
+        }
+
+        let mut pagers: Vec<DevicePathPager> =
+            devices.into_iter().map(DevicePathPager::new).collect();
+        loop {
+            let mut min_path: Option<String> = None;
+            for pager in pagers.iter_mut() {
+                if let Some(meta) = pager.current(&self.store, folder) {
+                    match min_path.as_ref() {
+                        Some(current_min)
+                            if crate::store::compare_path_order(&meta.path, current_min)
+                                != std::cmp::Ordering::Less => {}
+                        _ => min_path = Some(meta.path.clone()),
+                    }
+                }
+            }
+            let Some(path) = min_path else {
+                break;
+            };
+
+            let mut candidates = Vec::new();
+            for pager in pagers.iter_mut() {
+                let matches_path = pager
+                    .current(&self.store, folder)
+                    .map(|meta| meta.path == path)
+                    .unwrap_or(false);
+                if !matches_path {
+                    continue;
+                }
+                if let Some(meta) = pager.current(&self.store, folder) {
+                    candidates.push(meta.clone());
+                }
+                pager.advance();
+            }
+
+            let Some((winner_meta, mut winner)) = best_global_candidate(candidates.into_iter())
+            else {
+                continue;
+            };
+            if include_hashes {
+                winner.block_hashes =
+                    self.store
+                        .resolve_file_block_hashes(&winner_meta)
+                        .map_err(|err| {
+                            format!("load block hashes for {}/{}: {err}", folder, winner.path)
+                        })?;
+            }
+            if !visit(winner)? {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     fn all_files_for_folder_device_light(&self, folder: &str, device: &str) -> Vec<FileInfo> {
         let mut out = Vec::new();
         self.store
@@ -429,13 +585,20 @@ impl WalFreeDb {
         out
     }
 
-    fn all_files_for_folder_device_full(&self, folder: &str, device: &str) -> Result<Vec<FileInfo>, String> {
+    fn all_files_for_folder_device_full(
+        &self,
+        folder: &str,
+        device: &str,
+    ) -> Result<Vec<FileInfo>, String> {
         let mut out = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
-            let page = self
-                .store
-                .files_in_folder_device_ordered_page(folder, device, cursor.as_deref(), 1024);
+            let page = self.store.files_in_folder_device_ordered_page(
+                folder,
+                device,
+                cursor.as_deref(),
+                1024,
+            );
             if page.items.is_empty() {
                 break;
             }
@@ -460,70 +623,6 @@ impl WalFreeDb {
         self.store
             .get_file(folder, device, file)
             .map(store_to_file_info_without_blocks)
-    }
-
-    fn global_file_map(&self, folder: &str) -> Result<BTreeMap<String, FileInfo>, String> {
-        let mut out: BTreeMap<String, FileInfo> = BTreeMap::new();
-        let mut first_error: Option<String> = None;
-        self.store.for_each_file_in_folder(folder, |meta| {
-            if meta.ignored {
-                return true;
-            }
-            let hashes = match self.store.resolve_file_block_hashes(meta) {
-                Ok(v) => v,
-                Err(err) => {
-                    first_error = Some(format!("load block hashes for {}/{}: {err}", folder, meta.path));
-                    return false;
-                }
-            };
-            let mut candidate = store_to_file_info_without_blocks(meta);
-            candidate.block_hashes = hashes;
-            let path = candidate.path.clone();
-            match out.get(&path) {
-                Some(current) if !prefer_global(&candidate, current) => {}
-                _ => {
-                    out.insert(path, candidate);
-                }
-            }
-            true
-        });
-        if let Some(err) = first_error {
-            return Err(err);
-        }
-        Ok(out)
-    }
-
-    fn global_file_map_light(&self, folder: &str) -> BTreeMap<String, FileInfo> {
-        let mut out: BTreeMap<String, FileInfo> = BTreeMap::new();
-        self.store.for_each_file_in_folder(folder, |meta| {
-            if meta.ignored {
-                return true;
-            }
-            let candidate = store_to_file_info_without_blocks(meta);
-            let path = candidate.path.clone();
-            match out.get(&path) {
-                Some(current) if !prefer_global(&candidate, current) => {}
-                _ => {
-                    out.insert(path, candidate);
-                }
-            }
-            true
-        });
-        out
-    }
-
-    fn global_availability_map(&self, folder: &str) -> BTreeMap<String, BTreeSet<DeviceId>> {
-        let mut out: BTreeMap<String, BTreeSet<DeviceId>> = BTreeMap::new();
-        self.store.for_each_file_in_folder(folder, |meta| {
-            if meta.deleted {
-                return true;
-            }
-            out.entry(meta.path.clone())
-                .or_default()
-                .insert(meta.device.clone());
-            true
-        });
-        out
     }
 }
 
@@ -566,28 +665,33 @@ impl Db for WalFreeDb {
 
     fn get_global_availability(&self, folder: &str, file: &str) -> Result<Vec<DeviceId>, String> {
         self.ensure_open()?;
-        let mut out = self
-            .global_availability_map(folder)
-            .remove(file)
-            .unwrap_or_default()
-            .into_iter()
-            .collect::<Vec<_>>();
+        let mut out = Vec::new();
+        for device in self.store.devices_in_folder(folder) {
+            let Some(meta) = self.store.get_file(folder, &device, file) else {
+                continue;
+            };
+            if !meta.deleted {
+                out.push(device);
+            }
+        }
         out.sort();
+        out.dedup();
         Ok(out)
     }
 
     fn get_global_file(&self, folder: &str, file: &str) -> Result<Option<FileInfo>, String> {
         self.ensure_open()?;
-        Ok(self.global_file_map(folder)?.remove(file))
+        self.global_winner_for_path(folder, file, true)
     }
 
     fn all_global_files(&self, folder: &str) -> Result<Vec<FileMetadata>, String> {
         self.ensure_open()?;
-        Ok(self
-            .global_file_map_light(folder)
-            .into_values()
-            .map(file_metadata_from_info)
-            .collect())
+        let mut out = Vec::new();
+        self.for_each_global_winner(folder, false, |winner| {
+            out.push(file_metadata_from_info(winner));
+            Ok(true)
+        })?;
+        Ok(out)
     }
 
     fn all_global_files_prefix(
@@ -596,12 +700,14 @@ impl Db for WalFreeDb {
         prefix: &str,
     ) -> Result<Vec<FileMetadata>, String> {
         self.ensure_open()?;
-        Ok(self
-            .global_file_map_light(folder)
-            .into_values()
-            .filter(|f| f.path.starts_with(prefix))
-            .map(file_metadata_from_info)
-            .collect())
+        let mut out = Vec::new();
+        self.for_each_global_winner(folder, false, |winner| {
+            if winner.path.starts_with(prefix) {
+                out.push(file_metadata_from_info(winner));
+            }
+            Ok(true)
+        })?;
+        Ok(out)
     }
 
     fn all_local_files(&self, folder: &str, device: &str) -> Result<Vec<FileInfo>, String> {
@@ -614,7 +720,8 @@ impl Db for WalFreeDb {
         let mut out = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
-            let page = self.all_local_files_ordered_page(folder, device, cursor.as_deref(), 2048)?;
+            let page =
+                self.all_local_files_ordered_page(folder, device, cursor.as_deref(), 2048)?;
             out.extend(page.items);
             match page.next_cursor {
                 Some(next) => cursor = Some(next),
@@ -694,12 +801,17 @@ impl Db for WalFreeDb {
             let hashes = match self.store.resolve_file_block_hashes(meta) {
                 Ok(v) => v,
                 Err(err) => {
-                    first_error = Some(format!("load block hashes for {}/{}: {err}", folder, meta.path));
+                    first_error = Some(format!(
+                        "load block hashes for {}/{}: {err}",
+                        folder, meta.path
+                    ));
                     return false;
                 }
             };
             if hashes.iter().any(|h| h == &target) {
-                out.push(file_metadata_from_info(store_to_file_info_without_blocks(meta)));
+                out.push(file_metadata_from_info(store_to_file_info_without_blocks(
+                    meta,
+                )));
             }
             true
         });
@@ -752,23 +864,14 @@ impl Db for WalFreeDb {
             return Ok(out);
         }
 
-        let globals = self.global_file_map(folder)?;
         let mut need = Vec::new();
-
-        for (path, global) in globals {
-            let local = self.get_device_file_light(folder, device, &path);
-            let requires_update = match local {
-                Some(current) => {
-                    global.sequence > current.sequence
-                        || (global.deleted != current.deleted
-                            && global.sequence >= current.sequence)
-                }
-                None => true,
-            };
-            if requires_update {
+        self.for_each_global_winner(folder, true, |global| {
+            let local = self.get_device_file_light(folder, device, &global.path);
+            if requires_update(&global, local.as_ref()) {
                 need.push(global);
             }
-        }
+            Ok(true)
+        })?;
 
         sort_pull_order(&mut need, order);
         let sliced = need
@@ -793,7 +896,10 @@ impl Db for WalFreeDb {
             let hashes = match self.store.resolve_file_block_hashes(meta) {
                 Ok(v) => v,
                 Err(err) => {
-                    first_error = Some(format!("load block hashes for {}/{}: {err}", folder, meta.path));
+                    first_error = Some(format!(
+                        "load block hashes for {}/{}: {err}",
+                        folder, meta.path
+                    ));
                     return false;
                 }
             };
@@ -909,12 +1015,7 @@ impl Db for WalFreeDb {
 
     fn list_devices_for_folder(&self, folder: &str) -> Result<Vec<DeviceId>, String> {
         self.ensure_open()?;
-        let mut devices = BTreeSet::new();
-        self.store.for_each_file_in_folder(folder, |meta| {
-            devices.insert(meta.device.clone());
-            true
-        });
-        Ok(devices.into_iter().collect())
+        Ok(self.store.devices_in_folder(folder))
     }
 
     fn remote_sequences(&self, folder: &str) -> Result<BTreeMap<DeviceId, i64>, String> {
@@ -930,7 +1031,12 @@ impl Db for WalFreeDb {
 
     fn count_global(&self, folder: &str) -> Result<Counts, String> {
         self.ensure_open()?;
-        Ok(count_files(self.global_file_map_light(folder).into_values()))
+        let mut counts = Counts::default();
+        self.for_each_global_winner(folder, false, |global| {
+            add_file_to_counts(&mut counts, &global);
+            Ok(true)
+        })?;
+        Ok(counts)
     }
 
     fn count_local(&self, folder: &str, device: &str) -> Result<Counts, String> {
@@ -938,7 +1044,8 @@ impl Db for WalFreeDb {
         let mut counts = Counts::default();
         let mut cursor: Option<String> = None;
         loop {
-            let page = self.all_local_files_ordered_page(folder, device, cursor.as_deref(), 2048)?;
+            let page =
+                self.all_local_files_ordered_page(folder, device, cursor.as_deref(), 2048)?;
             if page.items.is_empty() {
                 break;
             }
@@ -954,30 +1061,26 @@ impl Db for WalFreeDb {
     fn count_need(&self, folder: &str, device: &str) -> Result<Counts, String> {
         self.ensure_open()?;
         let mut counts = Counts::default();
-        for (path, global) in self.global_file_map_light(folder) {
-            let local = self.get_device_file_light(folder, device, &path);
-            let requires_update = match local {
-                Some(current) => {
-                    global.sequence > current.sequence
-                        || (global.deleted != current.deleted
-                            && global.sequence >= current.sequence)
-                }
-                None => true,
-            };
-            if requires_update {
+        self.for_each_global_winner(folder, false, |global| {
+            let local = self.get_device_file_light(folder, device, &global.path);
+            if requires_update(&global, local.as_ref()) {
                 add_file_to_counts(&mut counts, &global);
             }
-        }
+            Ok(true)
+        })?;
         Ok(counts)
     }
 
     fn count_receive_only_changed(&self, folder: &str) -> Result<Counts, String> {
         self.ensure_open()?;
-        let changed = self
-            .global_file_map_light(folder)
-            .into_values()
-            .filter(|f| f.local_flags & FLAG_LOCAL_RECEIVE_ONLY != 0);
-        Ok(count_files(changed))
+        let mut counts = Counts::default();
+        self.for_each_global_winner(folder, false, |global| {
+            if global.local_flags & FLAG_LOCAL_RECEIVE_ONLY != 0 {
+                add_file_to_counts(&mut counts, &global);
+            }
+            Ok(true)
+        })?;
+        Ok(counts)
     }
 
     fn drop_all_index_ids(&mut self) -> Result<(), String> {
@@ -1198,6 +1301,41 @@ fn file_metadata_from_info(info: FileInfo) -> FileMetadata {
     }
 }
 
+fn best_global_candidate(
+    candidates: impl Iterator<Item = StoreFileMetadata>,
+) -> Option<(StoreFileMetadata, FileInfo)> {
+    let mut best_meta: Option<StoreFileMetadata> = None;
+    let mut best_info: Option<FileInfo> = None;
+    for meta in candidates {
+        if meta.ignored {
+            continue;
+        }
+        let candidate = store_to_file_info_without_blocks(&meta);
+        let use_candidate = match best_info.as_ref() {
+            Some(current) => prefer_global(&candidate, current),
+            None => true,
+        };
+        if use_candidate {
+            best_meta = Some(meta);
+            best_info = Some(candidate);
+        }
+    }
+    match (best_meta, best_info) {
+        (Some(meta), Some(info)) => Some((meta, info)),
+        _ => None,
+    }
+}
+
+fn requires_update(global: &FileInfo, local: Option<&FileInfo>) -> bool {
+    match local {
+        Some(current) => {
+            global.sequence > current.sequence
+                || (global.deleted != current.deleted && global.sequence >= current.sequence)
+        }
+        None => true,
+    }
+}
+
 fn prefer_global(candidate: &FileInfo, current: &FileInfo) -> bool {
     if candidate.sequence != current.sequence {
         return candidate.sequence > current.sequence;
@@ -1361,6 +1499,47 @@ mod tests {
     }
 
     #[test]
+    fn needed_pages_merge_devices_in_segment_path_order() {
+        let mut db = WalFreeDb::default();
+        db.update(
+            "default",
+            "local",
+            vec![file("a/z.txt", 1, 1), file("a.d/x.txt", 1, 1)],
+        )
+        .expect("local update");
+        db.update(
+            "default",
+            "remote-a",
+            vec![
+                file("a/x.txt", 2, 1),
+                file("a/z.txt", 2, 1),
+                file("b.txt", 1, 1),
+            ],
+        )
+        .expect("remote-a update");
+        db.update(
+            "default",
+            "remote-b",
+            vec![file("a/x.txt", 3, 1), file("a.d/x.txt", 2, 1)],
+        )
+        .expect("remote-b update");
+
+        let first = db
+            .all_needed_global_files_ordered_page("default", "local", None, 2)
+            .expect("first page");
+        let first_paths = first.items.into_iter().map(|f| f.path).collect::<Vec<_>>();
+        assert_eq!(first_paths, vec!["a/x.txt", "a/z.txt"]);
+        assert_eq!(first.next_cursor.as_deref(), Some("a/z.txt"));
+
+        let second = db
+            .all_needed_global_files_ordered_page("default", "local", first.next_cursor.as_deref(), 2)
+            .expect("second page");
+        let second_paths = second.items.into_iter().map(|f| f.path).collect::<Vec<_>>();
+        assert_eq!(second_paths, vec!["a.d/x.txt", "b.txt"]);
+        assert!(second.next_cursor.is_none());
+    }
+
+    #[test]
     fn local_files_with_prefix_uses_ordered_prefix_pages() {
         let mut db = WalFreeDb::default();
         db.update(
@@ -1446,12 +1625,8 @@ mod tests {
             ],
         )
         .expect("update local");
-        db.update(
-            "default",
-            "remote-a",
-            vec![file("a/remote.txt", 4, 1)],
-        )
-        .expect("update remote");
+        db.update("default", "remote-a", vec![file("a/remote.txt", 4, 1)])
+            .expect("update remote");
 
         let mut cursor: Option<String> = None;
         let mut out = Vec::new();
@@ -1522,15 +1697,17 @@ mod tests {
             let mut db = WalFreeDb::open_runtime(&root, 50).expect("open runtime");
             db.set_index_id("default", "local", 77)
                 .expect("set index id");
-            db.put_mtime("default", "a.txt", 11, 22)
-                .expect("put mtime");
+            db.put_mtime("default", "a.txt", 11, 22).expect("put mtime");
             <WalFreeDb as Kv>::put_kv(&mut db, "alpha/key", b"value").expect("put kv");
             db.close().expect("close");
         }
         {
             let db = WalFreeDb::open_runtime(&root, 50).expect("reopen runtime");
             assert_eq!(db.get_index_id("default", "local").expect("get index"), 77);
-            assert_eq!(db.get_mtime("default", "a.txt").expect("get mtime"), (11, 22));
+            assert_eq!(
+                db.get_mtime("default", "a.txt").expect("get mtime"),
+                (11, 22)
+            );
             assert_eq!(
                 <WalFreeDb as Kv>::get_kv(&db, "alpha/key").expect("get kv"),
                 Some(b"value".to_vec())

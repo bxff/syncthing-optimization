@@ -153,7 +153,10 @@ fn merge_spills(spill_paths: &[PathBuf]) -> io::Result<Vec<String>> {
     let mut heap = BinaryHeap::new();
     for (idx, reader) in readers.iter_mut().enumerate() {
         if let Some(name) = read_spill_name(reader)? {
-            heap.push(HeapItem { name, source_idx: idx });
+            heap.push(HeapItem {
+                name,
+                source_idx: idx,
+            });
         }
     }
 

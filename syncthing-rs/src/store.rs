@@ -1,10 +1,10 @@
 use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::ops::Bound;
-use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
 const LOG_RECORD_MAX_BYTES: u32 = 32 * 1024 * 1024;
@@ -120,12 +120,11 @@ impl Store {
             .open(&block_blob_path)?;
         blob.sync_all()?;
 
-        let (files, deleted_tombstones, approx_memory_bytes) =
-            Self::load_from_journal(
-                &journal_path,
-                &block_blob_path,
-                config.max_deleted_tombstones,
-            )?;
+        let (files, deleted_tombstones, approx_memory_bytes) = Self::load_from_journal(
+            &journal_path,
+            &block_blob_path,
+            config.max_deleted_tombstones,
+        )?;
         let budget_bytes = config.memory_budget_bytes();
         if budget_bytes > 0 && approx_memory_bytes > budget_bytes {
             return Err(io::Error::new(
@@ -279,6 +278,18 @@ impl Store {
         }
     }
 
+    pub(crate) fn devices_in_folder(&self, folder: &str) -> Vec<String> {
+        let prefix = folder_prefix(folder);
+        let mut devices = BTreeSet::new();
+        for (key, value) in self.files.range(prefix.clone()..) {
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            devices.insert(value.device.clone());
+        }
+        devices.into_iter().collect()
+    }
+
     pub(crate) fn file_count(&self) -> usize {
         self.files.len()
     }
@@ -379,9 +390,7 @@ impl Store {
 
         match start_key {
             Some(key) => {
-                for (entry_key, value) in self
-                    .files
-                    .range((Bound::Excluded(key), Bound::Unbounded))
+                for (entry_key, value) in self.files.range((Bound::Excluded(key), Bound::Unbounded))
                 {
                     if !entry_key.starts_with(&prefix) {
                         break;
@@ -969,7 +978,10 @@ fn spill_block_hashes(block_blob_path: &Path, hashes: &[String]) -> io::Result<V
     spill_block_hashes_to_writer(&mut blob, hashes)
 }
 
-fn spill_block_hashes_to_writer(block_blob: &mut File, hashes: &[String]) -> io::Result<Vec<String>> {
+fn spill_block_hashes_to_writer(
+    block_blob: &mut File,
+    hashes: &[String],
+) -> io::Result<Vec<String>> {
     if hashes.is_empty() {
         return Ok(Vec::new());
     }
@@ -977,8 +989,12 @@ fn spill_block_hashes_to_writer(block_blob: &mut File, hashes: &[String]) -> io:
         return Ok(hashes.to_vec());
     }
 
-    let payload = serde_json::to_vec(hashes)
-        .map_err(|err| io::Error::new(ErrorKind::InvalidData, format!("encode block hashes: {err}")))?;
+    let payload = serde_json::to_vec(hashes).map_err(|err| {
+        io::Error::new(
+            ErrorKind::InvalidData,
+            format!("encode block hashes: {err}"),
+        )
+    })?;
     if payload.len() as u32 > LOG_RECORD_MAX_BYTES {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
@@ -1040,8 +1056,12 @@ fn load_block_hashes(block_blob_path: &Path, hashes: &[String]) -> io::Result<Ve
         ));
     }
 
-    serde_json::from_slice::<Vec<String>>(&payload)
-        .map_err(|err| io::Error::new(ErrorKind::InvalidData, format!("decode block hashes: {err}")))
+    serde_json::from_slice::<Vec<String>>(&payload).map_err(|err| {
+        io::Error::new(
+            ErrorKind::InvalidData,
+            format!("decode block hashes: {err}"),
+        )
+    })
 }
 
 fn block_hashes_are_marker(hashes: &[String]) -> bool {
@@ -1070,7 +1090,8 @@ fn projected_upsert_memory_bytes(
     current_file: Option<&FileMetadata>,
     next_file: &FileMetadata,
 ) -> usize {
-    let without_current = current_bytes.saturating_sub(current_file.map(estimate_file_bytes).unwrap_or(0));
+    let without_current =
+        current_bytes.saturating_sub(current_file.map(estimate_file_bytes).unwrap_or(0));
     without_current.saturating_add(estimate_file_bytes(next_file))
 }
 
@@ -1249,7 +1270,10 @@ mod tests {
             }
             inserted += 1;
         }
-        assert!(inserted > 0, "should insert at least one entry before capping");
+        assert!(
+            inserted > 0,
+            "should insert at least one entry before capping"
+        );
         assert!(
             store.stats().estimated_memory_bytes <= store.stats().memory_budget_bytes,
             "store should stay at or under budget"

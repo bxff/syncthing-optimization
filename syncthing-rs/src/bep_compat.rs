@@ -155,7 +155,10 @@ macro_rules! impl_enumish {
 
 impl_enumish!(Compression, "Compression");
 impl_enumish!(ErrorCode, "ErrorCode");
-impl_enumish!(FileDownloadProgressUpdateType, "FileDownloadProgressUpdateType");
+impl_enumish!(
+    FileDownloadProgressUpdateType,
+    "FileDownloadProgressUpdateType"
+);
 impl_enumish!(FileInfoType, "FileInfoType");
 impl_enumish!(FolderStopReason, "FolderStopReason");
 impl_enumish!(FolderType, "FolderType");
@@ -573,7 +576,9 @@ impl FileInfo {
     }
 
     pub(crate) fn ShouldConflict(&self, other: &Self) -> bool {
-        self.Name == other.Name && self.Sequence == other.Sequence && self.VersionHash != other.VersionHash
+        self.Name == other.Name
+            && self.Sequence == other.Sequence
+            && self.VersionHash != other.VersionHash
     }
 
     pub(crate) fn ToWire(&self) -> Value {
@@ -943,31 +948,77 @@ impl FileInfoWithoutBlocks {
         }
     }
 
-    pub(crate) fn GetBlockSize(&self) -> i32 { self.BlockSize }
-    pub(crate) fn GetBlocksHash(&self) -> Vec<u8> { self.BlocksHash.clone() }
-    pub(crate) fn GetDeleted(&self) -> bool { self.Deleted }
-    pub(crate) fn GetEncrypted(&self) -> bool { self.Encrypted }
-    pub(crate) fn GetEncryptionTrailerSize(&self) -> i64 { self.EncryptionTrailerSize }
-    pub(crate) fn GetInodeChangeNs(&self) -> i64 { self.InodeChangeNs }
-    pub(crate) fn GetInvalid(&self) -> bool { self.Invalid }
-    pub(crate) fn GetLocalFlags(&self) -> u32 { self.LocalFlags }
-    pub(crate) fn GetModifiedBy(&self) -> i64 { self.ModifiedBy }
-    pub(crate) fn GetModifiedNs(&self) -> i32 { self.ModifiedNs }
-    pub(crate) fn GetModifiedS(&self) -> i64 { self.ModifiedS }
-    pub(crate) fn GetName(&self) -> String { self.Name.clone() }
-    pub(crate) fn GetNoPermissions(&self) -> bool { self.NoPermissions }
-    pub(crate) fn GetPermissions(&self) -> u32 { self.Permissions }
-    pub(crate) fn GetPlatform(&self) -> PlatformData { self.Platform.clone() }
-    pub(crate) fn GetPreviousBlocksHash(&self) -> Vec<u8> { self.PreviousBlocksHash.clone() }
-    pub(crate) fn GetSequence(&self) -> i64 { self.Sequence }
-    pub(crate) fn GetSize(&self) -> i64 { self.Size }
-    pub(crate) fn GetSymlinkTarget(&self) -> String { self.SymlinkTarget.clone() }
-    pub(crate) fn GetType(&self) -> i32 { self.Type }
-    pub(crate) fn GetVersion(&self) -> Vector { self.Version.clone() }
+    pub(crate) fn GetBlockSize(&self) -> i32 {
+        self.BlockSize
+    }
+    pub(crate) fn GetBlocksHash(&self) -> Vec<u8> {
+        self.BlocksHash.clone()
+    }
+    pub(crate) fn GetDeleted(&self) -> bool {
+        self.Deleted
+    }
+    pub(crate) fn GetEncrypted(&self) -> bool {
+        self.Encrypted
+    }
+    pub(crate) fn GetEncryptionTrailerSize(&self) -> i64 {
+        self.EncryptionTrailerSize
+    }
+    pub(crate) fn GetInodeChangeNs(&self) -> i64 {
+        self.InodeChangeNs
+    }
+    pub(crate) fn GetInvalid(&self) -> bool {
+        self.Invalid
+    }
+    pub(crate) fn GetLocalFlags(&self) -> u32 {
+        self.LocalFlags
+    }
+    pub(crate) fn GetModifiedBy(&self) -> i64 {
+        self.ModifiedBy
+    }
+    pub(crate) fn GetModifiedNs(&self) -> i32 {
+        self.ModifiedNs
+    }
+    pub(crate) fn GetModifiedS(&self) -> i64 {
+        self.ModifiedS
+    }
+    pub(crate) fn GetName(&self) -> String {
+        self.Name.clone()
+    }
+    pub(crate) fn GetNoPermissions(&self) -> bool {
+        self.NoPermissions
+    }
+    pub(crate) fn GetPermissions(&self) -> u32 {
+        self.Permissions
+    }
+    pub(crate) fn GetPlatform(&self) -> PlatformData {
+        self.Platform.clone()
+    }
+    pub(crate) fn GetPreviousBlocksHash(&self) -> Vec<u8> {
+        self.PreviousBlocksHash.clone()
+    }
+    pub(crate) fn GetSequence(&self) -> i64 {
+        self.Sequence
+    }
+    pub(crate) fn GetSize(&self) -> i64 {
+        self.Size
+    }
+    pub(crate) fn GetSymlinkTarget(&self) -> String {
+        self.SymlinkTarget.clone()
+    }
+    pub(crate) fn GetType(&self) -> i32 {
+        self.Type
+    }
+    pub(crate) fn GetVersion(&self) -> Vector {
+        self.Version.clone()
+    }
 }
 
 impl readWriter {
-    pub(crate) fn Read<R: Read>(&mut self, reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
+    pub(crate) fn Read<R: Read>(
+        &mut self,
+        reader: &mut R,
+        buf: &mut [u8],
+    ) -> std::io::Result<usize> {
         let n = reader.read(buf)?;
         self.r += n;
         Ok(n)
@@ -982,12 +1033,10 @@ impl readWriter {
 
 pub(crate) static BlockSizes: [i32; 4] = [128, 1024, 131_072, 1_048_576];
 pub(crate) static Compression_name: [&str; 3] = ["never", "always", "metadata"];
-pub(crate) static Compression_value: [i32; 3] = [
-    CompressionNever,
-    CompressionAlways,
-    CompressionMetadata,
-];
-pub(crate) static ErrorCode_name: [&str; 4] = ["no_error", "generic", "no_such_file", "invalid_file"];
+pub(crate) static Compression_value: [i32; 3] =
+    [CompressionNever, CompressionAlways, CompressionMetadata];
+pub(crate) static ErrorCode_name: [&str; 4] =
+    ["no_error", "generic", "no_such_file", "invalid_file"];
 pub(crate) static ErrorCode_value: [i32; 4] = [
     ErrorCodeNoError,
     ErrorCodeGeneric,
@@ -1014,11 +1063,14 @@ pub(crate) static FileInfoType_value: [i32; 5] = [
     FileInfoTypeSymlink,
 ];
 pub(crate) static FolderStopReason_name: [&str; 2] = ["running", "paused"];
-pub(crate) static FolderStopReason_value: [i32; 2] = [
-    FolderStopReasonRunning,
-    FolderStopReasonPaused,
+pub(crate) static FolderStopReason_value: [i32; 2] =
+    [FolderStopReasonRunning, FolderStopReasonPaused];
+pub(crate) static FolderType_name: [&str; 4] = [
+    "send_receive",
+    "send_only",
+    "receive_only",
+    "receive_encrypted",
 ];
-pub(crate) static FolderType_name: [&str; 4] = ["send_receive", "send_only", "receive_only", "receive_encrypted"];
 pub(crate) static FolderType_value: [i32; 4] = [
     FolderTypeSendReceive,
     FolderTypeSendOnly,
@@ -1112,10 +1164,8 @@ pub(crate) static file_bep_bep_proto_rawDescOnce: OnceLock<Vec<u8>> = OnceLock::
 pub(crate) static file_bep_bep_proto_rawDescData: OnceLock<Vec<u8>> = OnceLock::new();
 
 pub(crate) static sha256OfEmptyBlock: [u8; 32] = [
-    0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14,
-    0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9, 0x24,
-    0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c,
-    0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
+    0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9, 0x24,
+    0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
 ];
 
 pub(crate) fn blocksEqual(a: &[BlockInfo], b: &[BlockInfo]) -> bool {
@@ -1171,23 +1221,59 @@ pub(crate) fn IsVersionMismatch(local: &Vector, remote: &Vector) -> bool {
     local != remote
 }
 
-pub(crate) fn BlockInfoFromWire(v: &BlockInfo) -> BlockInfo { v.clone() }
-pub(crate) fn clusterConfigFromWire(v: &ClusterConfig) -> ClusterConfig { v.clone() }
-pub(crate) fn deviceFromWire(v: &Device) -> Device { v.clone() }
-pub(crate) fn downloadProgressFromWire(v: &DownloadProgress) -> DownloadProgress { v.clone() }
-pub(crate) fn fileDownloadProgressUpdateFromWire(v: &FileDownloadProgressUpdate) -> FileDownloadProgressUpdate { v.clone() }
-pub(crate) fn fileInfoFromWireWithBlocks(v: &FileInfo) -> FileInfo { v.clone() }
-pub(crate) fn FileInfoFromWire(v: &FileInfo) -> FileInfo { v.clone() }
-pub(crate) fn folderFromWire(v: &Folder) -> Folder { v.clone() }
-pub(crate) fn helloFromWire(v: &Hello) -> Hello { v.clone() }
-pub(crate) fn indexFromWire(v: &Index) -> Index { v.clone() }
-pub(crate) fn indexUpdateFromWire(v: &IndexUpdate) -> IndexUpdate { v.clone() }
-pub(crate) fn platformDataFromWire(v: &PlatformData) -> PlatformData { v.clone() }
-pub(crate) fn requestFromWire(v: &Request) -> Request { v.clone() }
-pub(crate) fn responseFromWire(v: &Response) -> Response { v.clone() }
-pub(crate) fn unixDataFromWire(v: &UnixData) -> UnixData { v.clone() }
-pub(crate) fn xattrFromWire(v: &Xattr) -> Xattr { v.clone() }
-pub(crate) fn xattrDataFromWire(v: &XattrData) -> XattrData { v.clone() }
+pub(crate) fn BlockInfoFromWire(v: &BlockInfo) -> BlockInfo {
+    v.clone()
+}
+pub(crate) fn clusterConfigFromWire(v: &ClusterConfig) -> ClusterConfig {
+    v.clone()
+}
+pub(crate) fn deviceFromWire(v: &Device) -> Device {
+    v.clone()
+}
+pub(crate) fn downloadProgressFromWire(v: &DownloadProgress) -> DownloadProgress {
+    v.clone()
+}
+pub(crate) fn fileDownloadProgressUpdateFromWire(
+    v: &FileDownloadProgressUpdate,
+) -> FileDownloadProgressUpdate {
+    v.clone()
+}
+pub(crate) fn fileInfoFromWireWithBlocks(v: &FileInfo) -> FileInfo {
+    v.clone()
+}
+pub(crate) fn FileInfoFromWire(v: &FileInfo) -> FileInfo {
+    v.clone()
+}
+pub(crate) fn folderFromWire(v: &Folder) -> Folder {
+    v.clone()
+}
+pub(crate) fn helloFromWire(v: &Hello) -> Hello {
+    v.clone()
+}
+pub(crate) fn indexFromWire(v: &Index) -> Index {
+    v.clone()
+}
+pub(crate) fn indexUpdateFromWire(v: &IndexUpdate) -> IndexUpdate {
+    v.clone()
+}
+pub(crate) fn platformDataFromWire(v: &PlatformData) -> PlatformData {
+    v.clone()
+}
+pub(crate) fn requestFromWire(v: &Request) -> Request {
+    v.clone()
+}
+pub(crate) fn responseFromWire(v: &Response) -> Response {
+    v.clone()
+}
+pub(crate) fn unixDataFromWire(v: &UnixData) -> UnixData {
+    v.clone()
+}
+pub(crate) fn xattrFromWire(v: &Xattr) -> Xattr {
+    v.clone()
+}
+pub(crate) fn xattrDataFromWire(v: &XattrData) -> XattrData {
+    v.clone()
+}
 
 pub(crate) fn FileInfoFromDB(v: &FileInfo) -> FileInfo {
     v.clone()
@@ -1230,8 +1316,7 @@ pub(crate) fn file_bep_bep_proto_rawDescGZIP() -> Vec<u8> {
 }
 
 pub(crate) fn init() {
-    let _ = file_bep_bep_proto_rawDescData
-        .get_or_init(|| file_bep_bep_proto_rawDesc.to_vec());
+    let _ = file_bep_bep_proto_rawDescData.get_or_init(|| file_bep_bep_proto_rawDesc.to_vec());
 }
 
 pub(crate) fn TestBlocksEqual() -> bool {

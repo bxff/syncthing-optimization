@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidateRequiredScenarioCoverageReportsUnmappedRequiredScenario(t *testing.T) {
@@ -101,5 +102,31 @@ func TestValidateImplementedLikeAllowsImplementedWithoutPassingScenario(t *testi
 		if strings.Contains(failure.Message, "current status=") {
 			t.Fatalf("did not expect pass-status failure for implemented feature: %#v", report.Failures)
 		}
+	}
+}
+
+func TestValidateReportFreshnessRejectsStaleReports(t *testing.T) {
+	report := &guardrailReport{}
+	stale := time.Now().UTC().Add(-(maxDiffReportAge + 2*time.Hour)).Format(time.RFC3339)
+	validateReportFreshness(report, "parity/diff-reports/latest.json", "differential report", stale, maxDiffReportAge)
+
+	if len(report.Failures) != 1 {
+		t.Fatalf("expected 1 failure, got %d", len(report.Failures))
+	}
+	if report.Failures[0].Rule != "differential-report-stale" {
+		t.Fatalf("unexpected rule: %s", report.Failures[0].Rule)
+	}
+	if !strings.Contains(report.Failures[0].Message, "stale") {
+		t.Fatalf("unexpected message: %s", report.Failures[0].Message)
+	}
+}
+
+func TestValidateReportFreshnessAllowsRecentReports(t *testing.T) {
+	report := &guardrailReport{}
+	recent := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	validateReportFreshness(report, "parity/diff-reports/latest.json", "differential report", recent, maxDiffReportAge)
+
+	if len(report.Failures) != 0 {
+		t.Fatalf("expected no failures, got %#v", report.Failures)
 	}
 }

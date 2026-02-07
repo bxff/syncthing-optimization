@@ -26,7 +26,8 @@ import (
 )
 
 const (
-	schemaVersion = 1
+	schemaVersion    = 1
+	maxDiffReportAge = 72 * time.Hour
 )
 
 var sourcePatterns = []string{
@@ -1189,6 +1190,7 @@ func enforceDiffReports(report *guardrailReport, mode string) {
 			Message: "missing or invalid differential report",
 		})
 	} else {
+		validateReportFreshness(report, latestPath, "differential report", latest.GeneratedAt, maxDiffReportAge)
 		if strings.TrimSpace(latest.ProducedBy) != "parity-harness" {
 			report.Failures = append(report.Failures, reportFailure{
 				Rule:    "differential-report",
@@ -1225,6 +1227,7 @@ func enforceDiffReports(report *guardrailReport, mode string) {
 			Message: "missing or invalid memory-cap test status report",
 		})
 	} else {
+		validateReportFreshness(report, testPath, "memory-cap status report", test.GeneratedAt, maxDiffReportAge)
 		status := strings.ToLower(strings.TrimSpace(test.MemoryCap.Status))
 		if status == "" || status == "skipped" || (status != "pass" && status != "passed") {
 			report.Failures = append(report.Failures, reportFailure{
@@ -1254,6 +1257,8 @@ func enforceDiffReports(report *guardrailReport, mode string) {
 			Path:    interopPath,
 			Message: "release mode requires interop pass",
 		})
+	} else {
+		validateReportFreshness(report, interopPath, "interop report", interop.GeneratedAt, maxDiffReportAge)
 	}
 
 	durPath := "parity/diff-reports/durability.json"
@@ -1265,6 +1270,7 @@ func enforceDiffReports(report *guardrailReport, mode string) {
 			Message: "missing or invalid durability report",
 		})
 	} else {
+		validateReportFreshness(report, durPath, "durability report", dur.GeneratedAt, maxDiffReportAge)
 		if strings.ToLower(strings.TrimSpace(dur.Durability)) != "passed" {
 			report.Failures = append(report.Failures, reportFailure{
 				Rule:    "release-durability",
@@ -1279,6 +1285,38 @@ func enforceDiffReports(report *guardrailReport, mode string) {
 				Message: fmt.Sprintf("crash_recovery=%s", dur.CrashRecovery),
 			})
 		}
+	}
+}
+
+func validateReportFreshness(report *guardrailReport, path, label, generatedAt string, maxAge time.Duration) {
+	ts := strings.TrimSpace(generatedAt)
+	if ts == "" {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "differential-report-stale",
+			Path:    path,
+			Message: fmt.Sprintf("%s is missing generated_at", label),
+		})
+		return
+	}
+	parsed, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "differential-report-stale",
+			Path:    path,
+			Message: fmt.Sprintf("%s has invalid generated_at %q", label, generatedAt),
+		})
+		return
+	}
+	age := time.Since(parsed)
+	if age < 0 {
+		age = -age
+	}
+	if age > maxAge {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "differential-report-stale",
+			Path:    path,
+			Message: fmt.Sprintf("%s is stale (%s old, max %s)", label, age.Round(time.Minute), maxAge),
+		})
 	}
 }
 

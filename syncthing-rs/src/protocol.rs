@@ -122,9 +122,9 @@ pub(crate) fn run_message_exchange(messages: &[BepMessage]) -> Result<Vec<&'stat
                 pending_request = Some(*id);
             }
             BepMessage::Response { id, .. } => {
-                let expected = pending_request.take().ok_or_else(|| {
-                    format!("response {id} received without pending request")
-                })?;
+                let expected = pending_request
+                    .take()
+                    .ok_or_else(|| format!("response {id} received without pending request"))?;
                 if *id != expected {
                     return Err(format!(
                         "response id mismatch: expected={expected} received={id}"

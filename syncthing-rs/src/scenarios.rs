@@ -317,8 +317,8 @@ fn scenario_path_order_invariant() -> Result<Value, String> {
 
     let cfg = WalkConfig::new(&spill_root).with_spill_threshold_entries(2);
     let mut walk_paths = Vec::new();
-    let walk_stats = walk_deterministic(&fs_root, &cfg, |path| walk_paths.push(path))
-        .map_err(err_to_string)?;
+    let walk_stats =
+        walk_deterministic(&fs_root, &cfg, |path| walk_paths.push(path)).map_err(err_to_string)?;
 
     let mut store = Store::open(StoreConfig::new(&store_root)).map_err(err_to_string)?;
     for (idx, path) in walk_paths.iter().enumerate() {

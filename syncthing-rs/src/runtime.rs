@@ -378,7 +378,9 @@ fn read_frame(reader: &mut impl Read) -> Result<Option<Vec<u8>>, String> {
         .map_err(|err| format!("read frame payload length: {err}"))?;
     let message_len = u32::from_be_bytes(message_len_bytes) as usize;
     if message_len > MAX_FRAME_BYTES {
-        return Err(format!("frame too large: {message_len} > {MAX_FRAME_BYTES}"));
+        return Err(format!(
+            "frame too large: {message_len} > {MAX_FRAME_BYTES}"
+        ));
     }
 
     let mut payload = vec![0_u8; message_len];
@@ -627,7 +629,8 @@ mod tests {
             BepMessage::Response {
                 id: 1,
                 code: 0,
-                data_len: 11
+                data_len: 11,
+                data: b"hello-world".to_vec()
             }
         );
 
@@ -700,7 +703,8 @@ mod tests {
             BepMessage::Response {
                 id: 9,
                 code: 1,
-                data_len: 0
+                data_len: 0,
+                data: Vec::new()
             }
         );
 

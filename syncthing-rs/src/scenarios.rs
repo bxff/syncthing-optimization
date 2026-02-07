@@ -261,7 +261,9 @@ fn scenario_protocol_state_transition() -> Result<Value, String> {
         .outbound_messages
         .iter()
         .filter_map(|message| match message {
-            crate::bep::BepMessage::Response { id, code, data_len } => Some(json!({
+            crate::bep::BepMessage::Response {
+                id, code, data_len, ..
+            } => Some(json!({
                 "id": id,
                 "code": code,
                 "data_len": data_len,

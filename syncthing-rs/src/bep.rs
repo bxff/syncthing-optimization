@@ -1,9 +1,10 @@
 use crate::bep_core::{
-    Header, MessageCompression_MESSAGE_COMPRESSION_LZ4, MessageCompression_MESSAGE_COMPRESSION_NONE,
-    MessageType_MESSAGE_TYPE_CLOSE, MessageType_MESSAGE_TYPE_CLUSTER_CONFIG,
-    MessageType_MESSAGE_TYPE_DOWNLOAD_PROGRESS, MessageType_MESSAGE_TYPE_INDEX,
-    MessageType_MESSAGE_TYPE_INDEX_UPDATE, MessageType_MESSAGE_TYPE_PING,
-    MessageType_MESSAGE_TYPE_REQUEST, MessageType_MESSAGE_TYPE_RESPONSE,
+    Header, MessageCompression_MESSAGE_COMPRESSION_LZ4,
+    MessageCompression_MESSAGE_COMPRESSION_NONE, MessageType_MESSAGE_TYPE_CLOSE,
+    MessageType_MESSAGE_TYPE_CLUSTER_CONFIG, MessageType_MESSAGE_TYPE_DOWNLOAD_PROGRESS,
+    MessageType_MESSAGE_TYPE_INDEX, MessageType_MESSAGE_TYPE_INDEX_UPDATE,
+    MessageType_MESSAGE_TYPE_PING, MessageType_MESSAGE_TYPE_REQUEST,
+    MessageType_MESSAGE_TYPE_RESPONSE,
 };
 use lz4_flex::{compress_prepend_size, decompress_size_prepended};
 use serde::{Deserialize, Serialize};
@@ -42,6 +43,8 @@ pub(crate) enum BepMessage {
         id: u32,
         code: u32,
         data_len: u32,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        data: Vec<u8>,
     },
     DownloadProgress {
         folder: String,
@@ -228,6 +231,7 @@ pub(crate) fn default_exchange() -> Vec<BepMessage> {
             id: 1,
             code: 0,
             data_len: 110,
+            data: Vec::new(),
         },
         BepMessage::DownloadProgress {
             folder: "default".to_string(),
@@ -307,6 +311,7 @@ mod tests {
             id: 1,
             code: 0,
             data_len: 11,
+            data: Vec::new(),
         };
         let frame = encode_frame(&message).expect("encode");
         let header = parse_header(&frame);

@@ -793,23 +793,32 @@ impl model {
                     id: *id,
                     code: 0,
                     data_len: data.len() as u32,
+                    data,
                 })),
                 Err(_) => Ok(Some(BepMessage::Response {
                     id: *id,
                     code: 1,
                     data_len: 0,
+                    data: Vec::new(),
                 })),
             },
             BepMessage::Response {
                 id: _,
                 code,
                 data_len,
+                data,
             } => {
                 let stats = self.deviceStatRefs.entry(device.to_string()).or_default();
                 *stats.entry("responses".to_string()).or_insert(0) += 1;
-                *stats.entry("response_bytes".to_string()).or_insert(0) += i64::from(*data_len);
+                let observed_len = (*data_len as usize).max(data.len()) as i64;
+                *stats.entry("response_bytes".to_string()).or_insert(0) += observed_len;
                 *stats.entry("response_errors".to_string()).or_insert(0) +=
                     if *code == 0 { 0 } else { 1 };
+                if *data_len > 0 && (*data_len as usize) != data.len() {
+                    *stats
+                        .entry("response_len_mismatch".to_string())
+                        .or_insert(0) += 1;
+                }
                 Ok(None)
             }
             BepMessage::DownloadProgress { folder, updates } => {
@@ -1554,10 +1563,8 @@ mod tests {
 
     #[test]
     fn folder_statistics_expose_structured_cap_violation_report() {
-        let root = std::env::temp_dir().join(format!(
-            "syncthing-rs-cap-report-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("syncthing-rs-cap-report-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("mkdir");
 
@@ -1701,6 +1708,7 @@ mod tests {
                 id: 1,
                 code: 0,
                 data_len: 11,
+                data: b"hello-world".to_vec(),
             }
         );
         assert_eq!(m.DownloadProgress("peer-a"), vec!["default:a.txt:2"]);
@@ -1735,6 +1743,7 @@ mod tests {
                 id: 7,
                 code: 1,
                 data_len: 0,
+                data: Vec::new(),
             })
         );
     }

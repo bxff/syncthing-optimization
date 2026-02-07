@@ -1,3 +1,5 @@
+use crate::bep::BepMessage;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProtocolEvent {
     Dial,
@@ -94,9 +96,54 @@ pub(crate) fn default_sequence() -> [ProtocolEvent; 10] {
     ]
 }
 
+pub(crate) fn event_from_message(message: &BepMessage) -> ProtocolEvent {
+    match message {
+        BepMessage::Hello { .. } => ProtocolEvent::Hello,
+        BepMessage::ClusterConfig { .. } => ProtocolEvent::ClusterConfig,
+        BepMessage::Index { .. } => ProtocolEvent::Index,
+        BepMessage::IndexUpdate { .. } => ProtocolEvent::IndexUpdate,
+        BepMessage::Request { .. } => ProtocolEvent::Request,
+        BepMessage::Response { .. } => ProtocolEvent::Response,
+        BepMessage::DownloadProgress { .. } => ProtocolEvent::DownloadProgress,
+        BepMessage::Ping { .. } => ProtocolEvent::Ping,
+        BepMessage::Close { .. } => ProtocolEvent::Close,
+    }
+}
+
+pub(crate) fn run_message_exchange(messages: &[BepMessage]) -> Result<Vec<&'static str>, String> {
+    let mut state = ProtocolState::Dialed;
+    let mut trace = vec![ProtocolEvent::Dial.as_str()];
+    let mut pending_request: Option<u32> = None;
+
+    for message in messages {
+        let event = event_from_message(message);
+        match message {
+            BepMessage::Request { id, .. } => {
+                pending_request = Some(*id);
+            }
+            BepMessage::Response { id, .. } => {
+                let expected = pending_request.take().ok_or_else(|| {
+                    format!("response {id} received without pending request")
+                })?;
+                if *id != expected {
+                    return Err(format!(
+                        "response id mismatch: expected={expected} received={id}"
+                    ));
+                }
+            }
+            _ => {}
+        }
+        state = advance(state, event)?;
+        trace.push(event.as_str());
+    }
+
+    Ok(trace)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bep::default_exchange;
 
     #[test]
     fn default_sequence_is_valid() {
@@ -136,5 +183,37 @@ mod tests {
         ])
         .expect_err("must fail");
         assert!(err.contains("invalid protocol transition"));
+    }
+
+    #[test]
+    fn default_exchange_is_valid() {
+        let trace = run_message_exchange(&default_exchange()).expect("valid exchange");
+        assert_eq!(
+            trace,
+            vec![
+                "dial",
+                "hello",
+                "cluster_config",
+                "index",
+                "index_update",
+                "request",
+                "response",
+                "download_progress",
+                "ping",
+                "close",
+            ]
+        );
+    }
+
+    #[test]
+    fn response_id_mismatch_fails() {
+        let mut messages = default_exchange();
+        for msg in &mut messages {
+            if let BepMessage::Response { id, .. } = msg {
+                *id = 999;
+            }
+        }
+        let err = run_message_exchange(&messages).expect_err("must fail");
+        assert!(err.contains("response id mismatch"));
     }
 }

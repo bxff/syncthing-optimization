@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-02-07T06:36:30Z",
+  "totals": {
+    "total_features": 1466,
+    "missing": 1466,
+    "implemented": 0,
+    "parity_verified": 0,
+    "failures": 0
+  },
+  "subsystems": [
+    {
+      "name": "config",
+      "total": 85,
+      "missing": 85,
+      "implemented": 0,
+      "parity_verified": 0,
+      "coverage_percent": 0
+    },
+    {
+      "name": "db",
+      "total": 62,
+      "missing": 62,
+      "implemented": 0,
+      "parity_verified": 0,
+      "coverage_percent": 0
+    },
+    {
+      "name": "model",
+      "total": 536,
+      "missing": 536,
+      "implemented": 0,
+      "parity_verified": 0,
+      "coverage_percent": 0
+    },
+    {
+      "name": "protocol",
+      "total": 783,
+      "missing": 783,
+      "implemented": 0,
+      "parity_verified": 0,
+      "coverage_percent": 0
+    }
+  ]
+}

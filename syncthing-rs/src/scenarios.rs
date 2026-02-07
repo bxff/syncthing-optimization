@@ -1,6 +1,8 @@
+use crate::folder_modes::all_mode_actions;
+use crate::planner::{classify_paths, compute_need, VersionedFile};
+use crate::protocol::{default_sequence, run_events};
 use crate::store::{FileMetadata, Store, StoreConfig, JOURNAL_FILE_NAME};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -67,84 +69,91 @@ fn scenario_index_sequence_behavior() -> Result<Value, String> {
 }
 
 fn scenario_global_need_decision() -> Result<Value, String> {
-    let local = BTreeMap::from([
-        ("a.txt".to_string(), 2_u64),
-        ("b.txt".to_string(), 5_u64),
-        ("c.txt".to_string(), 1_u64),
-    ]);
-    let remote = BTreeMap::from([
-        ("a.txt".to_string(), 3_u64),
-        ("b.txt".to_string(), 5_u64),
-        ("d.txt".to_string(), 1_u64),
-    ]);
-
-    let mut need = Vec::new();
-    for (path, remote_seq) in &remote {
-        let local_seq = local.get(path).copied().unwrap_or(0);
-        if *remote_seq > local_seq {
-            need.push(path.clone());
-        }
-    }
+    let local = vec![
+        versioned("a.txt", 2, false, false),
+        versioned("b.txt", 5, false, false),
+        versioned("c.txt", 1, false, false),
+        versioned("e.txt", 10, false, false),
+    ];
+    let remote = vec![
+        versioned("a.txt", 3, false, false),
+        versioned("b.txt", 5, false, false),
+        versioned("d.txt", 1, false, false),
+        versioned("e.txt", 11, true, false),
+    ];
+    let plan = compute_need(&local, &remote);
+    let need_count = plan.need_paths.len();
+    let stale_delete_count = plan.stale_deletes.len();
 
     Ok(json!({
         "scenario": "global-need-decision",
         "source": "rust",
         "status": "prototype",
-        "need_paths": need,
-        "need_count": need.len()
+        "need_paths": plan.need_paths,
+        "need_count": need_count,
+        "stale_deletes": plan.stale_deletes,
+        "stale_delete_count": stale_delete_count
     }))
 }
 
 fn scenario_conflict_and_ignore_semantics() -> Result<Value, String> {
-    let paths = [
+    let paths = vec![
         "docs/readme.md",
         "docs/.DS_Store",
         "tmp/build.tmp",
         "docs/readme.sync-conflict-20260207.md",
-    ];
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
 
-    let ignored = paths
-        .iter()
-        .filter(|p| p.ends_with(".tmp") || p.ends_with(".DS_Store"))
-        .count();
-    let conflicts = paths.iter().filter(|p| p.contains("sync-conflict")).count();
+    let classification = classify_paths(&paths, &[".tmp", ".DS_Store"]);
+    let ignored_count = classification.ignored.len();
+    let conflict_count = classification.conflicts.len();
+    let considered_count = classification.considered.len();
 
     Ok(json!({
         "scenario": "conflict-and-ignore-semantics",
         "source": "rust",
         "status": "prototype",
-        "ignored_count": ignored,
-        "conflict_count": conflicts,
-        "considered_count": paths.len() - ignored
+        "ignored_count": ignored_count,
+        "ignored_paths": classification.ignored,
+        "conflict_count": conflict_count,
+        "conflict_paths": classification.conflicts,
+        "considered_count": considered_count
     }))
 }
 
 fn scenario_folder_type_behavior() -> Result<Value, String> {
+    let actions = all_mode_actions();
+    let mut mode_json = serde_json::Map::new();
+    for action in actions {
+        mode_json.insert(
+            action.mode.as_str().to_string(),
+            json!({
+                "pipeline": action.pipeline,
+                "may_push": action.may_push,
+                "requires_local_revert": action.requires_local_revert,
+                "encrypted_index": action.encrypted_index
+            }),
+        );
+    }
+
     Ok(json!({
         "scenario": "folder-type-behavior",
         "source": "rust",
         "status": "prototype",
-        "folder_modes": {
-            "sendrecv": ["scan", "index", "pull", "push"],
-            "recvonly": ["scan", "index", "pull", "local_revert_required"],
-            "recvenc": ["scan", "index_encrypted", "pull_encrypted"]
-        }
+        "folder_modes": mode_json
     }))
 }
 
 fn scenario_protocol_state_transition() -> Result<Value, String> {
+    let trace = run_events(&default_sequence())?;
     Ok(json!({
         "scenario": "protocol-state-transition",
         "source": "rust",
         "status": "prototype",
-        "transitions": [
-            "dial",
-            "hello",
-            "cluster_config",
-            "index",
-            "index_update",
-            "ping"
-        ]
+        "transitions": trace
     }))
 }
 
@@ -300,6 +309,15 @@ fn meta(
 
 fn err_to_string(err: impl std::fmt::Display) -> String {
     err.to_string()
+}
+
+fn versioned(path: &str, sequence: u64, deleted: bool, ignored: bool) -> VersionedFile {
+    VersionedFile {
+        path: path.to_string(),
+        sequence,
+        deleted,
+        ignored,
+    }
 }
 
 #[cfg(test)]

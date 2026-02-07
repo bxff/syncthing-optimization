@@ -1,7 +1,14 @@
 {
   "conflict_count": 1,
+  "conflict_paths": [
+    "docs/readme.sync-conflict-20260207.md"
+  ],
   "considered_count": 2,
   "ignored_count": 2,
+  "ignored_paths": [
+    "docs/.DS_Store",
+    "tmp/build.tmp"
+  ],
   "scenario": "conflict-and-ignore-semantics",
   "source": "rust",
   "status": "prototype"

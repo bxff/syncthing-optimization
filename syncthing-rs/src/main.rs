@@ -1,3 +1,6 @@
+mod folder_modes;
+mod planner;
+mod protocol;
 mod scenarios;
 mod store;
 

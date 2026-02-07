@@ -6,5 +6,9 @@
   ],
   "scenario": "global-need-decision",
   "source": "rust",
+  "stale_delete_count": 1,
+  "stale_deletes": [
+    "e.txt"
+  ],
   "status": "prototype"
 }

@@ -1,22 +1,37 @@
 {
   "folder_modes": {
-    "recvenc": [
-      "scan",
-      "index_encrypted",
-      "pull_encrypted"
-    ],
-    "recvonly": [
-      "scan",
-      "index",
-      "pull",
-      "local_revert_required"
-    ],
-    "sendrecv": [
-      "scan",
-      "index",
-      "pull",
-      "push"
-    ]
+    "recvenc": {
+      "encrypted_index": true,
+      "may_push": false,
+      "pipeline": [
+        "scan",
+        "index_encrypted",
+        "pull_encrypted"
+      ],
+      "requires_local_revert": false
+    },
+    "recvonly": {
+      "encrypted_index": false,
+      "may_push": false,
+      "pipeline": [
+        "scan",
+        "index",
+        "pull",
+        "local_revert_required"
+      ],
+      "requires_local_revert": true
+    },
+    "sendrecv": {
+      "encrypted_index": false,
+      "may_push": true,
+      "pipeline": [
+        "scan",
+        "index",
+        "pull",
+        "push"
+      ],
+      "requires_local_revert": false
+    }
   },
   "scenario": "folder-type-behavior",
   "source": "rust",

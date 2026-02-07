@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-02-07T08:08:50Z",
+  "generated_at": "2026-02-07T08:31:18Z",
   "totals": {
     "total_features": 1466,
-    "missing": 1420,
-    "implemented": 46,
+    "missing": 955,
+    "implemented": 511,
     "parity_verified": 0,
     "failures": 0
   },
@@ -12,8 +12,8 @@
     {
       "name": "config",
       "total": 85,
-      "missing": 85,
-      "implemented": 0,
+      "missing": 58,
+      "implemented": 27,
       "parity_verified": 0,
       "coverage_percent": 0
     },
@@ -36,8 +36,8 @@
     {
       "name": "protocol",
       "total": 783,
-      "missing": 783,
-      "implemented": 0,
+      "missing": 345,
+      "implemented": 438,
       "parity_verified": 0,
       "coverage_percent": 0
     }

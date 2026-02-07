@@ -5,6 +5,7 @@ mod folder_modes;
 mod index_engine;
 mod planner;
 mod protocol;
+mod protocol_surface;
 mod scenarios;
 mod store;
 

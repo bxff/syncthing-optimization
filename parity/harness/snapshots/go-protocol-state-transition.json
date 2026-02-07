@@ -21,6 +21,7 @@
     "ping",
     "close"
   ],
+  "request_data_hex": "776f726c64",
   "scenario": "protocol-state-transition",
   "source": "go",
   "status": "validated",

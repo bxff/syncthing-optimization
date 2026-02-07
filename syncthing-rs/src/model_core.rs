@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 pub(crate) static ErrFolderMissing: &str = "folder missing";
@@ -620,6 +620,31 @@ impl model {
         self.CurrentFolderFile(folder_id, path)
     }
 
+    pub(crate) fn RequestData(
+        &self,
+        folder_id: &str,
+        path: &str,
+        offset: u64,
+        size: usize,
+    ) -> Result<Vec<u8>, String> {
+        let cfg = self
+            .folderCfgs
+            .get(folder_id)
+            .ok_or_else(|| ErrFolderMissing.to_string())?;
+        let abs = safe_join_folder_relative(Path::new(&cfg.path), path)?;
+        readOffsetIntoBuf(&abs, offset, size)
+    }
+
+    pub(crate) fn RequestGlobalData(
+        &self,
+        folder_id: &str,
+        path: &str,
+        offset: u64,
+        size: usize,
+    ) -> Result<Vec<u8>, String> {
+        self.RequestData(folder_id, path, offset, size)
+    }
+
     pub(crate) fn State(&self, folder_id: &str) -> String {
         if self.closed {
             return "stopped".to_string();
@@ -1190,6 +1215,18 @@ pub(crate) fn readOffsetIntoBuf(path: &PathBuf, offset: u64, len: usize) -> Resu
     Ok(buf)
 }
 
+fn safe_join_folder_relative(root: &Path, relative: &str) -> Result<PathBuf, String> {
+    let mut clean = PathBuf::new();
+    for component in Path::new(relative).components() {
+        match component {
+            Component::Normal(seg) => clean.push(seg),
+            Component::CurDir => {}
+            _ => return Err(format!("invalid relative path: {relative}")),
+        }
+    }
+    Ok(root.join(clean))
+}
+
 pub(crate) fn redactPathError(path: &str, err: &str) -> redactedError {
     redactedError {
         error: err.to_string(),
@@ -1239,5 +1276,42 @@ mod tests {
         writeEncryptionToken("x", "tok").expect("write token");
         let got = readEncryptionToken("x").expect("read token");
         assert_eq!(got, "tok");
+    }
+
+    #[test]
+    fn request_data_reads_expected_slice() {
+        let root = std::env::temp_dir().join(format!("syncthing-rs-request-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("mkdir");
+        fs::write(root.join("a.txt"), b"hello-world").expect("write");
+
+        let mut m = NewModel();
+        m.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+
+        let got = m
+            .RequestData("default", "a.txt", 6, 5)
+            .expect("request data");
+        assert_eq!(got, b"world");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn request_data_rejects_parent_escape() {
+        let root = std::env::temp_dir().join(format!(
+            "syncthing-rs-request-escape-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("mkdir");
+
+        let mut m = NewModel();
+        m.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+        let err = m
+            .RequestData("default", "../etc/passwd", 0, 16)
+            .expect_err("must reject");
+        assert!(err.contains("invalid relative path"));
+
+        let _ = fs::remove_dir_all(root);
     }
 }

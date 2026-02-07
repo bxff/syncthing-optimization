@@ -2,6 +2,7 @@ use crate::bep::{decode_frame, default_exchange, encode_frame, message_name};
 use crate::config::demo_configs;
 use crate::folder_modes::all_mode_actions;
 use crate::index_engine::{FolderUpdate, IndexEngine};
+use crate::model_core::{newFolderConfiguration, NewModel};
 use crate::planner::{classify_paths, compute_need, VersionedFile};
 use crate::protocol::{default_sequence, run_events};
 use crate::store::{FileMetadata, PageCursor, Store, StoreConfig, JOURNAL_FILE_NAME};
@@ -243,13 +244,26 @@ fn scenario_protocol_state_transition() -> Result<Value, String> {
         let decoded = decode_frame(&frame)?;
         message_types.push(message_name(&decoded));
     }
+
+    let req_root = scenario_root("protocol-state-transition")?;
+    fs::write(req_root.join("a.txt"), b"hello-world").map_err(err_to_string)?;
+    let mut model = NewModel();
+    model.newFolder(newFolderConfiguration(
+        "default",
+        &req_root.to_string_lossy(),
+    ));
+    let request_data = model.RequestData("default", "a.txt", 6, 5)?;
+    let request_data_hex = bytes_to_hex(&request_data);
+    cleanup(req_root);
+
     Ok(json!({
         "scenario": "protocol-state-transition",
         "source": "rust",
         "status": "validated",
         "transitions": trace,
         "message_types": message_types,
-        "frame_sizes": frame_sizes
+        "frame_sizes": frame_sizes,
+        "request_data_hex": request_data_hex
     }))
 }
 
@@ -400,6 +414,10 @@ fn scenario_root(id: &str) -> Result<PathBuf, String> {
 
 fn cleanup(path: PathBuf) {
     let _ = fs::remove_dir_all(path);
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
 }
 
 fn meta(

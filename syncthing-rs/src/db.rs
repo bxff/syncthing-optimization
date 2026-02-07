@@ -926,32 +926,33 @@ impl Db for WalFreeDb {
 
     fn drop_all_files(&mut self, folder: &str, device: &str) -> Result<(), String> {
         self.ensure_open()?;
-        let paths = self
-            .all_files_for_folder_device_light(folder, device)
-            .into_iter()
-            .map(|f| f.path)
-            .collect::<Vec<_>>();
-        for path in paths {
-            self.store
-                .delete_file(folder, device, &path)
-                .map_err(|e| format!("drop all files: {e}"))?;
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = self
+                .store
+                .files_in_folder_device_ordered_page(folder, device, cursor.as_deref(), 1024);
+            if page.items.is_empty() {
+                break;
+            }
+            let next_cursor = page.next_cursor.map(|next| next.path);
+            for meta in page.items {
+                self.store
+                    .delete_file(folder, device, &meta.path)
+                    .map_err(|e| format!("drop all files: {e}"))?;
+            }
+            match next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
         }
         Ok(())
     }
 
     fn drop_device(&mut self, device: &str) -> Result<(), String> {
         self.ensure_open()?;
-        let mut doomed = Vec::new();
-        self.store.for_each_file(|meta| {
-            if meta.device == device {
-                doomed.push((meta.folder.clone(), meta.path.clone()));
-            }
-            true
-        });
-        for (folder, path) in doomed {
-            self.store
-                .delete_file(&folder, device, &path)
-                .map_err(|e| format!("drop device: {e}"))?;
+        let folders = self.list_folders()?;
+        for folder in folders {
+            self.drop_all_files(&folder, device)?;
         }
         self.index_ids.retain(|(_, d), _| d != device);
         self.persist_runtime_metadata()?;
@@ -976,15 +977,9 @@ impl Db for WalFreeDb {
 
     fn drop_folder(&mut self, folder: &str) -> Result<(), String> {
         self.ensure_open()?;
-        let mut doomed = Vec::new();
-        self.store.for_each_file_in_folder(folder, |meta| {
-            doomed.push((meta.device.clone(), meta.path.clone()));
-            true
-        });
-        for (device, path) in doomed {
-            self.store
-                .delete_file(folder, &device, &path)
-                .map_err(|e| format!("drop folder: {e}"))?;
+        let devices = self.store.devices_in_folder(folder);
+        for device in devices {
+            self.drop_all_files(folder, &device)?;
         }
         self.index_ids.retain(|(f, _), _| f != folder);
         self.mtimes.retain(|(f, _), _| f != folder);
@@ -994,12 +989,11 @@ impl Db for WalFreeDb {
 
     fn get_device_sequence(&self, folder: &str, device: &str) -> Result<i64, String> {
         self.ensure_open()?;
-        let max_seq = self
-            .all_files_for_folder_device_light(folder, device)
-            .into_iter()
-            .map(|f| f.sequence)
-            .max()
-            .unwrap_or(0);
+        let mut max_seq = 0_i64;
+        self.store.for_each_file_in_folder_device(folder, device, |meta| {
+            max_seq = max_seq.max(u64_to_i64(meta.sequence));
+            true
+        });
         Ok(max_seq)
     }
 

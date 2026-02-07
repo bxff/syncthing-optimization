@@ -392,6 +392,46 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 }
             }
         }
+        "/rest/db/browse" => {
+            if method != &Method::Get {
+                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+            }
+            let params = parse_query(query);
+            let Some(folder) = params.get("folder") else {
+                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+            };
+            let cursor = params.get("cursor").map(|v| v.as_str());
+            let limit = parse_limit(&params, "limit", 2000, 10_000);
+            match browse_local_files(runtime, folder, cursor, limit) {
+                Ok(payload) => ApiReply::json(200, payload),
+                Err(ApiFolderStatusError::MissingFolder) => {
+                    ApiReply::json(404, json!({ "error": "folder not found", "folder": folder }))
+                }
+                Err(ApiFolderStatusError::Internal(err)) => {
+                    ApiReply::json(500, json!({ "error": err }))
+                }
+            }
+        }
+        "/rest/db/need" => {
+            if method != &Method::Get {
+                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+            }
+            let params = parse_query(query);
+            let Some(folder) = params.get("folder") else {
+                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+            };
+            let cursor = params.get("cursor").map(|v| v.as_str());
+            let limit = parse_limit(&params, "limit", 2000, 10_000);
+            match browse_needed_files(runtime, folder, cursor, limit) {
+                Ok(payload) => ApiReply::json(200, payload),
+                Err(ApiFolderStatusError::MissingFolder) => {
+                    ApiReply::json(404, json!({ "error": "folder not found", "folder": folder }))
+                }
+                Err(ApiFolderStatusError::Internal(err)) => {
+                    ApiReply::json(500, json!({ "error": err }))
+                }
+            }
+        }
         "/rest/db/jobs" => {
             if method != &Method::Get {
                 return ApiReply::json(405, json!({ "error": "method not allowed" }));
@@ -487,6 +527,20 @@ fn parse_subdirs(params: &BTreeMap<String, String>) -> Vec<String> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default()
+}
+
+fn parse_limit(
+    params: &BTreeMap<String, String>,
+    key: &str,
+    default_limit: usize,
+    max_limit: usize,
+) -> usize {
+    params
+        .get(key)
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .map(|v| v.min(max_limit))
+        .unwrap_or(default_limit)
 }
 
 fn system_status(runtime: &DaemonApiRuntime) -> Result<Value, String> {
@@ -693,6 +747,90 @@ fn pull_folder(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiFol
     }))
 }
 
+fn browse_local_files(
+    runtime: &DaemonApiRuntime,
+    folder: &str,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<Value, ApiFolderStatusError> {
+    let guard = runtime
+        .model
+        .lock()
+        .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
+    if !guard.folderCfgs.contains_key(folder) {
+        return Err(ApiFolderStatusError::MissingFolder);
+    }
+    let db = guard
+        .sdb
+        .lock()
+        .map_err(|_| ApiFolderStatusError::Internal("database lock poisoned".to_string()))?;
+    let page = db
+        .all_local_files_ordered_page(folder, "local", cursor, limit)
+        .map_err(ApiFolderStatusError::Internal)?;
+    let items = page
+        .items
+        .iter()
+        .map(|item| {
+            json!({
+                "path": item.path,
+                "sequence": item.sequence,
+                "size": item.size,
+                "deleted": item.deleted,
+                "ignored": item.ignored,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "folder": folder,
+        "cursor": cursor,
+        "limit": limit,
+        "nextCursor": page.next_cursor,
+        "items": items,
+    }))
+}
+
+fn browse_needed_files(
+    runtime: &DaemonApiRuntime,
+    folder: &str,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<Value, ApiFolderStatusError> {
+    let guard = runtime
+        .model
+        .lock()
+        .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
+    if !guard.folderCfgs.contains_key(folder) {
+        return Err(ApiFolderStatusError::MissingFolder);
+    }
+    let db = guard
+        .sdb
+        .lock()
+        .map_err(|_| ApiFolderStatusError::Internal("database lock poisoned".to_string()))?;
+    let page = db
+        .all_needed_global_files_ordered_page(folder, "local", cursor, limit)
+        .map_err(ApiFolderStatusError::Internal)?;
+    let items = page
+        .items
+        .iter()
+        .map(|item| {
+            json!({
+                "path": item.path,
+                "sequence": item.sequence,
+                "size": item.size,
+                "deleted": item.deleted,
+                "ignored": item.ignored,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "folder": folder,
+        "cursor": cursor,
+        "limit": limit,
+        "nextCursor": page.next_cursor,
+        "items": items,
+    }))
+}
+
 fn run_daemon_with_listener(
     listener: TcpListener,
     model: Arc<Mutex<model>>,
@@ -857,6 +995,7 @@ mod tests {
     use super::*;
     use crate::bep::{default_exchange, BepMessage};
     use crate::db;
+    use crate::db::Db;
     use serde_json::Value;
     use std::fs;
     use std::net::{Shutdown, TcpStream};
@@ -883,6 +1022,21 @@ mod tests {
             .expect("read frame")
             .expect("response frame");
         decode_frame(&frame).expect("decode response")
+    }
+
+    fn file_info(path: &str, sequence: i64, size: i64) -> db::FileInfo {
+        db::FileInfo {
+            folder: "default".to_string(),
+            path: path.to_string(),
+            sequence,
+            modified_ns: sequence,
+            size,
+            deleted: false,
+            ignored: false,
+            local_flags: 0,
+            file_type: db::FileInfoType::File,
+            block_hashes: vec!["h".to_string()],
+        }
     }
 
     #[test]
@@ -1166,18 +1320,7 @@ mod tests {
             guard
                 .Index(
                     "default",
-                    &[db::FileInfo {
-                        folder: "default".to_string(),
-                        path: "remote.bin".to_string(),
-                        sequence: 1,
-                        modified_ns: 1,
-                        size: 9,
-                        deleted: false,
-                        ignored: false,
-                        local_flags: 0,
-                        file_type: db::FileInfoType::File,
-                        block_hashes: vec!["a".to_string()],
-                    }],
+                    &[file_info("remote.bin", 1, 9)],
                 )
                 .expect("index remote");
         }
@@ -1198,6 +1341,92 @@ mod tests {
 
         let meta = fs::metadata(root.join("remote.bin")).expect("metadata");
         assert_eq!(meta.len(), 9);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn api_db_browse_returns_ordered_pages() {
+        let root = temp_root("api-db-browse");
+        let model = Arc::new(Mutex::new(NewModelWithRuntime(Some(root.clone()), Some(50))));
+        {
+            let mut guard = model.lock().expect("lock");
+            guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+            let mut db = guard.sdb.lock().expect("db lock");
+            db.update(
+                "default",
+                "local",
+                vec![file_info("b.txt", 2, 2), file_info("a.txt", 1, 1)],
+            )
+            .expect("update local");
+        }
+
+        let runtime = test_api_runtime(
+            model,
+            vec![FolderSpec {
+                id: "default".to_string(),
+                path: root.to_string_lossy().to_string(),
+            }],
+            0,
+        );
+        let first = build_api_response(&Method::Get, "/rest/db/browse?folder=default&limit=1", &runtime);
+        assert_eq!(first.status_code, StatusCode(200));
+        let first_payload: Value = serde_json::from_slice(&first.body).expect("decode json");
+        assert_eq!(first_payload["items"][0]["path"], "a.txt");
+        let next = first_payload["nextCursor"]
+            .as_str()
+            .expect("next cursor")
+            .to_string();
+
+        let second = build_api_response(
+            &Method::Get,
+            &format!("/rest/db/browse?folder=default&limit=1&cursor={next}"),
+            &runtime,
+        );
+        assert_eq!(second.status_code, StatusCode(200));
+        let second_payload: Value = serde_json::from_slice(&second.body).expect("decode json");
+        assert_eq!(second_payload["items"][0]["path"], "b.txt");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn api_db_need_returns_needed_page() {
+        let root = temp_root("api-db-need");
+        let model = Arc::new(Mutex::new(NewModelWithRuntime(Some(root.clone()), Some(50))));
+        {
+            let mut guard = model.lock().expect("lock");
+            guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+            {
+                let mut db = guard.sdb.lock().expect("db lock");
+                db.update("default", "local", vec![file_info("a.txt", 1, 1)])
+                    .expect("update local");
+            }
+            guard
+                .Index(
+                    "default",
+                    &[file_info("a.txt", 2, 2), file_info("b.txt", 1, 1)],
+                )
+                .expect("update remote");
+        }
+
+        let runtime = test_api_runtime(
+            model,
+            vec![FolderSpec {
+                id: "default".to_string(),
+                path: root.to_string_lossy().to_string(),
+            }],
+            0,
+        );
+        let need = build_api_response(&Method::Get, "/rest/db/need?folder=default&limit=10", &runtime);
+        assert_eq!(need.status_code, StatusCode(200));
+        let payload: Value = serde_json::from_slice(&need.body).expect("decode json");
+        let paths = payload["items"]
+            .as_array()
+            .expect("array")
+            .iter()
+            .filter_map(|item| item["path"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, vec!["a.txt", "b.txt"]);
+
         let _ = fs::remove_dir_all(root);
     }
 

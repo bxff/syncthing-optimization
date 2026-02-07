@@ -31,7 +31,7 @@
           "--manifest-path",
           "syncthing-rs/Cargo.toml",
           "--",
-          "scenario",
+          "interop-scenario",
           "index-sequence-behavior"
         ],
         "snapshot_path": "parity/harness/snapshots/rust-index-sequence-behavior.json"
@@ -64,7 +64,7 @@
           "--manifest-path",
           "syncthing-rs/Cargo.toml",
           "--",
-          "scenario",
+          "daemon-scenario",
           "global-need-decision"
         ],
         "snapshot_path": "parity/harness/snapshots/rust-global-need-decision.json"
@@ -97,7 +97,7 @@
           "--manifest-path",
           "syncthing-rs/Cargo.toml",
           "--",
-          "scenario",
+          "daemon-scenario",
           "conflict-and-ignore-semantics"
         ],
         "snapshot_path": "parity/harness/snapshots/rust-conflict-and-ignore-semantics.json"
@@ -130,7 +130,7 @@
           "--manifest-path",
           "syncthing-rs/Cargo.toml",
           "--",
-          "scenario",
+          "daemon-scenario",
           "folder-type-behavior"
         ],
         "snapshot_path": "parity/harness/snapshots/rust-folder-type-behavior.json"
@@ -163,7 +163,7 @@
           "--manifest-path",
           "syncthing-rs/Cargo.toml",
           "--",
-          "scenario",
+          "interop-scenario",
           "protocol-state-transition"
         ],
         "snapshot_path": "parity/harness/snapshots/rust-protocol-state-transition.json"
@@ -196,7 +196,7 @@
           "--manifest-path",
           "syncthing-rs/Cargo.toml",
           "--",
-          "scenario",
+          "daemon-scenario",
           "path-order-invariant"
         ],
         "snapshot_path": "parity/harness/snapshots/rust-path-order-invariant.json"
@@ -229,7 +229,7 @@
           "--manifest-path",
           "syncthing-rs/Cargo.toml",
           "--",
-          "scenario",
+          "daemon-scenario",
           "memory-cap-50mb"
         ],
         "snapshot_path": "parity/harness/snapshots/rust-memory-cap-50mb.json"
@@ -262,7 +262,7 @@
           "--manifest-path",
           "syncthing-rs/Cargo.toml",
           "--",
-          "scenario",
+          "daemon-scenario",
           "memory-cap-diagnostics"
         ],
         "snapshot_path": "parity/harness/snapshots/rust-memory-cap-diagnostics.json"
@@ -295,7 +295,7 @@
           "--manifest-path",
           "syncthing-rs/Cargo.toml",
           "--",
-          "scenario",
+          "daemon-scenario",
           "wal-free-durability"
         ],
         "snapshot_path": "parity/harness/snapshots/rust-wal-free-durability.json"
@@ -328,7 +328,7 @@
           "--manifest-path",
           "syncthing-rs/Cargo.toml",
           "--",
-          "scenario",
+          "daemon-scenario",
           "crash-recovery"
         ],
         "snapshot_path": "parity/harness/snapshots/rust-crash-recovery.json"

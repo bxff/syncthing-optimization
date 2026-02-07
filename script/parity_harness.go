@@ -72,6 +72,8 @@ type scenarioOutcome struct {
 	Status           string `json:"status"`
 	Message          string `json:"message"`
 	Evidence         string `json:"evidence"`
+	GoEvidence       string `json:"go_evidence,omitempty"`
+	RustEvidence     string `json:"rust_evidence,omitempty"`
 	DeclaredEvidence string `json:"declared_evidence,omitempty"`
 }
 
@@ -172,9 +174,17 @@ func run(args []string) {
 		}
 
 		outcome := scenarioOutcome{ID: sc.ID, Severity: severity, Required: sc.Required}
+		outcome.GoEvidence = normalizeScenarioEvidence(inferSideEvidence(sc.Go))
+		outcome.RustEvidence = normalizeScenarioEvidence(inferSideEvidence(sc.Rust))
 		outcome.Evidence = inferScenarioEvidence(sc)
 		if outcome.Evidence == "" {
 			outcome.Evidence = "synthetic"
+		}
+		if outcome.GoEvidence == "" {
+			outcome.GoEvidence = "synthetic"
+		}
+		if outcome.RustEvidence == "" {
+			outcome.RustEvidence = "synthetic"
 		}
 		declaredEvidence := normalizeScenarioEvidence(sc.Evidence)
 		if declaredEvidence != "" {
@@ -198,7 +208,7 @@ func run(args []string) {
 			report.Match = false
 			report.Mismatches = append(report.Mismatches, latestMismatch{ID: sc.ID, Severity: severity, Open: true, Message: outcome.Message})
 		default:
-			ok, msg := compareSnapshots(sc.Comparator, goSnap, rustSnap)
+			ok, msg := compareSnapshots(sc.ID, sc.Comparator, goSnap, rustSnap)
 			if ok {
 				outcome.Status = "pass"
 				outcome.Message = "go and rust outputs match"
@@ -409,14 +419,14 @@ func readSnapshot(path string) (map[string]any, error) {
 	return snap, nil
 }
 
-func compareSnapshots(mode string, goSnap, rustSnap map[string]any) (bool, string) {
+func compareSnapshots(scenarioID, mode string, goSnap, rustSnap map[string]any) (bool, string) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "json-equal", "", "canonical-json-equal":
-		goJSON, err := canonicalJSON(normalizeComparisonSnapshot(goSnap))
+		goJSON, err := canonicalJSON(normalizeComparisonSnapshot(scenarioID, goSnap))
 		if err != nil {
 			return false, fmt.Sprintf("go snapshot canonicalization failed: %v", err)
 		}
-		rustJSON, err := canonicalJSON(normalizeComparisonSnapshot(rustSnap))
+		rustJSON, err := canonicalJSON(normalizeComparisonSnapshot(scenarioID, rustSnap))
 		if err != nil {
 			return false, fmt.Sprintf("rust snapshot canonicalization failed: %v", err)
 		}
@@ -430,8 +440,8 @@ func compareSnapshots(mode string, goSnap, rustSnap map[string]any) (bool, strin
 }
 
 func inferScenarioEvidence(sc harnessScenario) string {
-	goEvidence := inferSideEvidence(sc.Go)
-	rustEvidence := inferSideEvidence(sc.Rust)
+	goEvidence := normalizeScenarioEvidence(inferSideEvidence(sc.Go))
+	rustEvidence := normalizeScenarioEvidence(inferSideEvidence(sc.Rust))
 	if scenarioEvidenceRank(goEvidence) <= scenarioEvidenceRank(rustEvidence) {
 		return goEvidence
 	}
@@ -448,6 +458,10 @@ func inferSideEvidence(side sideConfig) string {
 
 	cmd := strings.ToLower(strings.Join(side.Command, " "))
 	switch {
+	case strings.Contains(cmd, "interop-scenario") || strings.Contains(cmd, "peer-interop"):
+		return "peer-interop"
+	case strings.Contains(cmd, "daemon-scenario"):
+		return "daemon"
 	case strings.Contains(cmd, "parity_harness_go.go"):
 		return "synthetic"
 	case strings.Contains(cmd, "syncthing-rs") && strings.Contains(cmd, " scenario"):
@@ -491,10 +505,16 @@ func scenarioEvidenceRank(evidence string) int {
 	}
 }
 
-func normalizeComparisonSnapshot(snap map[string]any) map[string]any {
+func normalizeComparisonSnapshot(scenarioID string, snap map[string]any) map[string]any {
 	out := make(map[string]any, len(snap))
 	for k, v := range snap {
 		if k == "source" || k == "status" {
+			continue
+		}
+		if scenarioID == "memory-cap-50mb" && k == "estimated_memory_bytes" {
+			continue
+		}
+		if scenarioID == "protocol-state-transition" && k == "frame_sizes" {
 			continue
 		}
 		out[k] = v

@@ -149,11 +149,13 @@ type diffMismatch struct {
 }
 
 type diffScenario struct {
-	ID       string `json:"id"`
-	Severity string `json:"severity"`
-	Required bool   `json:"required"`
-	Status   string `json:"status"`
-	Evidence string `json:"evidence,omitempty"`
+	ID           string `json:"id"`
+	Severity     string `json:"severity"`
+	Required     bool   `json:"required"`
+	Status       string `json:"status"`
+	Evidence     string `json:"evidence,omitempty"`
+	GoEvidence   string `json:"go_evidence,omitempty"`
+	RustEvidence string `json:"rust_evidence,omitempty"`
 }
 
 type testStatusReport struct {
@@ -193,12 +195,13 @@ type harnessScenario struct {
 }
 
 type requiredTestEvidence struct {
-	ScenarioIDs         map[string]struct{}
-	RequiredScenarioIDs map[string]struct{}
-	ScenarioOutcome     map[string]string
-	ScenarioEvidence    map[string]string
-	ScenarioTags        map[string]map[string]struct{}
-	ScenarioRefs        map[string]int
+	ScenarioIDs          map[string]struct{}
+	RequiredScenarioIDs  map[string]struct{}
+	ScenarioOutcome      map[string]string
+	ScenarioEvidence     map[string]string
+	ScenarioRustEvidence map[string]string
+	ScenarioTags         map[string]map[string]struct{}
+	ScenarioRefs         map[string]int
 }
 
 type dashboardJSON struct {
@@ -869,12 +872,13 @@ func loadOrInitExceptions(path string) exceptionsFile {
 
 func loadRequiredTestEvidence(report *guardrailReport) requiredTestEvidence {
 	ev := requiredTestEvidence{
-		ScenarioIDs:         make(map[string]struct{}),
-		RequiredScenarioIDs: make(map[string]struct{}),
-		ScenarioOutcome:     make(map[string]string),
-		ScenarioEvidence:    make(map[string]string),
-		ScenarioTags:        make(map[string]map[string]struct{}),
-		ScenarioRefs:        make(map[string]int),
+		ScenarioIDs:          make(map[string]struct{}),
+		RequiredScenarioIDs:  make(map[string]struct{}),
+		ScenarioOutcome:      make(map[string]string),
+		ScenarioEvidence:     make(map[string]string),
+		ScenarioRustEvidence: make(map[string]string),
+		ScenarioTags:         make(map[string]map[string]struct{}),
+		ScenarioRefs:         make(map[string]int),
 	}
 
 	cfg := harnessScenarioFile{}
@@ -936,6 +940,7 @@ func loadRequiredTestEvidence(report *guardrailReport) requiredTestEvidence {
 		}
 		ev.ScenarioOutcome[id] = strings.TrimSpace(sc.Status)
 		ev.ScenarioEvidence[id] = normalizeScenarioEvidence(sc.Evidence)
+		ev.ScenarioRustEvidence[id] = normalizeScenarioEvidence(sc.RustEvidence)
 	}
 	return ev
 }
@@ -1122,7 +1127,10 @@ func validateReplacementScenarioEvidence(report *guardrailReport, ev requiredTes
 			})
 		}
 
-		observed := normalizeScenarioEvidence(ev.ScenarioEvidence[id])
+		observed := normalizeScenarioEvidence(ev.ScenarioRustEvidence[id])
+		if observed == "" {
+			observed = normalizeScenarioEvidence(ev.ScenarioEvidence[id])
+		}
 		if observed == "" {
 			observed = "synthetic"
 		}

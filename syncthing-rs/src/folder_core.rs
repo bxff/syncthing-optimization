@@ -719,14 +719,16 @@ impl folder {
 
             let batch_runtime_bytes = estimate_needed_batch_runtime_bytes(&needed_batch);
             let batch_permit: Option<MemoryPermit> = match self.config.memory_policy {
-                MemoryPolicy::Fail => match self.runtimeMemoryBudget.try_acquire(batch_runtime_bytes) {
-                    Some(permit) => Some(permit),
-                    None => {
-                        self.memoryHardBlockEvents = self.memoryHardBlockEvents.saturating_add(1);
-                        self.runtimeMemoryBudget
-                            .hard_block_events
-                            .fetch_add(1, Ordering::AcqRel);
-                        self.lastCapViolation = Some(format!(
+                MemoryPolicy::Fail => {
+                    match self.runtimeMemoryBudget.try_acquire(batch_runtime_bytes) {
+                        Some(permit) => Some(permit),
+                        None => {
+                            self.memoryHardBlockEvents =
+                                self.memoryHardBlockEvents.saturating_add(1);
+                            self.runtimeMemoryBudget
+                                .hard_block_events
+                                .fetch_add(1, Ordering::AcqRel);
+                            self.lastCapViolation = Some(format!(
                             "runtime budget exceeded: reserved={} requested={} budget={} folder={} key={}",
                             self.runtimeMemoryBudget.reserved_bytes(),
                             batch_runtime_bytes,
@@ -734,38 +736,42 @@ impl folder {
                             self.config.id,
                             self.runtimeMemoryBudget.key
                         ));
-                        self.lastRuntimeCapViolationReport = Some(CapViolationReport {
-                            folder: self.config.id.clone(),
-                            subsystem: "pull-runtime-budget".to_string(),
-                            policy: "fail".to_string(),
-                            requested_bytes: batch_runtime_bytes,
-                            reserved_bytes: self.runtimeMemoryBudget.reserved_bytes(),
-                            budget_bytes: self.runtimeMemoryBudget.max_bytes,
-                            queue_items: needed_batch.len(),
-                            query_limit,
-                            runtime_budget_key: self.runtimeMemoryBudget.key.clone(),
-                        });
-                        self.pullStats = PullStats {
-                            hard_blocked: true,
-                            ..Default::default()
-                        };
-                        return Err("memory cap exceeded".to_string());
+                            self.lastRuntimeCapViolationReport = Some(CapViolationReport {
+                                folder: self.config.id.clone(),
+                                subsystem: "pull-runtime-budget".to_string(),
+                                policy: "fail".to_string(),
+                                requested_bytes: batch_runtime_bytes,
+                                reserved_bytes: self.runtimeMemoryBudget.reserved_bytes(),
+                                budget_bytes: self.runtimeMemoryBudget.max_bytes,
+                                queue_items: needed_batch.len(),
+                                query_limit,
+                                runtime_budget_key: self.runtimeMemoryBudget.key.clone(),
+                            });
+                            self.pullStats = PullStats {
+                                hard_blocked: true,
+                                ..Default::default()
+                            };
+                            return Err("memory cap exceeded".to_string());
+                        }
                     }
-                },
-                MemoryPolicy::Throttle => match self.runtimeMemoryBudget.try_acquire(batch_runtime_bytes)
-                {
-                    Some(permit) => Some(permit),
-                    None => {
-                        throttled = true;
-                        self.memoryThrottleEvents = self.memoryThrottleEvents.saturating_add(1);
-                        self.runtimeMemoryBudget
-                            .throttle_events
-                            .fetch_add(1, Ordering::AcqRel);
-                        query_limit = query_limit.saturating_div(2).max(1);
-                        continue;
+                }
+                MemoryPolicy::Throttle => {
+                    match self.runtimeMemoryBudget.try_acquire(batch_runtime_bytes) {
+                        Some(permit) => Some(permit),
+                        None => {
+                            throttled = true;
+                            self.memoryThrottleEvents = self.memoryThrottleEvents.saturating_add(1);
+                            self.runtimeMemoryBudget
+                                .throttle_events
+                                .fetch_add(1, Ordering::AcqRel);
+                            query_limit = query_limit.saturating_div(2).max(1);
+                            continue;
+                        }
                     }
-                },
-                MemoryPolicy::BestEffort => self.runtimeMemoryBudget.try_acquire(batch_runtime_bytes),
+                }
+                MemoryPolicy::BestEffort => {
+                    self.runtimeMemoryBudget.try_acquire(batch_runtime_bytes)
+                }
             };
 
             total_blocks = total_blocks.saturating_add(batch_total_blocks);
@@ -1310,11 +1316,7 @@ fn estimate_needed_batch_runtime_bytes(files: &[db::FileInfo]) -> usize {
                 db::FileInfoType::Directory => 9,
                 db::FileInfoType::Symlink => 7,
             };
-            file.folder.len()
-                + file.path.len()
-                + file_type_len
-                + hash_bytes
-                + 128
+            file.folder.len() + file.path.len() + file_type_len + hash_bytes + 128
         })
         .sum()
 }
@@ -1461,7 +1463,8 @@ impl sendReceiveFolder {
                 Err(err) => return Err(format!("stat {}: {err}", abs.display())),
             }
         }
-        self.blockPullReorderer.insert(path.to_string(), reservation);
+        self.blockPullReorderer
+            .insert(path.to_string(), reservation);
         Ok(())
     }
 
@@ -1473,7 +1476,8 @@ impl sendReceiveFolder {
                 return Err(errUnexpectedDirOnFileDel.to_string());
             }
             if let Some(parent) = abs.parent() {
-                fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
             }
             OpenOptions::new()
                 .create(true)
@@ -1481,7 +1485,8 @@ impl sendReceiveFolder {
                 .open(&abs)
                 .map_err(|e| format!("open {}: {e}", abs.display()))?;
         }
-        self.blockPullReorderer.insert(path.to_string(), reservation);
+        self.blockPullReorderer
+            .insert(path.to_string(), reservation);
         Ok(())
     }
 
@@ -1609,7 +1614,8 @@ impl sendReceiveFolder {
         }
         if let Some(abs) = self.resolve_abs_path(path)? {
             if let Some(parent) = abs.parent() {
-                fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
             }
             match fs::symlink_metadata(&abs) {
                 Ok(meta) => {
@@ -2015,9 +2021,14 @@ mod tests {
         assert!(!root.join("dir").join("sub").join("a.txt").exists());
 
         fs::create_dir_all(root.join("dir").join("sub").join("nested")).expect("mkdir nested");
-        fs::write(root.join("dir").join("sub").join("nested").join("x.txt"), b"x")
-            .expect("write nested");
-        let err = f.deleteDirOnDisk("dir/sub").expect_err("must reject non-empty dir");
+        fs::write(
+            root.join("dir").join("sub").join("nested").join("x.txt"),
+            b"x",
+        )
+        .expect("write nested");
+        let err = f
+            .deleteDirOnDisk("dir/sub")
+            .expect_err("must reject non-empty dir");
         assert_eq!(err, errDirNotEmpty);
         f.deleteDirOnDiskHandleChildren("dir/sub")
             .expect("recursive delete");
@@ -2038,10 +2049,7 @@ mod tests {
         let renamed = f
             .renameFile("old.txt", "new/name.txt")
             .expect("rename result");
-        assert_eq!(
-            renamed,
-            ("old.txt".to_string(), "new/name.txt".to_string())
-        );
+        assert_eq!(renamed, ("old.txt".to_string(), "new/name.txt".to_string()));
         assert!(!old_path.exists());
         assert!(new_path.exists());
 

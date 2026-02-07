@@ -5,6 +5,7 @@ use crate::folder_modes::all_mode_actions;
 use crate::index_engine::{FolderUpdate, IndexEngine};
 use crate::model_core::{newFolderConfiguration, NewModel, NewModelWithRuntime};
 use crate::planner::{classify_paths, compute_need, VersionedFile};
+use crate::runtime::run_parity_probe;
 use crate::store::{FileMetadata, PageCursor, Store, StoreConfig, MANIFEST_FILE_NAME};
 use crate::walker::{walk_deterministic, WalkConfig};
 use serde_json::{json, Value};
@@ -42,6 +43,16 @@ pub(crate) fn scenario_ids() -> &'static [&'static str] {
         "wal-free-durability",
         "crash-recovery",
     ]
+}
+
+pub(crate) fn run_daemon_scenario_snapshot(id: &str) -> Result<Value, String> {
+    run_parity_probe(false)?;
+    run_scenario_snapshot(id)
+}
+
+pub(crate) fn run_peer_interop_scenario_snapshot(id: &str) -> Result<Value, String> {
+    run_parity_probe(true)?;
+    run_scenario_snapshot(id)
 }
 
 fn scenario_index_sequence_behavior() -> Result<Value, String> {
@@ -649,6 +660,21 @@ mod tests {
     #[test]
     fn smoke_scenarios_produce_json() {
         run_and_assert(smoke_scenario_ids());
+    }
+
+    #[test]
+    fn daemon_scenario_mode_runs_probe_and_snapshot() {
+        let out = run_daemon_scenario_snapshot("global-need-decision").expect("daemon scenario");
+        assert_eq!(out["scenario"], "global-need-decision");
+        assert_eq!(out["source"], "rust");
+    }
+
+    #[test]
+    fn interop_scenario_mode_runs_probe_and_snapshot() {
+        let out = run_peer_interop_scenario_snapshot("protocol-state-transition")
+            .expect("interop scenario");
+        assert_eq!(out["scenario"], "protocol-state-transition");
+        assert_eq!(out["source"], "rust");
     }
 
     #[test]

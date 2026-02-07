@@ -62,3 +62,20 @@ func TestInferScenarioEvidenceDetectsDaemonLevel(t *testing.T) {
 		t.Fatalf("expected daemon evidence, got %q", evidence)
 	}
 }
+
+func TestInferSideEvidenceDetectsInteropScenarioCommand(t *testing.T) {
+	evidence := inferSideEvidence(sideConfig{
+		Command: []string{
+			"cargo",
+			"run",
+			"--manifest-path",
+			"syncthing-rs/Cargo.toml",
+			"--",
+			"interop-scenario",
+			"protocol-state-transition",
+		},
+	})
+	if evidence != "peer-interop" {
+		t.Fatalf("expected peer-interop evidence, got %q", evidence)
+	}
+}

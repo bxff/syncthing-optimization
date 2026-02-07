@@ -15,7 +15,10 @@ mod store;
 mod walker;
 
 use runtime::{parse_daemon_args, run_daemon};
-use scenarios::{run_scenario_snapshot, scenario_ids};
+use scenarios::{
+    run_daemon_scenario_snapshot, run_peer_interop_scenario_snapshot, run_scenario_snapshot,
+    scenario_ids,
+};
 use std::process;
 
 fn main() {
@@ -41,6 +44,44 @@ fn main() {
                 }
                 Err(err) => {
                     eprintln!("scenario failed: {err}");
+                    process::exit(1);
+                }
+            }
+        }
+        "daemon-scenario" => {
+            if args.len() != 3 {
+                eprintln!("daemon-scenario requires exactly one id");
+                usage();
+                process::exit(2);
+            }
+            match run_daemon_scenario_snapshot(&args[2]) {
+                Ok(out) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&out).expect("serialize scenario output")
+                    );
+                }
+                Err(err) => {
+                    eprintln!("daemon-scenario failed: {err}");
+                    process::exit(1);
+                }
+            }
+        }
+        "interop-scenario" => {
+            if args.len() != 3 {
+                eprintln!("interop-scenario requires exactly one id");
+                usage();
+                process::exit(2);
+            }
+            match run_peer_interop_scenario_snapshot(&args[2]) {
+                Ok(out) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&out).expect("serialize scenario output")
+                    );
+                }
+                Err(err) => {
+                    eprintln!("interop-scenario failed: {err}");
                     process::exit(1);
                 }
             }
@@ -74,6 +115,8 @@ fn main() {
 fn usage() {
     eprintln!("usage:");
     eprintln!("  syncthing-rs scenario <scenario-id>");
+    eprintln!("  syncthing-rs daemon-scenario <scenario-id>");
+    eprintln!("  syncthing-rs interop-scenario <scenario-id>");
     eprintln!("  syncthing-rs scenario-list");
     eprintln!(
         "  syncthing-rs daemon (--folder <id>:<path> ... | --folder-path <path> [--folder-id <id>] | --config <path.json>) [--listen <addr>] [--api-listen <addr>] [--db-root <path>] [--memory-max-mb <n>] [--max-peers <n>] [--once]"

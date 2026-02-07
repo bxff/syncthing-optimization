@@ -1,5 +1,16 @@
-use crc32fast::Hasher;
+use crate::bep_core::{
+    Header, MessageCompression_MESSAGE_COMPRESSION_LZ4, MessageCompression_MESSAGE_COMPRESSION_NONE,
+    MessageType_MESSAGE_TYPE_CLOSE, MessageType_MESSAGE_TYPE_CLUSTER_CONFIG,
+    MessageType_MESSAGE_TYPE_DOWNLOAD_PROGRESS, MessageType_MESSAGE_TYPE_INDEX,
+    MessageType_MESSAGE_TYPE_INDEX_UPDATE, MessageType_MESSAGE_TYPE_PING,
+    MessageType_MESSAGE_TYPE_REQUEST, MessageType_MESSAGE_TYPE_RESPONSE,
+};
+use lz4_flex::{compress_prepend_size, decompress_size_prepended};
 use serde::{Deserialize, Serialize};
+
+const MAX_HEADER_BYTES: usize = 32 * 1024;
+const COMPRESSION_THRESHOLD_BYTES: usize = 128;
+const MESSAGE_TYPE_HELLO: i32 = -1;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -62,49 +73,118 @@ pub(crate) struct DownloadProgressEntry {
     pub(crate) update_type: String,
 }
 
+fn message_type_of(message: &BepMessage) -> i32 {
+    match message {
+        BepMessage::Hello { .. } => MESSAGE_TYPE_HELLO,
+        BepMessage::ClusterConfig { .. } => MessageType_MESSAGE_TYPE_CLUSTER_CONFIG,
+        BepMessage::Index { .. } => MessageType_MESSAGE_TYPE_INDEX,
+        BepMessage::IndexUpdate { .. } => MessageType_MESSAGE_TYPE_INDEX_UPDATE,
+        BepMessage::Request { .. } => MessageType_MESSAGE_TYPE_REQUEST,
+        BepMessage::Response { .. } => MessageType_MESSAGE_TYPE_RESPONSE,
+        BepMessage::DownloadProgress { .. } => MessageType_MESSAGE_TYPE_DOWNLOAD_PROGRESS,
+        BepMessage::Ping { .. } => MessageType_MESSAGE_TYPE_PING,
+        BepMessage::Close { .. } => MessageType_MESSAGE_TYPE_CLOSE,
+    }
+}
+
+fn should_compress(message: &BepMessage, payload_len: usize) -> bool {
+    !matches!(message, BepMessage::Response { .. }) && payload_len >= COMPRESSION_THRESHOLD_BYTES
+}
+
 pub(crate) fn encode_frame(message: &BepMessage) -> Result<Vec<u8>, String> {
-    let payload = serde_json::to_vec(message).map_err(|err| format!("serialize message: {err}"))?;
-    if payload.len() > u32::MAX as usize {
-        return Err(format!("payload too large: {}", payload.len()));
+    let payload =
+        serde_json::to_vec(message).map_err(|err| format!("serialize message payload: {err}"))?;
+    let mut compression = MessageCompression_MESSAGE_COMPRESSION_NONE;
+    let mut encoded_payload = payload;
+
+    if should_compress(message, encoded_payload.len()) {
+        let compressed = compress_prepend_size(&encoded_payload);
+        // Mirror Syncthing's approach: compress only when savings are meaningful.
+        let min_gain_threshold = encoded_payload
+            .len()
+            .saturating_sub(encoded_payload.len().saturating_div(32));
+        if compressed.len() < min_gain_threshold {
+            compression = MessageCompression_MESSAGE_COMPRESSION_LZ4;
+            encoded_payload = compressed;
+        }
     }
 
-    let mut hasher = Hasher::new();
-    hasher.update(&payload);
-    let checksum = hasher.finalize();
+    if encoded_payload.len() > u32::MAX as usize {
+        return Err(format!("payload too large: {}", encoded_payload.len()));
+    }
 
-    let mut out = Vec::with_capacity(payload.len() + 8);
-    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-    out.extend_from_slice(&checksum.to_le_bytes());
-    out.extend_from_slice(&payload);
+    let header = Header {
+        Type: message_type_of(message),
+        Compression: compression,
+    };
+    let header_bytes =
+        serde_json::to_vec(&header).map_err(|err| format!("serialize header: {err}"))?;
+    if header_bytes.len() > u16::MAX as usize {
+        return Err(format!("header too large: {}", header_bytes.len()));
+    }
+
+    let mut out = Vec::with_capacity(2 + header_bytes.len() + 4 + encoded_payload.len());
+    out.extend_from_slice(&(header_bytes.len() as u16).to_be_bytes());
+    out.extend_from_slice(&header_bytes);
+    out.extend_from_slice(&(encoded_payload.len() as u32).to_be_bytes());
+    out.extend_from_slice(&encoded_payload);
     Ok(out)
 }
 
 pub(crate) fn decode_frame(frame: &[u8]) -> Result<BepMessage, String> {
-    if frame.len() < 8 {
+    if frame.len() < 6 {
         return Err("frame too short".to_string());
     }
 
-    let len = u32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]) as usize;
-    let checksum = u32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
-    if frame.len() != len + 8 {
+    let header_len = u16::from_be_bytes([frame[0], frame[1]]) as usize;
+    if header_len > MAX_HEADER_BYTES {
         return Err(format!(
-            "invalid frame length: header={len} body={} total={}",
-            frame.len().saturating_sub(8),
+            "header too large: {} > {}",
+            header_len, MAX_HEADER_BYTES
+        ));
+    }
+    let header_end = 2 + header_len;
+    if frame.len() < header_end + 4 {
+        return Err("invalid frame length: truncated header".to_string());
+    }
+
+    let header: Header = serde_json::from_slice(&frame[2..header_end])
+        .map_err(|err| format!("decode header: {err}"))?;
+    let message_len = u32::from_be_bytes([
+        frame[header_end],
+        frame[header_end + 1],
+        frame[header_end + 2],
+        frame[header_end + 3],
+    ]) as usize;
+    let message_start = header_end + 4;
+    if frame.len() != message_start + message_len {
+        return Err(format!(
+            "invalid frame length: header={} payload={} total={}",
+            header_len,
+            message_len,
             frame.len()
         ));
     }
 
-    let payload = &frame[8..];
-    let mut hasher = Hasher::new();
-    hasher.update(payload);
-    let observed = hasher.finalize();
-    if observed != checksum {
+    let payload = &frame[message_start..];
+    let decoded_payload = match header.Compression {
+        MessageCompression_MESSAGE_COMPRESSION_NONE => payload.to_vec(),
+        MessageCompression_MESSAGE_COMPRESSION_LZ4 => decompress_size_prepended(payload)
+            .map_err(|err| format!("lz4 decompress payload: {err}"))?,
+        other => return Err(format!("unknown message compression {other}")),
+    };
+
+    let message: BepMessage = serde_json::from_slice(&decoded_payload)
+        .map_err(|err| format!("decode message payload: {err}"))?;
+    if message_type_of(&message) != header.Type {
         return Err(format!(
-            "checksum mismatch: expected={checksum} observed={observed}"
+            "message type mismatch: header={} payload={}",
+            header.Type,
+            message_type_of(&message)
         ));
     }
 
-    serde_json::from_slice(payload).map_err(|err| format!("decode message: {err}"))
+    Ok(message)
 }
 
 pub(crate) fn default_exchange() -> Vec<BepMessage> {
@@ -185,6 +265,12 @@ pub(crate) fn message_name(message: &BepMessage) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bep_core::{Header, MessageCompression_MESSAGE_COMPRESSION_NONE};
+
+    fn parse_header(frame: &[u8]) -> Header {
+        let header_len = u16::from_be_bytes([frame[0], frame[1]]) as usize;
+        serde_json::from_slice(&frame[2..(2 + header_len)]).expect("decode header")
+    }
 
     #[test]
     fn frame_round_trip() {
@@ -205,13 +291,52 @@ mod tests {
     }
 
     #[test]
-    fn detects_checksum_corruption() {
+    fn detects_frame_corruption() {
         let msg = BepMessage::Ping { timestamp_ms: 7 };
         let mut frame = encode_frame(&msg).expect("encode");
-        let idx = frame.len() - 1;
-        frame[idx] ^= 0x01;
+        frame[0] = 0xFF;
+        frame[1] = 0xFF;
 
         let err = decode_frame(&frame).expect_err("must fail");
-        assert!(err.contains("checksum mismatch"));
+        assert!(err.contains("header too large"));
+    }
+
+    #[test]
+    fn response_message_uses_uncompressed_payload() {
+        let message = BepMessage::Response {
+            id: 1,
+            code: 0,
+            data_len: 11,
+        };
+        let frame = encode_frame(&message).expect("encode");
+        let header = parse_header(&frame);
+        assert_eq!(
+            header.Compression,
+            MessageCompression_MESSAGE_COMPRESSION_NONE
+        );
+    }
+
+    #[test]
+    fn large_messages_can_use_lz4_compression() {
+        let big = "0123456789abcdef".repeat(1024);
+        let message = BepMessage::IndexUpdate {
+            folder: "default".to_string(),
+            files: vec![IndexEntry {
+                path: "big.bin".to_string(),
+                sequence: 7,
+                deleted: false,
+                size: 1024 * 16,
+                block_hashes: vec![big.clone(), big],
+            }],
+        };
+
+        let frame = encode_frame(&message).expect("encode");
+        let header = parse_header(&frame);
+        assert_eq!(
+            header.Compression,
+            MessageCompression_MESSAGE_COMPRESSION_LZ4
+        );
+        let decoded = decode_frame(&frame).expect("decode");
+        assert_eq!(decoded, message);
     }
 }

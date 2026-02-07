@@ -319,12 +319,21 @@ pub(crate) fn handle_peer_connection(
     peer_id: &str,
     model: &Arc<Mutex<model>>,
 ) -> Result<(), String> {
+    let mut seen_hello = false;
     loop {
         let frame = match read_frame(stream)? {
             Some(frame) => frame,
             None => return Ok(()),
         };
         let inbound = decode_frame(&frame)?;
+        if !seen_hello {
+            if !matches!(inbound, BepMessage::Hello { .. }) {
+                return Err("expected hello as first message".to_string());
+            }
+            seen_hello = true;
+        } else if matches!(inbound, BepMessage::Hello { .. }) {
+            return Err("duplicate hello message".to_string());
+        }
         let outbound = {
             let mut guard = model
                 .lock()
@@ -349,22 +358,38 @@ fn read_frame(reader: &mut impl Read) -> Result<Option<Vec<u8>>, String> {
         Err(err) => return Err(format!("read frame header: {err}")),
     }
 
-    let mut header = [0_u8; 8];
-    header[0] = first[0];
+    let mut second = [0_u8; 1];
     reader
-        .read_exact(&mut header[1..])
+        .read_exact(&mut second)
         .map_err(|err| format!("read frame header: {err}"))?;
-    let len = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
-    if len > MAX_FRAME_BYTES {
-        return Err(format!("frame too large: {len} > {MAX_FRAME_BYTES}"));
+    let header_len = u16::from_be_bytes([first[0], second[0]]) as usize;
+    if header_len > MAX_FRAME_BYTES {
+        return Err(format!("frame too large: {header_len} > {MAX_FRAME_BYTES}"));
     }
-    let mut payload = vec![0_u8; len];
+
+    let mut header = vec![0_u8; header_len];
+    reader
+        .read_exact(&mut header)
+        .map_err(|err| format!("read frame header: {err}"))?;
+
+    let mut message_len_bytes = [0_u8; 4];
+    reader
+        .read_exact(&mut message_len_bytes)
+        .map_err(|err| format!("read frame payload length: {err}"))?;
+    let message_len = u32::from_be_bytes(message_len_bytes) as usize;
+    if message_len > MAX_FRAME_BYTES {
+        return Err(format!("frame too large: {message_len} > {MAX_FRAME_BYTES}"));
+    }
+
+    let mut payload = vec![0_u8; message_len];
     reader
         .read_exact(&mut payload)
         .map_err(|err| format!("read frame payload: {err}"))?;
 
-    let mut frame = Vec::with_capacity(8 + payload.len());
+    let mut frame = Vec::with_capacity(2 + header.len() + 4 + payload.len());
+    frame.extend_from_slice(&[first[0], second[0]]);
     frame.extend_from_slice(&header);
+    frame.extend_from_slice(&message_len_bytes);
     frame.extend_from_slice(&payload);
     Ok(Some(frame))
 }
@@ -642,6 +667,14 @@ mod tests {
             .expect("read timeout");
         write_frame(
             &mut client,
+            &BepMessage::Hello {
+                device_name: "peer-a".to_string(),
+                client_name: "syncthing-rs-test".to_string(),
+            },
+        )
+        .expect("write hello");
+        write_frame(
+            &mut client,
             &BepMessage::Request {
                 id: 9,
                 folder: "default".to_string(),
@@ -676,6 +709,45 @@ mod tests {
     }
 
     #[test]
+    fn handle_peer_connection_rejects_non_hello_first_frame() {
+        let root = temp_root("missing-hello");
+        fs::write(root.join("ok.txt"), b"ok").expect("write");
+
+        let model = Arc::new(Mutex::new(NewModel()));
+        {
+            let mut guard = model.lock().expect("lock");
+            guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server_model = model.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            handle_peer_connection(&mut stream, "peer-a", &server_model).expect_err("must fail")
+        });
+
+        let mut client = TcpStream::connect(addr).expect("connect");
+        write_frame(
+            &mut client,
+            &BepMessage::Request {
+                id: 1,
+                folder: "default".to_string(),
+                name: "ok.txt".to_string(),
+                offset: 0,
+                size: 2,
+                hash: "h".to_string(),
+            },
+        )
+        .expect("write request");
+        client.shutdown(Shutdown::Write).expect("shutdown write");
+
+        let err = server.join().expect("join server");
+        assert!(err.contains("expected hello as first message"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn read_frame_returns_none_on_clean_eof() {
         let mut empty: &[u8] = &[];
         let got = read_frame(&mut empty).expect("read");
@@ -685,8 +757,9 @@ mod tests {
     #[test]
     fn read_frame_rejects_oversized_payload() {
         let mut src = Vec::new();
-        src.extend_from_slice(&((MAX_FRAME_BYTES as u32) + 1).to_le_bytes());
-        src.extend_from_slice(&0_u32.to_le_bytes());
+        src.extend_from_slice(&2_u16.to_be_bytes());
+        src.extend_from_slice(b"{}");
+        src.extend_from_slice(&((MAX_FRAME_BYTES as u32) + 1).to_be_bytes());
         let mut src = &src[..];
         let err = read_frame(&mut src).expect_err("must fail");
         assert!(err.contains("frame too large"));
@@ -703,8 +776,9 @@ mod tests {
     #[test]
     fn read_frame_handles_truncated_payload() {
         let mut data = Vec::new();
-        data.extend_from_slice(&4_u32.to_le_bytes());
-        data.extend_from_slice(&0_u32.to_le_bytes());
+        data.extend_from_slice(&2_u16.to_be_bytes());
+        data.extend_from_slice(b"{}");
+        data.extend_from_slice(&4_u32.to_be_bytes());
         data.extend_from_slice(&[1_u8, 2_u8]);
         let mut src = &data[..];
         let err = read_frame(&mut src).expect_err("must fail");

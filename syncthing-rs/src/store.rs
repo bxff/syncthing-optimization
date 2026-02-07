@@ -2,13 +2,15 @@ use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufReader, ErrorKind, Read, Write};
+use std::io::{self, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::ops::Bound;
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
 const LOG_RECORD_MAX_BYTES: u32 = 32 * 1024 * 1024;
 pub(crate) const JOURNAL_FILE_NAME: &str = "events.log";
+const BLOCK_BLOB_FILE_NAME: &str = "blocks.blob";
+const BLOCK_BLOB_MARKER_PREFIX: &str = "__stblob__:";
 const KEY_SEP: char = '\u{001f}';
 const PATH_SEG_SEP: char = '\u{001e}';
 
@@ -70,6 +72,7 @@ pub(crate) struct StoreStats {
 pub(crate) struct Store {
     config: StoreConfig,
     journal_path: PathBuf,
+    block_blob_path: PathBuf,
     files: BTreeMap<String, FileMetadata>,
     deleted_tombstones: VecDeque<String>,
     tombstone_set: HashSet<String>,
@@ -103,14 +106,26 @@ impl Store {
     pub(crate) fn open(config: StoreConfig) -> io::Result<Self> {
         fs::create_dir_all(&config.root)?;
         let journal_path = config.root.join(JOURNAL_FILE_NAME);
+        let block_blob_path = config.root.join(BLOCK_BLOB_FILE_NAME);
         if !journal_path.exists() {
             let file = File::create(&journal_path)?;
             file.sync_all()?;
             sync_dir(&config.root)?;
         }
+        // The block-hash blob cache is rebuilt from the authoritative journal at open time.
+        let blob = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&block_blob_path)?;
+        blob.sync_all()?;
 
         let (files, deleted_tombstones, approx_memory_bytes) =
-            Self::load_from_journal(&journal_path, config.max_deleted_tombstones)?;
+            Self::load_from_journal(
+                &journal_path,
+                &block_blob_path,
+                config.max_deleted_tombstones,
+            )?;
         let budget_bytes = config.memory_budget_bytes();
         if budget_bytes > 0 && approx_memory_bytes > budget_bytes {
             return Err(io::Error::new(
@@ -126,6 +141,7 @@ impl Store {
         Ok(Self {
             config,
             journal_path,
+            block_blob_path,
             files,
             deleted_tombstones,
             tombstone_set,
@@ -133,12 +149,14 @@ impl Store {
         })
     }
 
-    pub(crate) fn upsert_file(&mut self, file: FileMetadata) -> io::Result<()> {
+    pub(crate) fn upsert_file(&mut self, mut file: FileMetadata) -> io::Result<()> {
         let key = composite_key(&file.folder, &file.device, &file.path);
+        let mut budget_file = file.clone();
+        budget_file.block_hashes = in_memory_block_hash_shape(&budget_file.block_hashes);
         let next_bytes = projected_upsert_memory_bytes(
             self.approx_memory_bytes,
             self.files.get(&key),
-            &file,
+            &budget_file,
         );
         let budget_bytes = self.config.memory_budget_bytes();
         if budget_bytes > 0 && next_bytes > budget_bytes {
@@ -151,6 +169,7 @@ impl Store {
             ));
         }
         self.append_op(&JournalOp::Upsert(file.clone()))?;
+        file.block_hashes = spill_block_hashes(&self.block_blob_path, &file.block_hashes)?;
         self.apply_upsert(file);
         Ok(())
     }
@@ -175,6 +194,24 @@ impl Store {
 
     pub(crate) fn get_file(&self, folder: &str, device: &str, path: &str) -> Option<&FileMetadata> {
         self.files.get(&composite_key(folder, device, path))
+    }
+
+    pub(crate) fn resolve_file_block_hashes(&self, meta: &FileMetadata) -> io::Result<Vec<String>> {
+        load_block_hashes(&self.block_blob_path, &meta.block_hashes)
+    }
+
+    pub(crate) fn get_file_with_blocks(
+        &self,
+        folder: &str,
+        device: &str,
+        path: &str,
+    ) -> io::Result<Option<FileMetadata>> {
+        let Some(file) = self.get_file(folder, device, path) else {
+            return Ok(None);
+        };
+        let mut out = file.clone();
+        out.block_hashes = self.resolve_file_block_hashes(file)?;
+        Ok(Some(out))
     }
 
     pub(crate) fn all_files_lexicographic(&self) -> Vec<FileMetadata> {
@@ -421,7 +458,9 @@ impl Store {
         let mut file = File::create(&tmp)?;
 
         for record in self.files.values() {
-            Self::write_record(&mut file, &JournalOp::Upsert(record.clone()))?;
+            let mut materialized = record.clone();
+            materialized.block_hashes = self.resolve_file_block_hashes(record)?;
+            Self::write_record(&mut file, &JournalOp::Upsert(materialized))?;
         }
         for tombstone in &self.deleted_tombstones {
             if let Some((folder, device, path)) = split_composite_key(tombstone) {
@@ -462,10 +501,15 @@ impl Store {
 
     fn load_from_journal(
         path: &Path,
+        block_blob_path: &Path,
         max_tombstones: usize,
     ) -> io::Result<(BTreeMap<String, FileMetadata>, VecDeque<String>, usize)> {
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
+        let mut block_blob = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(block_blob_path)?;
         let mut files: BTreeMap<String, FileMetadata> = BTreeMap::new();
         let mut deleted_tombstones = VecDeque::new();
         let mut tombstone_set = HashSet::new();
@@ -507,7 +551,8 @@ impl Store {
                 &mut tombstone_set,
                 max_tombstones,
                 op,
-            );
+                &mut block_blob,
+            )?;
         }
 
         let approx_bytes = files.values().map(estimate_file_bytes).sum();
@@ -581,9 +626,11 @@ fn apply_op(
     tombstone_set: &mut HashSet<String>,
     max_tombstones: usize,
     op: JournalOp,
-) {
+    block_blob: &mut File,
+) -> io::Result<()> {
     match op {
-        JournalOp::Upsert(file) => {
+        JournalOp::Upsert(mut file) => {
+            file.block_hashes = spill_block_hashes_to_writer(block_blob, &file.block_hashes)?;
             let key = composite_key(&file.folder, &file.device, &file.path);
             files.insert(key.clone(), file);
             if tombstone_set.remove(&key) {
@@ -612,6 +659,7 @@ fn apply_op(
             }
         }
     }
+    Ok(())
 }
 
 fn encode_op(op: &JournalOp) -> Vec<u8> {
@@ -905,9 +953,116 @@ fn finalize_page(mut items: Vec<FileMetadata>, limit: usize) -> FilePage {
     FilePage { items, next_cursor }
 }
 
+fn in_memory_block_hash_shape(hashes: &[String]) -> Vec<String> {
+    if hashes.is_empty() {
+        Vec::new()
+    } else {
+        vec![format!("{BLOCK_BLOB_MARKER_PREFIX}0:0:0")]
+    }
+}
+
+fn spill_block_hashes(block_blob_path: &Path, hashes: &[String]) -> io::Result<Vec<String>> {
+    let mut blob = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(block_blob_path)?;
+    spill_block_hashes_to_writer(&mut blob, hashes)
+}
+
+fn spill_block_hashes_to_writer(block_blob: &mut File, hashes: &[String]) -> io::Result<Vec<String>> {
+    if hashes.is_empty() {
+        return Ok(Vec::new());
+    }
+    if block_hashes_are_marker(hashes) {
+        return Ok(hashes.to_vec());
+    }
+
+    let payload = serde_json::to_vec(hashes)
+        .map_err(|err| io::Error::new(ErrorKind::InvalidData, format!("encode block hashes: {err}")))?;
+    if payload.len() as u32 > LOG_RECORD_MAX_BYTES {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("block hash payload too large: {} bytes", payload.len()),
+        ));
+    }
+    let checksum = checksum(&payload);
+    let offset = block_blob.seek(SeekFrom::End(0))?;
+    let len = payload.len() as u32;
+    block_blob.write_all(&len.to_le_bytes())?;
+    block_blob.write_all(&checksum.to_le_bytes())?;
+    block_blob.write_all(&payload)?;
+    block_blob.sync_data()?;
+
+    Ok(vec![format!(
+        "{BLOCK_BLOB_MARKER_PREFIX}{offset}:{len}:{checksum}"
+    )])
+}
+
+fn load_block_hashes(block_blob_path: &Path, hashes: &[String]) -> io::Result<Vec<String>> {
+    if hashes.is_empty() || !block_hashes_are_marker(hashes) {
+        return Ok(hashes.to_vec());
+    }
+
+    let marker = &hashes[0];
+    let Some((offset, expected_len, expected_checksum)) = parse_block_blob_marker(marker) else {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            format!("invalid block marker format: {marker}"),
+        ));
+    };
+
+    let mut blob = File::open(block_blob_path)?;
+    blob.seek(SeekFrom::Start(offset))?;
+
+    let mut hdr = [0_u8; 8];
+    blob.read_exact(&mut hdr)?;
+    let len = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
+    let checksum_on_disk = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
+    if len != expected_len || checksum_on_disk != expected_checksum {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "block marker does not match blob record header",
+        ));
+    }
+    if len == 0 || len > LOG_RECORD_MAX_BYTES {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            format!("invalid block payload length {len}"),
+        ));
+    }
+
+    let mut payload = vec![0_u8; len as usize];
+    blob.read_exact(&mut payload)?;
+    if checksum(&payload) != checksum_on_disk {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "block payload checksum mismatch",
+        ));
+    }
+
+    serde_json::from_slice::<Vec<String>>(&payload)
+        .map_err(|err| io::Error::new(ErrorKind::InvalidData, format!("decode block hashes: {err}")))
+}
+
+fn block_hashes_are_marker(hashes: &[String]) -> bool {
+    hashes.len() == 1 && hashes[0].starts_with(BLOCK_BLOB_MARKER_PREFIX)
+}
+
+fn parse_block_blob_marker(marker: &str) -> Option<(u64, u32, u32)> {
+    let raw = marker.strip_prefix(BLOCK_BLOB_MARKER_PREFIX)?;
+    let mut parts = raw.split(':');
+    let offset = parts.next()?.parse::<u64>().ok()?;
+    let len = parts.next()?.parse::<u32>().ok()?;
+    let checksum = parts.next()?.parse::<u32>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((offset, len, checksum))
+}
+
 fn estimate_file_bytes(file: &FileMetadata) -> usize {
     let hash_bytes: usize = file.block_hashes.iter().map(String::len).sum();
-    file.folder.len() + file.path.len() + hash_bytes + 64
+    file.folder.len() + file.path.len() + file.device.len() + file.file_type.len() + hash_bytes + 64
 }
 
 fn projected_upsert_memory_bytes(
@@ -1084,8 +1239,9 @@ mod tests {
         let mut store = Store::open(cfg).expect("open");
 
         let mut inserted = 0_u64;
-        for i in 0_u64..200_000 {
-            let result = store.upsert_file(meta("alpha", &format!("f-{i:06}.bin"), i + 1));
+        for i in 0_u64..8_000 {
+            let path = format!("f-{i:06}-{}.bin", "x".repeat(1024));
+            let result = store.upsert_file(meta("alpha", &path, i + 1));
             if result.is_err() {
                 let err = result.expect_err("must fail");
                 assert!(err.to_string().contains("memory budget exceeded"));
@@ -1106,11 +1262,12 @@ mod tests {
     fn rejects_open_when_journal_exceeds_budget() {
         let root = temp_root("budget-open-reject");
         {
-            let cfg = StoreConfig::new(&root).with_memory_cap_mb(8);
+            let cfg = StoreConfig::new(&root).with_memory_cap_mb(64);
             let mut store = Store::open(cfg).expect("open writer");
-            for i in 0_u64..20_000 {
+            for i in 0_u64..1_200 {
+                let path = format!("seed-{i:05}-{}.bin", "y".repeat(1024));
                 store
-                    .upsert_file(meta("alpha", &format!("seed-{i:05}.bin"), i + 1))
+                    .upsert_file(meta("alpha", &path, i + 1))
                     .expect("seed upsert");
             }
         }

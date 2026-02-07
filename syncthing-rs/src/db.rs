@@ -304,7 +304,7 @@ impl WalFreeDb {
             items: page
                 .items
                 .into_iter()
-                .map(|meta| store_to_file_info(&meta))
+                .map(|meta| store_to_file_info_without_blocks(&meta))
                 .collect(),
             next_cursor: page.next_cursor.map(|cursor| cursor.path),
         })
@@ -325,7 +325,7 @@ impl WalFreeDb {
             });
         }
 
-        let globals = self.global_file_map(folder);
+        let globals = self.global_file_map(folder)?;
         let mut items = Vec::new();
         let mut has_more = false;
 
@@ -335,7 +335,7 @@ impl WalFreeDb {
                     continue;
                 }
             }
-            let local = self.get_device_file(folder, device, path)?;
+            let local = self.get_device_file_light(folder, device, path);
             let requires_update = match local {
                 Some(current) => {
                     global.sequence > current.sequence
@@ -419,23 +419,65 @@ impl WalFreeDb {
         Ok(())
     }
 
-    fn all_files_for_folder_device(&self, folder: &str, device: &str) -> Vec<FileInfo> {
+    fn all_files_for_folder_device_light(&self, folder: &str, device: &str) -> Vec<FileInfo> {
         let mut out = Vec::new();
         self.store
             .for_each_file_in_folder_device(folder, device, |meta| {
-                out.push(store_to_file_info(meta));
+                out.push(store_to_file_info_without_blocks(meta));
                 true
             });
         out
     }
 
-    fn global_file_map(&self, folder: &str) -> BTreeMap<String, FileInfo> {
+    fn all_files_for_folder_device_full(&self, folder: &str, device: &str) -> Result<Vec<FileInfo>, String> {
+        let mut out = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = self
+                .store
+                .files_in_folder_device_ordered_page(folder, device, cursor.as_deref(), 1024);
+            if page.items.is_empty() {
+                break;
+            }
+            for meta in page.items {
+                let hashes = self
+                    .store
+                    .resolve_file_block_hashes(&meta)
+                    .map_err(|e| format!("load block hashes for {}/{}: {e}", folder, meta.path))?;
+                let mut file = store_to_file_info_without_blocks(&meta);
+                file.block_hashes = hashes;
+                out.push(file);
+            }
+            cursor = page.next_cursor.map(|next| next.path);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    fn get_device_file_light(&self, folder: &str, device: &str, file: &str) -> Option<FileInfo> {
+        self.store
+            .get_file(folder, device, file)
+            .map(store_to_file_info_without_blocks)
+    }
+
+    fn global_file_map(&self, folder: &str) -> Result<BTreeMap<String, FileInfo>, String> {
         let mut out: BTreeMap<String, FileInfo> = BTreeMap::new();
+        let mut first_error: Option<String> = None;
         self.store.for_each_file_in_folder(folder, |meta| {
             if meta.ignored {
                 return true;
             }
-            let candidate = store_to_file_info(meta);
+            let hashes = match self.store.resolve_file_block_hashes(meta) {
+                Ok(v) => v,
+                Err(err) => {
+                    first_error = Some(format!("load block hashes for {}/{}: {err}", folder, meta.path));
+                    return false;
+                }
+            };
+            let mut candidate = store_to_file_info_without_blocks(meta);
+            candidate.block_hashes = hashes;
             let path = candidate.path.clone();
             match out.get(&path) {
                 Some(current) if !prefer_global(&candidate, current) => {}
@@ -445,7 +487,10 @@ impl WalFreeDb {
             }
             true
         });
-        out
+        if let Some(err) = first_error {
+            return Err(err);
+        }
+        Ok(out)
     }
 
     fn global_file_map_light(&self, folder: &str) -> BTreeMap<String, FileInfo> {
@@ -514,8 +559,9 @@ impl Db for WalFreeDb {
         self.ensure_open()?;
         Ok(self
             .store
-            .get_file(folder, device, file)
-            .map(store_to_file_info))
+            .get_file_with_blocks(folder, device, file)
+            .map_err(|e| format!("get file with blocks: {e}"))?
+            .map(|meta| store_to_file_info(&meta)))
     }
 
     fn get_global_availability(&self, folder: &str, file: &str) -> Result<Vec<DeviceId>, String> {
@@ -532,7 +578,7 @@ impl Db for WalFreeDb {
 
     fn get_global_file(&self, folder: &str, file: &str) -> Result<Option<FileInfo>, String> {
         self.ensure_open()?;
-        Ok(self.global_file_map(folder).remove(file))
+        Ok(self.global_file_map(folder)?.remove(file))
     }
 
     fn all_global_files(&self, folder: &str) -> Result<Vec<FileMetadata>, String> {
@@ -560,7 +606,7 @@ impl Db for WalFreeDb {
 
     fn all_local_files(&self, folder: &str, device: &str) -> Result<Vec<FileInfo>, String> {
         self.ensure_open()?;
-        Ok(self.all_files_for_folder_device(folder, device))
+        self.all_files_for_folder_device_full(folder, device)
     }
 
     fn all_local_files_ordered(&self, folder: &str, device: &str) -> Result<Vec<FileInfo>, String> {
@@ -587,7 +633,7 @@ impl Db for WalFreeDb {
     ) -> Result<Vec<FileInfo>, String> {
         self.ensure_open()?;
         let mut out = self
-            .all_local_files(folder, device)?
+            .all_files_for_folder_device_light(folder, device)
             .into_iter()
             .filter(|f| f.sequence >= start_seq)
             .collect::<Vec<_>>();
@@ -622,7 +668,11 @@ impl Db for WalFreeDb {
             if page.items.is_empty() {
                 break;
             }
-            out.extend(page.items.into_iter().map(|meta| store_to_file_info(&meta)));
+            out.extend(
+                page.items
+                    .into_iter()
+                    .map(|meta| store_to_file_info_without_blocks(&meta)),
+            );
             cursor = page.next_cursor.map(|next| next.path);
             if cursor.is_none() {
                 break;
@@ -639,12 +689,23 @@ impl Db for WalFreeDb {
         self.ensure_open()?;
         let target = String::from_utf8_lossy(hash).to_string();
         let mut out = Vec::new();
+        let mut first_error: Option<String> = None;
         self.store.for_each_file_in_folder(folder, |meta| {
-            if meta.block_hashes.iter().any(|h| h == &target) {
-                out.push(file_metadata_from_info(store_to_file_info(meta)));
+            let hashes = match self.store.resolve_file_block_hashes(meta) {
+                Ok(v) => v,
+                Err(err) => {
+                    first_error = Some(format!("load block hashes for {}/{}: {err}", folder, meta.path));
+                    return false;
+                }
+            };
+            if hashes.iter().any(|h| h == &target) {
+                out.push(file_metadata_from_info(store_to_file_info_without_blocks(meta)));
             }
             true
         });
+        if let Some(err) = first_error {
+            return Err(err);
+        }
         out.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(out)
     }
@@ -691,11 +752,11 @@ impl Db for WalFreeDb {
             return Ok(out);
         }
 
-        let globals = self.global_file_map(folder);
+        let globals = self.global_file_map(folder)?;
         let mut need = Vec::new();
 
         for (path, global) in globals {
-            let local = self.get_device_file(folder, device, &path)?;
+            let local = self.get_device_file_light(folder, device, &path);
             let requires_update = match local {
                 Some(current) => {
                     global.sequence > current.sequence
@@ -726,9 +787,17 @@ impl Db for WalFreeDb {
         self.ensure_open()?;
         let target = String::from_utf8_lossy(hash).to_string();
         let mut out = Vec::new();
+        let mut first_error: Option<String> = None;
 
         self.store.for_each_file_in_folder(folder, |meta| {
-            for (idx, block_hash) in meta.block_hashes.iter().enumerate() {
+            let hashes = match self.store.resolve_file_block_hashes(meta) {
+                Ok(v) => v,
+                Err(err) => {
+                    first_error = Some(format!("load block hashes for {}/{}: {err}", folder, meta.path));
+                    return false;
+                }
+            };
+            for (idx, block_hash) in hashes.iter().enumerate() {
                 if block_hash != &target {
                     continue;
                 }
@@ -742,6 +811,9 @@ impl Db for WalFreeDb {
             }
             true
         });
+        if let Some(err) = first_error {
+            return Err(err);
+        }
         out.sort_by(|a, b| a.file_name.cmp(&b.file_name));
         Ok(out)
     }
@@ -749,7 +821,7 @@ impl Db for WalFreeDb {
     fn drop_all_files(&mut self, folder: &str, device: &str) -> Result<(), String> {
         self.ensure_open()?;
         let paths = self
-            .all_files_for_folder_device(folder, device)
+            .all_files_for_folder_device_light(folder, device)
             .into_iter()
             .map(|f| f.path)
             .collect::<Vec<_>>();
@@ -817,7 +889,7 @@ impl Db for WalFreeDb {
     fn get_device_sequence(&self, folder: &str, device: &str) -> Result<i64, String> {
         self.ensure_open()?;
         let max_seq = self
-            .all_files_for_folder_device(folder, device)
+            .all_files_for_folder_device_light(folder, device)
             .into_iter()
             .map(|f| f.sequence)
             .max()
@@ -883,7 +955,7 @@ impl Db for WalFreeDb {
         self.ensure_open()?;
         let mut counts = Counts::default();
         for (path, global) in self.global_file_map_light(folder) {
-            let local = self.get_device_file(folder, device, &path)?;
+            let local = self.get_device_file_light(folder, device, &path);
             let requires_update = match local {
                 Some(current) => {
                     global.sequence > current.sequence

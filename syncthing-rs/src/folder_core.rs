@@ -69,6 +69,19 @@ pub(crate) struct PullStats {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CapViolationReport {
+    pub(crate) folder: String,
+    pub(crate) subsystem: String,
+    pub(crate) policy: String,
+    pub(crate) requested_bytes: usize,
+    pub(crate) reserved_bytes: usize,
+    pub(crate) budget_bytes: usize,
+    pub(crate) queue_items: usize,
+    pub(crate) query_limit: usize,
+    pub(crate) runtime_budget_key: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct MemoryTelemetry {
     pub(crate) estimated_bytes: usize,
     pub(crate) budget_bytes: usize,
@@ -82,6 +95,7 @@ pub(crate) struct MemoryTelemetry {
     pub(crate) runtime_budget_bytes: usize,
     pub(crate) runtime_throttle_events: u64,
     pub(crate) runtime_hard_block_events: u64,
+    pub(crate) runtime_cap_violation_report: Option<CapViolationReport>,
 }
 
 #[derive(Debug)]
@@ -354,6 +368,7 @@ pub(crate) struct folder {
     pub(crate) memoryThrottleEvents: u64,
     pub(crate) memoryHardBlockEvents: u64,
     pub(crate) lastCapViolation: Option<String>,
+    pub(crate) lastRuntimeCapViolationReport: Option<CapViolationReport>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -630,6 +645,7 @@ impl folder {
         let mut throttled = false;
         let mut query_limit = self.config.memory_pull_page_items.max(1) as usize;
         self.lastCapViolation = None;
+        self.lastRuntimeCapViolationReport = None;
         match self.config.memory_policy {
             MemoryPolicy::Throttle => {
                 if estimated > soft_limit {
@@ -646,6 +662,17 @@ impl folder {
                         "memory cap exceeded: estimated={} budget={} folder={}",
                         estimated, budget, self.config.id
                     ));
+                    self.lastRuntimeCapViolationReport = Some(CapViolationReport {
+                        folder: self.config.id.clone(),
+                        subsystem: "pull-db-budget".to_string(),
+                        policy: "fail".to_string(),
+                        requested_bytes: estimated,
+                        reserved_bytes: estimated,
+                        budget_bytes: budget,
+                        queue_items: 0,
+                        query_limit,
+                        runtime_budget_key: self.runtimeMemoryBudget.key.clone(),
+                    });
                     self.pullStats = PullStats {
                         hard_blocked: true,
                         ..Default::default()
@@ -707,6 +734,17 @@ impl folder {
                             self.config.id,
                             self.runtimeMemoryBudget.key
                         ));
+                        self.lastRuntimeCapViolationReport = Some(CapViolationReport {
+                            folder: self.config.id.clone(),
+                            subsystem: "pull-runtime-budget".to_string(),
+                            policy: "fail".to_string(),
+                            requested_bytes: batch_runtime_bytes,
+                            reserved_bytes: self.runtimeMemoryBudget.reserved_bytes(),
+                            budget_bytes: self.runtimeMemoryBudget.max_bytes,
+                            queue_items: needed_batch.len(),
+                            query_limit,
+                            runtime_budget_key: self.runtimeMemoryBudget.key.clone(),
+                        });
                         self.pullStats = PullStats {
                             hard_blocked: true,
                             ..Default::default()
@@ -813,6 +851,7 @@ impl folder {
                 .runtimeMemoryBudget
                 .hard_block_events
                 .load(Ordering::Acquire),
+            runtime_cap_violation_report: self.lastRuntimeCapViolationReport.clone(),
         }
     }
 
@@ -2006,6 +2045,62 @@ mod tests {
         assert!(err.contains("memory cap exceeded"));
         assert_eq!(f.memoryHardBlockEvents, 1);
         assert!(f.PullStats().hard_blocked);
+        let report = f
+            .MemoryTelemetry()
+            .runtime_cap_violation_report
+            .expect("cap report");
+        assert_eq!(report.subsystem, "pull-db-budget");
+        assert_eq!(report.policy, "fail");
+        assert_eq!(report.folder, "default");
+        assert_eq!(report.query_limit, 1024);
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(db_root);
+    }
+
+    #[test]
+    fn pull_hard_blocks_when_runtime_budget_is_exceeded() {
+        let root = temp_root("runtime-budget-fail-policy");
+        let db_root = temp_root("runtime-budget-fail-policy-db");
+        let mut dbv = db::WalFreeDb::open_runtime(&db_root, 128).expect("open runtime db");
+        let large_hashes = (0..35_000)
+            .map(|_| "0123456789abcdef0123456789abcdef".to_string())
+            .collect::<Vec<_>>();
+        let remote = db::FileInfo {
+            folder: "default".to_string(),
+            path: "same.txt".to_string(),
+            sequence: 2,
+            modified_ns: 2,
+            size: 1,
+            deleted: false,
+            ignored: false,
+            local_flags: 0,
+            file_type: db::FileInfoType::File,
+            block_hashes: large_hashes,
+        };
+        dbv.update("default", "remote", vec![remote])
+            .expect("update remote");
+
+        let db = Arc::new(Mutex::new(dbv));
+        let mut cfg = FolderConfiguration::default();
+        cfg.id = "default".to_string();
+        cfg.path = root.to_string_lossy().to_string();
+        cfg.memory_policy = MemoryPolicy::Fail;
+        cfg.memory_max_mb = 1;
+        let mut f = newFolder(cfg, db);
+
+        let err = f.pull().expect_err("must block on runtime budget");
+        assert!(err.contains("memory cap exceeded"));
+        assert_eq!(f.memoryHardBlockEvents, 1);
+        assert!(f.PullStats().hard_blocked);
+        let telemetry = f.MemoryTelemetry();
+        let report = telemetry.runtime_cap_violation_report.expect("cap report");
+        assert_eq!(report.subsystem, "pull-runtime-budget");
+        assert_eq!(report.policy, "fail");
+        assert_eq!(report.folder, "default");
+        assert_eq!(report.queue_items, 1);
+        assert_eq!(report.budget_bytes, 1 * 1024 * 1024);
+        assert!(telemetry.runtime_hard_block_events >= 1);
 
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(db_root);
@@ -2075,6 +2170,7 @@ mod tests {
         assert_eq!(telemetry.hard_block_events, 1);
         assert!(telemetry.pull_hard_blocked);
         assert!(telemetry.last_cap_violation.is_some());
+        assert!(telemetry.runtime_cap_violation_report.is_some());
 
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(db_root);

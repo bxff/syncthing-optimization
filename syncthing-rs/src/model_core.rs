@@ -502,6 +502,22 @@ impl model {
                 "memoryRuntimeHardBlockEvents".to_string(),
                 Value::from(telemetry.runtime_hard_block_events as u64),
             );
+            if let Some(report) = telemetry.runtime_cap_violation_report {
+                out.insert(
+                    "memoryCapViolationReport".to_string(),
+                    serde_json::json!({
+                        "folder": report.folder,
+                        "subsystem": report.subsystem,
+                        "policy": report.policy,
+                        "requestedBytes": report.requested_bytes,
+                        "reservedBytes": report.reserved_bytes,
+                        "budgetBytes": report.budget_bytes,
+                        "queueItems": report.queue_items,
+                        "queryLimit": report.query_limit,
+                        "runtimeBudgetKey": report.runtime_budget_key,
+                    }),
+                );
+            }
             if let Some(last) = telemetry.last_cap_violation {
                 out.insert("memoryLastCapViolation".to_string(), Value::from(last));
             }
@@ -1530,8 +1546,60 @@ mod tests {
         let stats = m.FolderStatistics("default");
         assert!(stats.contains_key("memoryEstimatedBytes"));
         assert!(stats.contains_key("memoryBudgetBytes"));
+        assert!(stats.contains_key("memoryRuntimeReservedBytes"));
+        assert!(stats.contains_key("memoryRuntimeBudgetBytes"));
         m.removeFolder("default");
         assert_eq!(m.State("default"), "idle");
+    }
+
+    #[test]
+    fn folder_statistics_expose_structured_cap_violation_report() {
+        let root = std::env::temp_dir().join(format!(
+            "syncthing-rs-cap-report-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("mkdir");
+
+        let mut cfg = newFolderConfiguration("default", &root.to_string_lossy());
+        cfg.memory_policy = crate::config::MemoryPolicy::Fail;
+        cfg.memory_max_mb = 1;
+        let mut m = NewModel();
+        m.newFolder(cfg);
+
+        let large_hashes = (0..35_000)
+            .map(|_| "0123456789abcdef0123456789abcdef".to_string())
+            .collect::<Vec<_>>();
+        let remote = db::FileInfo {
+            folder: "default".to_string(),
+            path: "hot.bin".to_string(),
+            sequence: 1,
+            modified_ns: 1,
+            size: 1,
+            deleted: false,
+            ignored: false,
+            local_flags: 0,
+            file_type: db::FileInfoType::File,
+            block_hashes: large_hashes,
+        };
+        m.Index("default", &[remote]).expect("index remote");
+        let pull_err = m
+            .folderRunners
+            .get_mut("default")
+            .expect("runner")
+            .pull()
+            .expect_err("must fail under runtime cap");
+        assert!(pull_err.contains("memory cap exceeded"));
+
+        let stats = m.FolderStatistics("default");
+        let report = stats
+            .get("memoryCapViolationReport")
+            .expect("cap report in stats");
+        assert_eq!(report["folder"], "default");
+        assert_eq!(report["policy"], "fail");
+        assert_eq!(report["subsystem"], "pull-runtime-budget");
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

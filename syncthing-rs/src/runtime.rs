@@ -473,6 +473,31 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 }
             }
         }
+        "/rest/db/file" => {
+            if method != &Method::Get {
+                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+            }
+            let params = parse_query(query);
+            let Some(folder) = params.get("folder") else {
+                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+            };
+            let Some(path) = params.get("file") else {
+                return ApiReply::json(400, json!({ "error": "missing file query parameter" }));
+            };
+            let global = params
+                .get("global")
+                .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+                .unwrap_or(false);
+            match folder_file(runtime, folder, path, global) {
+                Ok(payload) => ApiReply::json(200, payload),
+                Err(ApiFolderStatusError::MissingFolder) => {
+                    ApiReply::json(404, json!({ "error": "folder not found", "folder": folder }))
+                }
+                Err(ApiFolderStatusError::Internal(err)) => {
+                    ApiReply::json(500, json!({ "error": err }))
+                }
+            }
+        }
         "/rest/db/browse" => {
             if method != &Method::Get {
                 return ApiReply::json(405, json!({ "error": "method not allowed" }));
@@ -559,6 +584,42 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
             };
             match pull_folder(runtime, folder) {
+                Ok(payload) => ApiReply::json(200, payload),
+                Err(ApiFolderStatusError::MissingFolder) => {
+                    ApiReply::json(404, json!({ "error": "folder not found", "folder": folder }))
+                }
+                Err(ApiFolderStatusError::Internal(err)) => {
+                    ApiReply::json(500, json!({ "error": err }))
+                }
+            }
+        }
+        "/rest/db/override" => {
+            if method != &Method::Post {
+                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+            }
+            let params = parse_query(query);
+            let Some(folder) = params.get("folder") else {
+                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+            };
+            match override_folder(runtime, folder) {
+                Ok(payload) => ApiReply::json(200, payload),
+                Err(ApiFolderStatusError::MissingFolder) => {
+                    ApiReply::json(404, json!({ "error": "folder not found", "folder": folder }))
+                }
+                Err(ApiFolderStatusError::Internal(err)) => {
+                    ApiReply::json(500, json!({ "error": err }))
+                }
+            }
+        }
+        "/rest/db/revert" => {
+            if method != &Method::Post {
+                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+            }
+            let params = parse_query(query);
+            let Some(folder) = params.get("folder") else {
+                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+            };
+            match revert_folder(runtime, folder) {
                 Ok(payload) => ApiReply::json(200, payload),
                 Err(ApiFolderStatusError::MissingFolder) => {
                     ApiReply::json(404, json!({ "error": "folder not found", "folder": folder }))
@@ -743,6 +804,56 @@ fn folder_status(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiF
     }))
 }
 
+fn folder_file(
+    runtime: &DaemonApiRuntime,
+    folder: &str,
+    path: &str,
+    global: bool,
+) -> Result<Value, ApiFolderStatusError> {
+    let guard = runtime
+        .model
+        .lock()
+        .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
+    if !guard.folderCfgs.contains_key(folder) {
+        return Err(ApiFolderStatusError::MissingFolder);
+    }
+    let file = if global {
+        guard.CurrentGlobalFile(folder, path)
+    } else {
+        guard.CurrentFolderFile(folder, path)
+    };
+    let Some(file) = file else {
+        return Ok(json!({
+            "folder": folder,
+            "file": path,
+            "global": global,
+            "exists": false,
+        }));
+    };
+    let file_type = match file.file_type {
+        crate::db::FileInfoType::File => "file",
+        crate::db::FileInfoType::Directory => "directory",
+        crate::db::FileInfoType::Symlink => "symlink",
+    };
+    Ok(json!({
+        "folder": folder,
+        "file": path,
+        "global": global,
+        "exists": true,
+        "entry": {
+            "path": file.path,
+            "sequence": file.sequence,
+            "modifiedNs": file.modified_ns,
+            "size": file.size,
+            "deleted": file.deleted,
+            "ignored": file.ignored,
+            "localFlags": file.local_flags,
+            "fileType": file_type,
+            "blockHashes": file.block_hashes,
+        }
+    }))
+}
+
 fn folder_jobs(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiFolderStatusError> {
     let guard = runtime
         .model
@@ -841,6 +952,44 @@ fn pull_folder(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiFol
         },
         "jobs": jobs,
         "stats": stats,
+    }))
+}
+
+fn override_folder(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiFolderStatusError> {
+    let mut guard = runtime
+        .model
+        .lock()
+        .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
+    guard.Override(folder).map_err(|err| {
+        if err.contains("folder missing") {
+            ApiFolderStatusError::MissingFolder
+        } else {
+            ApiFolderStatusError::Internal(err)
+        }
+    })?;
+    Ok(json!({
+        "folder": folder,
+        "action": "override",
+        "ok": true,
+    }))
+}
+
+fn revert_folder(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiFolderStatusError> {
+    let mut guard = runtime
+        .model
+        .lock()
+        .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
+    guard.Revert(folder).map_err(|err| {
+        if err.contains("folder missing") {
+            ApiFolderStatusError::MissingFolder
+        } else {
+            ApiFolderStatusError::Internal(err)
+        }
+    })?;
+    Ok(json!({
+        "folder": folder,
+        "action": "revert",
+        "ok": true,
     }))
 }
 
@@ -1575,6 +1724,104 @@ mod tests {
     }
 
     #[test]
+    fn api_db_file_endpoint_returns_local_and_global_entries() {
+        let root = temp_root("api-db-file");
+        let model = Arc::new(Mutex::new(NewModelWithRuntime(Some(root.clone()), Some(50))));
+        {
+            let mut guard = model.lock().expect("lock");
+            guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+            {
+                let mut db = guard.sdb.lock().expect("db lock");
+                db.update("default", "local", vec![file_info("a.txt", 1, 10)])
+                    .expect("update local");
+            }
+            guard
+                .Index("default", &[file_info("a.txt", 2, 20)])
+                .expect("index remote");
+        }
+
+        let runtime = test_api_runtime(
+            model,
+            vec![FolderSpec {
+                id: "default".to_string(),
+                path: root.to_string_lossy().to_string(),
+            }],
+            0,
+        );
+
+        let local = build_api_response(
+            &Method::Get,
+            "/rest/db/file?folder=default&file=a.txt",
+            &runtime,
+        );
+        assert_eq!(local.status_code, StatusCode(200));
+        let local_payload: Value = serde_json::from_slice(&local.body).expect("decode json");
+        assert_eq!(local_payload["exists"], true);
+        assert_eq!(local_payload["entry"]["sequence"], 1);
+
+        let global = build_api_response(
+            &Method::Get,
+            "/rest/db/file?folder=default&file=a.txt&global=1",
+            &runtime,
+        );
+        assert_eq!(global.status_code, StatusCode(200));
+        let global_payload: Value = serde_json::from_slice(&global.body).expect("decode json");
+        assert_eq!(global_payload["exists"], true);
+        assert_eq!(global_payload["entry"]["sequence"], 2);
+
+        let missing = build_api_response(
+            &Method::Get,
+            "/rest/db/file?folder=default&file=missing.txt",
+            &runtime,
+        );
+        assert_eq!(missing.status_code, StatusCode(200));
+        let missing_payload: Value = serde_json::from_slice(&missing.body).expect("decode json");
+        assert_eq!(missing_payload["exists"], false);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn api_db_override_and_revert_endpoints_work() {
+        let root = temp_root("api-db-override-revert");
+        let model = Arc::new(Mutex::new(NewModelWithRuntime(Some(root.clone()), Some(50))));
+        {
+            let mut guard = model.lock().expect("lock");
+            guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+        }
+        let runtime = test_api_runtime(
+            model,
+            vec![FolderSpec {
+                id: "default".to_string(),
+                path: root.to_string_lossy().to_string(),
+            }],
+            0,
+        );
+
+        let override_reply =
+            build_api_response(&Method::Post, "/rest/db/override?folder=default", &runtime);
+        assert_eq!(override_reply.status_code, StatusCode(200));
+        let override_payload: Value =
+            serde_json::from_slice(&override_reply.body).expect("decode json");
+        assert_eq!(override_payload["action"], "override");
+        assert_eq!(override_payload["ok"], true);
+
+        let revert_reply =
+            build_api_response(&Method::Post, "/rest/db/revert?folder=default", &runtime);
+        assert_eq!(revert_reply.status_code, StatusCode(200));
+        let revert_payload: Value =
+            serde_json::from_slice(&revert_reply.body).expect("decode json");
+        assert_eq!(revert_payload["action"], "revert");
+        assert_eq!(revert_payload["ok"], true);
+
+        let missing_override =
+            build_api_response(&Method::Post, "/rest/db/override?folder=missing", &runtime);
+        assert_eq!(missing_override.status_code, StatusCode(404));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn api_db_need_returns_needed_page() {
         let root = temp_root("api-db-need");
         let model = Arc::new(Mutex::new(NewModelWithRuntime(Some(root.clone()), Some(50))));
@@ -1631,6 +1878,15 @@ mod tests {
         let status_post =
             build_api_response(&Method::Post, "/rest/db/status?folder=default", &runtime);
         assert_eq!(status_post.status_code, StatusCode(405));
+        let file_post =
+            build_api_response(&Method::Post, "/rest/db/file?folder=default&file=a.txt", &runtime);
+        assert_eq!(file_post.status_code, StatusCode(405));
+        let override_get =
+            build_api_response(&Method::Get, "/rest/db/override?folder=default", &runtime);
+        assert_eq!(override_get.status_code, StatusCode(405));
+        let revert_get =
+            build_api_response(&Method::Get, "/rest/db/revert?folder=default", &runtime);
+        assert_eq!(revert_get.status_code, StatusCode(405));
     }
 
     #[test]

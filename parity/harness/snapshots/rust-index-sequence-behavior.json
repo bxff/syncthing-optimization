@@ -1,0 +1,23 @@
+{
+  "ordered_files": [
+    {
+      "folder": "default",
+      "path": "a.txt",
+      "sequence": 1
+    },
+    {
+      "folder": "default",
+      "path": "b.txt",
+      "sequence": 2
+    },
+    {
+      "folder": "default",
+      "path": "c.txt",
+      "sequence": 3
+    }
+  ],
+  "prefix_a_count": 1,
+  "scenario": "index-sequence-behavior",
+  "source": "rust",
+  "status": "prototype"
+}

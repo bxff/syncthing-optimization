@@ -41,7 +41,7 @@ var sourcePatterns = []string{
 	"internal/db/interface.go",
 }
 
-var parityCriticalRoots = []string{"rust", "crates", "surf"}
+var parityCriticalRoots = []string{"rust", "crates", "syncthing-rs"}
 
 var allowedExceptionRules = map[string]struct{}{
 	"status-missing":        {},
@@ -460,7 +460,7 @@ func runCheck(args []string) {
 					report.Failures = append(report.Failures, reportFailure{
 						Rule:    "rust-surface-missing",
 						ID:      mi.ID,
-						Message: fmt.Sprintf("rust symbol %q not found in rust/crates/surf sources", mi.RustSymbol),
+						Message: fmt.Sprintf("rust symbol %q not found in rust/crates/syncthing-rs sources", mi.RustSymbol),
 					})
 				}
 			}

@@ -28,7 +28,7 @@ var surfacePatterns = []string{
 	"internal/db/interface.go",
 }
 
-var rustRoots = []string{"rust/", "crates/", "surf/"}
+var rustRoots = []string{"rust/", "crates/", "syncthing-rs/"}
 
 func main() {
 	fs := flag.NewFlagSet("parity-pr-guard", flag.ExitOnError)

@@ -1,0 +1,8 @@
+{
+  "conflict_count": 1,
+  "considered_count": 2,
+  "ignored_count": 2,
+  "scenario": "conflict-and-ignore-semantics",
+  "source": "rust",
+  "status": "prototype"
+}

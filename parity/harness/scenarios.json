@@ -8,12 +8,25 @@
       "description": "Validate index/index-update sequence progression and boundary checks.",
       "severity": "P0",
       "required": true,
-      "tags": ["core", "interop"],
+      "tags": [
+        "core",
+        "interop"
+      ],
       "comparator": "json-equal",
       "go": {
         "snapshot_path": "parity/harness/snapshots/go-index-sequence-behavior.json"
       },
       "rust": {
+        "command": [
+          "cargo",
+          "run",
+          "--quiet",
+          "--manifest-path",
+          "syncthing-rs/Cargo.toml",
+          "--",
+          "scenario",
+          "index-sequence-behavior"
+        ],
         "snapshot_path": "parity/harness/snapshots/rust-index-sequence-behavior.json"
       }
     },
@@ -22,12 +35,24 @@
       "description": "Validate global winner and local-need decisions for mixed versions/deletes.",
       "severity": "P0",
       "required": true,
-      "tags": ["core"],
+      "tags": [
+        "core"
+      ],
       "comparator": "json-equal",
       "go": {
         "snapshot_path": "parity/harness/snapshots/go-global-need-decision.json"
       },
       "rust": {
+        "command": [
+          "cargo",
+          "run",
+          "--quiet",
+          "--manifest-path",
+          "syncthing-rs/Cargo.toml",
+          "--",
+          "scenario",
+          "global-need-decision"
+        ],
         "snapshot_path": "parity/harness/snapshots/rust-global-need-decision.json"
       }
     },
@@ -36,12 +61,24 @@
       "description": "Validate conflict outcomes and ignore/deletion semantics.",
       "severity": "P1",
       "required": true,
-      "tags": ["core"],
+      "tags": [
+        "core"
+      ],
       "comparator": "json-equal",
       "go": {
         "snapshot_path": "parity/harness/snapshots/go-conflict-and-ignore-semantics.json"
       },
       "rust": {
+        "command": [
+          "cargo",
+          "run",
+          "--quiet",
+          "--manifest-path",
+          "syncthing-rs/Cargo.toml",
+          "--",
+          "scenario",
+          "conflict-and-ignore-semantics"
+        ],
         "snapshot_path": "parity/harness/snapshots/rust-conflict-and-ignore-semantics.json"
       }
     },
@@ -50,12 +87,24 @@
       "description": "Validate send/receive, receive-only, and receive-encrypted behavior parity.",
       "severity": "P0",
       "required": true,
-      "tags": ["core"],
+      "tags": [
+        "core"
+      ],
       "comparator": "json-equal",
       "go": {
         "snapshot_path": "parity/harness/snapshots/go-folder-type-behavior.json"
       },
       "rust": {
+        "command": [
+          "cargo",
+          "run",
+          "--quiet",
+          "--manifest-path",
+          "syncthing-rs/Cargo.toml",
+          "--",
+          "scenario",
+          "folder-type-behavior"
+        ],
         "snapshot_path": "parity/harness/snapshots/rust-folder-type-behavior.json"
       }
     },
@@ -64,12 +113,24 @@
       "description": "Validate protocol exchange and state transition outputs.",
       "severity": "P0",
       "required": true,
-      "tags": ["interop"],
+      "tags": [
+        "interop"
+      ],
       "comparator": "json-equal",
       "go": {
         "snapshot_path": "parity/harness/snapshots/go-protocol-state-transition.json"
       },
       "rust": {
+        "command": [
+          "cargo",
+          "run",
+          "--quiet",
+          "--manifest-path",
+          "syncthing-rs/Cargo.toml",
+          "--",
+          "scenario",
+          "protocol-state-transition"
+        ],
         "snapshot_path": "parity/harness/snapshots/rust-protocol-state-transition.json"
       }
     },
@@ -78,12 +139,24 @@
       "description": "Validate memory-cap profile behavior at 50 MB process cap.",
       "severity": "P0",
       "required": true,
-      "tags": ["memory-cap"],
+      "tags": [
+        "memory-cap"
+      ],
       "comparator": "json-equal",
       "go": {
         "snapshot_path": "parity/harness/snapshots/go-memory-cap-50mb.json"
       },
       "rust": {
+        "command": [
+          "cargo",
+          "run",
+          "--quiet",
+          "--manifest-path",
+          "syncthing-rs/Cargo.toml",
+          "--",
+          "scenario",
+          "memory-cap-50mb"
+        ],
         "snapshot_path": "parity/harness/snapshots/rust-memory-cap-50mb.json"
       }
     },
@@ -92,12 +165,24 @@
       "description": "Validate WAL-free store durability semantics under normal operation.",
       "severity": "P0",
       "required": true,
-      "tags": ["durability"],
+      "tags": [
+        "durability"
+      ],
       "comparator": "json-equal",
       "go": {
         "snapshot_path": "parity/harness/snapshots/go-wal-free-durability.json"
       },
       "rust": {
+        "command": [
+          "cargo",
+          "run",
+          "--quiet",
+          "--manifest-path",
+          "syncthing-rs/Cargo.toml",
+          "--",
+          "scenario",
+          "wal-free-durability"
+        ],
         "snapshot_path": "parity/harness/snapshots/rust-wal-free-durability.json"
       }
     },
@@ -106,12 +191,24 @@
       "description": "Validate crash-recovery behavior for the WAL-free custom store.",
       "severity": "P0",
       "required": true,
-      "tags": ["crash-recovery"],
+      "tags": [
+        "crash-recovery"
+      ],
       "comparator": "json-equal",
       "go": {
         "snapshot_path": "parity/harness/snapshots/go-crash-recovery.json"
       },
       "rust": {
+        "command": [
+          "cargo",
+          "run",
+          "--quiet",
+          "--manifest-path",
+          "syncthing-rs/Cargo.toml",
+          "--",
+          "scenario",
+          "crash-recovery"
+        ],
         "snapshot_path": "parity/harness/snapshots/rust-crash-recovery.json"
       }
     }

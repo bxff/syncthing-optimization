@@ -1,0 +1,11 @@
+{
+  "file_count": 2,
+  "journal_file": "events.log",
+  "paths": [
+    "one.txt",
+    "two.txt"
+  ],
+  "scenario": "wal-free-durability",
+  "source": "rust",
+  "status": "prototype"
+}

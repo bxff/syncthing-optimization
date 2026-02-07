@@ -1,0 +1,24 @@
+{
+  "folder_modes": {
+    "recvenc": [
+      "scan",
+      "index_encrypted",
+      "pull_encrypted"
+    ],
+    "recvonly": [
+      "scan",
+      "index",
+      "pull",
+      "local_revert_required"
+    ],
+    "sendrecv": [
+      "scan",
+      "index",
+      "pull",
+      "push"
+    ]
+  },
+  "scenario": "folder-type-behavior",
+  "source": "rust",
+  "status": "prototype"
+}

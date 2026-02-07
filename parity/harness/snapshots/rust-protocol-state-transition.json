@@ -1,0 +1,13 @@
+{
+  "scenario": "protocol-state-transition",
+  "source": "rust",
+  "status": "prototype",
+  "transitions": [
+    "dial",
+    "hello",
+    "cluster_config",
+    "index",
+    "index_update",
+    "ping"
+  ]
+}

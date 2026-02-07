@@ -1,0 +1,8 @@
+{
+  "estimated_memory_bytes": 960000,
+  "memory_budget_bytes": 52428800,
+  "scenario": "memory-cap-50mb",
+  "source": "rust",
+  "status": "prototype",
+  "under_budget": true
+}

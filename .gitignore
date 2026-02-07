@@ -19,3 +19,4 @@ deb
 /proto/scripts/protoc-gen-gosyncthing
 /compat.json
 benchmark-results
+/syncthing-rs/target

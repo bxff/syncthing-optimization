@@ -1,0 +1,11 @@
+{
+  "a_present": true,
+  "file_count": 2,
+  "recovered_paths": [
+    "a.txt",
+    "b.txt"
+  ],
+  "scenario": "crash-recovery",
+  "source": "rust",
+  "status": "prototype"
+}

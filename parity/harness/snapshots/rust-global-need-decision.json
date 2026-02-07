@@ -1,0 +1,10 @@
+{
+  "need_count": 2,
+  "need_paths": [
+    "a.txt",
+    "d.txt"
+  ],
+  "scenario": "global-need-decision",
+  "source": "rust",
+  "status": "prototype"
+}

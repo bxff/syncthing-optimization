@@ -1498,4 +1498,46 @@ mod tests {
 
         fs::remove_dir_all(root).expect("cleanup");
     }
+
+    #[test]
+    fn block_hashes_spill_to_disk_and_materialize_after_reopen() {
+        let root = temp_root("hash-spill");
+        let cfg = StoreConfig::new(&root).with_memory_cap_mb(50);
+        let expected = vec![
+            "h1".to_string(),
+            "h2".to_string(),
+            "h3".to_string(),
+            "h4".to_string(),
+        ];
+
+        {
+            let mut store = Store::open(cfg.clone()).expect("open");
+            let mut file = meta("alpha", "a.bin", 1);
+            file.block_hashes = expected.clone();
+            store.upsert_file(file).expect("upsert");
+
+            let in_mem = store
+                .get_file("alpha", "local", "a.bin")
+                .expect("stored file");
+            assert_eq!(in_mem.block_hashes.len(), 1);
+            assert!(in_mem.block_hashes[0].starts_with(BLOCK_BLOB_MARKER_PREFIX));
+
+            let materialized = store
+                .get_file_with_blocks("alpha", "local", "a.bin")
+                .expect("materialize")
+                .expect("file present");
+            assert_eq!(materialized.block_hashes, expected);
+        }
+
+        {
+            let store = Store::open(cfg).expect("reopen");
+            let materialized = store
+                .get_file_with_blocks("alpha", "local", "a.bin")
+                .expect("materialize after reopen")
+                .expect("file present");
+            assert_eq!(materialized.block_hashes, expected);
+        }
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
 }

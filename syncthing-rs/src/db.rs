@@ -1538,4 +1538,41 @@ mod tests {
         }
         let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn get_device_file_materializes_spilled_hashes_after_reopen() {
+        let root = temp_root("reopen-hashes");
+        {
+            let mut db = WalFreeDb::open_runtime(&root, 50).expect("open runtime");
+            db.update(
+                "default",
+                "local",
+                vec![FileInfo {
+                    folder: "default".to_string(),
+                    path: "x.bin".to_string(),
+                    sequence: 1,
+                    modified_ns: 1,
+                    size: 4,
+                    deleted: false,
+                    ignored: false,
+                    local_flags: 0,
+                    file_type: FileInfoType::File,
+                    block_hashes: vec!["h1".to_string(), "h2".to_string(), "h3".to_string()],
+                }],
+            )
+            .expect("update");
+            db.close().expect("close");
+        }
+
+        {
+            let db = WalFreeDb::open_runtime(&root, 50).expect("reopen runtime");
+            let file = db
+                .get_device_file("default", "local", "x.bin")
+                .expect("get")
+                .expect("exists");
+            assert_eq!(file.block_hashes, vec!["h1", "h2", "h3"]);
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
 }

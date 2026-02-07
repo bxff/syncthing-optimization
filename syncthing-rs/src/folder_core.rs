@@ -1563,6 +1563,39 @@ mod tests {
     }
 
     #[test]
+    fn memory_telemetry_reports_cap_violation_state() {
+        let root = temp_root("telemetry-cap");
+        let mut dbv = db::WalFreeDb::open_runtime(&root, 0).expect("open runtime db");
+        dbv.update(
+            "default",
+            "local",
+            vec![file("same.txt", 1, &["h1"])],
+        )
+        .expect("update local");
+        dbv.update(
+            "default",
+            "remote",
+            vec![file("same.txt", 2, &["h1", "h2"])],
+        )
+        .expect("update remote");
+
+        let db = Arc::new(Mutex::new(dbv));
+        let mut cfg = FolderConfiguration::default();
+        cfg.id = "default".to_string();
+        cfg.path = root.to_string_lossy().to_string();
+        cfg.memory_policy = MemoryPolicy::Fail;
+        let mut f = newFolder(cfg, db);
+
+        let _ = f.pull();
+        let telemetry = f.MemoryTelemetry();
+        assert_eq!(telemetry.hard_block_events, 1);
+        assert!(telemetry.pull_hard_blocked);
+        assert!(telemetry.last_cap_violation.is_some());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn scan_persists_files_in_segment_path_order() {
         let root = temp_root("scan-order");
         fs::create_dir_all(root.join("a")).expect("mkdir a");
@@ -1588,6 +1621,36 @@ mod tests {
             .map(|fi| fi.path)
             .collect::<Vec<_>>();
         assert_eq!(ordered, vec!["a/x.txt", "a/z.txt", "a.d/x.txt", "b.txt"]);
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(db_root);
+    }
+
+    #[test]
+    fn scan_with_ignore_delete_keeps_missing_files_non_deleted() {
+        let root = temp_root("scan-ignore-delete");
+        fs::create_dir_all(root.join("foo")).expect("mkdir foo");
+        fs::write(root.join("foo").join("a.txt"), b"a").expect("write foo/a");
+
+        let db_root = temp_root("scan-ignore-delete-db");
+        let db = Arc::new(Mutex::new(
+            db::WalFreeDb::open_runtime(&db_root, 50).expect("open runtime db"),
+        ));
+        let mut cfg = scan_cfg(&root);
+        cfg.ignore_delete = true;
+        let mut f = newFolder(cfg, db.clone());
+        f.Scan(&[]);
+
+        fs::remove_file(root.join("foo").join("a.txt")).expect("remove foo/a");
+        f.Scan(&[String::from("foo")]);
+
+        let fi = db
+            .lock()
+            .expect("db lock")
+            .get_device_file("default", "local", "foo/a.txt")
+            .expect("lookup")
+            .expect("file record");
+        assert!(!fi.deleted);
 
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(db_root);
@@ -1623,6 +1686,53 @@ mod tests {
 
         assert!(foo.deleted);
         assert!(!bar.deleted);
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(db_root);
+    }
+
+    #[test]
+    fn single_file_scope_scan_updates_only_target_file() {
+        let root = temp_root("scan-file-scope");
+        fs::create_dir_all(root.join("foo")).expect("mkdir foo");
+        fs::create_dir_all(root.join("bar")).expect("mkdir bar");
+        fs::write(root.join("foo").join("a.txt"), b"a-v1").expect("write foo/a");
+        fs::write(root.join("bar").join("b.txt"), b"b-v1").expect("write bar/b");
+
+        let db_root = temp_root("scan-file-scope-db");
+        let db = Arc::new(Mutex::new(
+            db::WalFreeDb::open_runtime(&db_root, 50).expect("open runtime db"),
+        ));
+        let mut f = newFolder(scan_cfg(&root), db.clone());
+        f.Scan(&[]);
+
+        let (foo_seq_before, bar_seq_before) = {
+            let guard = db.lock().expect("db lock before");
+            let foo = guard
+                .get_device_file("default", "local", "foo/a.txt")
+                .expect("foo lookup")
+                .expect("foo record");
+            let bar = guard
+                .get_device_file("default", "local", "bar/b.txt")
+                .expect("bar lookup")
+                .expect("bar record");
+            (foo.sequence, bar.sequence)
+        };
+
+        fs::write(root.join("bar").join("b.txt"), b"b-v2").expect("rewrite bar/b");
+        f.Scan(&[String::from("bar/b.txt")]);
+
+        let guard = db.lock().expect("db lock after");
+        let foo = guard
+            .get_device_file("default", "local", "foo/a.txt")
+            .expect("foo lookup")
+            .expect("foo record");
+        let bar = guard
+            .get_device_file("default", "local", "bar/b.txt")
+            .expect("bar lookup")
+            .expect("bar record");
+        assert_eq!(foo.sequence, foo_seq_before);
+        assert!(bar.sequence > bar_seq_before);
 
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(db_root);

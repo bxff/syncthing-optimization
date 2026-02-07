@@ -7,6 +7,7 @@ This harness compares deterministic Go and Rust scenario snapshots and emits par
 - File: `parity/harness/scenarios.json`
 - Each scenario has:
   - `id`, `description`, `severity`, `required`, `tags`
+  - optional `evidence` declaration (`synthetic`, `component`, `daemon`, `peer-interop`)
   - `comparator` (currently `json-equal`)
   - `go` and `rust` side configs with either:
     - `snapshot_path` (read existing JSON snapshot), or
@@ -30,6 +31,8 @@ GOCACHE=/tmp/go-cache go run ./script/parity_harness.go run \
 - `parity/diff-reports/test-status.json`
 - `parity/diff-reports/interop.json`
 - `parity/diff-reports/durability.json`
+
+`latest.json` includes per-scenario `evidence` inferred from the executed commands (synthetic/component/daemon/peer-interop). Replacement-readiness gating uses this inferred value, not just scenario pass/fail.
 
 ## Expected Lifecycle
 

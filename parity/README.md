@@ -10,6 +10,7 @@ This directory contains the enforceable parity contract for the Rust rewrite.
 - `diff-reports/*.json`: differential harness results (Go vs Rust), interop, durability, and memory-cap test status.
 - `guardrail-report.json`: CI-mode guardrail result.
 - `guardrail-report-release.json`: release-mode guardrail result.
+- `guardrail-report-replacement.json`: replacement-readiness guardrail result.
 - `dashboard.json` / `dashboard.md`: completeness dashboard by subsystem.
 
 ## Commands
@@ -44,6 +45,12 @@ Run guardrails in release mode:
 go run ./script/parity.go check --mode release --report parity/guardrail-report-release.json
 ```
 
+Run guardrails in replacement-readiness mode:
+
+```bash
+go run ./script/parity.go check --mode replacement --report parity/guardrail-report-replacement.json
+```
+
 Generate dashboard:
 
 ```bash
@@ -65,6 +72,11 @@ GOCACHE=/tmp/go-cache go run ./script/parity_pr_guard.go --base origin/main --he
 For `implemented` and `parity-verified` features, `required_tests` must include at least one `scenario/<id>` entry where `<id>` exists in `parity/harness/scenarios.json`.
 For `parity-verified`, each mapped `scenario/<id>` must have `status=pass` in `parity/diff-reports/latest.json`.
 
+`replacement` mode adds stricter evidence checks:
+- Every required scenario must be present and `status=pass`.
+- Every required scenario must include non-synthetic evidence (`daemon` or stronger).
+- Required scenarios tagged `interop` must include `peer-interop` evidence.
+
 ## Exception policy
 
 No implicit exceptions are allowed. Any exception must be entered in `exceptions.json` with:
@@ -77,4 +89,4 @@ No implicit exceptions are allowed. Any exception must be entered in `exceptions
 
 Expired exceptions are ignored by guardrail checks.
 
-In `release` mode, `exceptions.json` must be empty.
+In `release` and `replacement` mode, `exceptions.json` must be empty.

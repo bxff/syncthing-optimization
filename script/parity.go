@@ -153,6 +153,7 @@ type diffScenario struct {
 	Severity string `json:"severity"`
 	Required bool   `json:"required"`
 	Status   string `json:"status"`
+	Evidence string `json:"evidence,omitempty"`
 }
 
 type testStatusReport struct {
@@ -186,14 +187,17 @@ type harnessScenarioFile struct {
 }
 
 type harnessScenario struct {
-	ID       string `json:"id"`
-	Required bool   `json:"required"`
+	ID       string   `json:"id"`
+	Required bool     `json:"required"`
+	Tags     []string `json:"tags"`
 }
 
 type requiredTestEvidence struct {
 	ScenarioIDs         map[string]struct{}
 	RequiredScenarioIDs map[string]struct{}
 	ScenarioOutcome     map[string]string
+	ScenarioEvidence    map[string]string
+	ScenarioTags        map[string]map[string]struct{}
 	ScenarioRefs        map[string]int
 }
 
@@ -356,12 +360,12 @@ func runCheck(args []string) {
 	manifestPath := fs.String("manifest", "parity/feature-manifest.json", "manifest input path")
 	mappingPath := fs.String("mapping", "parity/mapping-rust.json", "mapping input path")
 	exceptionsPath := fs.String("exceptions", "parity/exceptions.json", "exceptions input path")
-	mode := fs.String("mode", "ci", "check mode: ci or release")
+	mode := fs.String("mode", "ci", "check mode: ci, release, or replacement")
 	reportPath := fs.String("report", "parity/guardrail-report.json", "report output path")
 	if err := fs.Parse(args); err != nil {
 		fatalf("parse flags: %v", err)
 	}
-	if *mode != "ci" && *mode != "release" {
+	if *mode != "ci" && *mode != "release" && *mode != "replacement" {
 		fatalf("invalid mode %q", *mode)
 	}
 
@@ -447,6 +451,9 @@ func runCheck(args []string) {
 	}
 
 	validateRequiredScenarioCoverage(&report, testEvidence)
+	if *mode == "replacement" {
+		validateReplacementScenarioEvidence(&report, testEvidence)
+	}
 
 	report.Summary.TotalFeatures = len(manifest.Items)
 
@@ -503,11 +510,11 @@ func runCheck(args []string) {
 	scanTODOFixme(&report, exceptions.Items)
 	enforceDiffReports(&report, *mode)
 
-	if *mode == "release" {
+	if *mode == "release" || *mode == "replacement" {
 		if report.Summary.TotalFeatures == 0 || report.Summary.ParityVerified != report.Summary.TotalFeatures {
 			report.Failures = append(report.Failures, reportFailure{
 				Rule:    "release-gate",
-				Message: fmt.Sprintf("release mode requires 100%% parity-verified: have %d/%d", report.Summary.ParityVerified, report.Summary.TotalFeatures),
+				Message: fmt.Sprintf("%s mode requires 100%% parity-verified: have %d/%d", *mode, report.Summary.ParityVerified, report.Summary.TotalFeatures),
 			})
 		}
 	}
@@ -865,6 +872,8 @@ func loadRequiredTestEvidence(report *guardrailReport) requiredTestEvidence {
 		ScenarioIDs:         make(map[string]struct{}),
 		RequiredScenarioIDs: make(map[string]struct{}),
 		ScenarioOutcome:     make(map[string]string),
+		ScenarioEvidence:    make(map[string]string),
+		ScenarioTags:        make(map[string]map[string]struct{}),
 		ScenarioRefs:        make(map[string]int),
 	}
 
@@ -897,6 +906,15 @@ func loadRequiredTestEvidence(report *guardrailReport) requiredTestEvidence {
 			continue
 		}
 		ev.ScenarioIDs[id] = struct{}{}
+		tagSet := make(map[string]struct{})
+		for _, tag := range sc.Tags {
+			normalized := strings.ToLower(strings.TrimSpace(tag))
+			if normalized == "" {
+				continue
+			}
+			tagSet[normalized] = struct{}{}
+		}
+		ev.ScenarioTags[id] = tagSet
 		if sc.Required {
 			ev.RequiredScenarioIDs[id] = struct{}{}
 		}
@@ -917,6 +935,7 @@ func loadRequiredTestEvidence(report *guardrailReport) requiredTestEvidence {
 			continue
 		}
 		ev.ScenarioOutcome[id] = strings.TrimSpace(sc.Status)
+		ev.ScenarioEvidence[id] = normalizeScenarioEvidence(sc.Evidence)
 	}
 	return ev
 }
@@ -1078,14 +1097,67 @@ func validateRequiredScenarioCoverage(report *guardrailReport, ev requiredTestEv
 	}
 }
 
+func validateReplacementScenarioEvidence(report *guardrailReport, ev requiredTestEvidence) {
+	ids := make([]string, 0, len(ev.RequiredScenarioIDs))
+	for id := range ev.RequiredScenarioIDs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	for _, id := range ids {
+		status := strings.ToLower(strings.TrimSpace(ev.ScenarioOutcome[id]))
+		if status == "" {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "replacement-scenario-status",
+				Path:    "parity/diff-reports/latest.json",
+				Message: fmt.Sprintf("required scenario %q is missing from latest differential report", id),
+			})
+			continue
+		}
+		if status != "pass" {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "replacement-scenario-status",
+				Path:    "parity/diff-reports/latest.json",
+				Message: fmt.Sprintf("required scenario %q must pass for replacement readiness (status=%q)", id, status),
+			})
+		}
+
+		observed := normalizeScenarioEvidence(ev.ScenarioEvidence[id])
+		if observed == "" {
+			observed = "synthetic"
+		}
+		required := "daemon"
+		if scenarioHasTag(ev, id, "interop") {
+			required = "peer-interop"
+		}
+
+		if scenarioEvidenceRank(observed) < scenarioEvidenceRank(required) {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "replacement-scenario-evidence",
+				Path:    "parity/diff-reports/latest.json",
+				Message: fmt.Sprintf("required scenario %q has insufficient evidence level %q (need >= %q)", id, observed, required),
+			})
+		}
+	}
+}
+
+func scenarioHasTag(ev requiredTestEvidence, scenarioID, tag string) bool {
+	tags := ev.ScenarioTags[scenarioID]
+	if len(tags) == 0 {
+		return false
+	}
+	_, ok := tags[strings.ToLower(strings.TrimSpace(tag))]
+	return ok
+}
+
 func validateExceptions(report *guardrailReport, ex exceptionsFile, mode string) {
 	now := time.Now().UTC()
 
-	if mode == "release" && len(ex.Items) > 0 {
+	if (mode == "release" || mode == "replacement") && len(ex.Items) > 0 {
 		report.Failures = append(report.Failures, reportFailure{
 			Rule:    "release-exceptions",
 			Path:    "parity/exceptions.json",
-			Message: "release mode requires parity/exceptions.json to be empty",
+			Message: fmt.Sprintf("%s mode requires parity/exceptions.json to be empty", mode),
 		})
 	}
 
@@ -1300,7 +1372,7 @@ func enforceDiffReports(report *guardrailReport, mode string) {
 		validateMemoryCapStatus(report, testPath, test)
 	}
 
-	if mode != "release" {
+	if mode != "release" && mode != "replacement" {
 		return
 	}
 
@@ -1397,6 +1469,36 @@ func validateReportFreshness(report *guardrailReport, path, label, generatedAt s
 			Path:    path,
 			Message: fmt.Sprintf("%s is stale (%s old, max %s)", label, age.Round(time.Minute), maxAge),
 		})
+	}
+}
+
+func normalizeScenarioEvidence(evidence string) string {
+	switch strings.ToLower(strings.TrimSpace(evidence)) {
+	case "synthetic":
+		return "synthetic"
+	case "component":
+		return "component"
+	case "daemon", "runtime":
+		return "daemon"
+	case "peer-interop", "interop":
+		return "peer-interop"
+	default:
+		return ""
+	}
+}
+
+func scenarioEvidenceRank(evidence string) int {
+	switch normalizeScenarioEvidence(evidence) {
+	case "synthetic":
+		return 0
+	case "component":
+		return 1
+	case "daemon":
+		return 2
+	case "peer-interop":
+		return 3
+	default:
+		return 0
 	}
 }
 

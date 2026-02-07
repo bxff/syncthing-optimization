@@ -237,3 +237,65 @@ func TestValidateMemoryCapStatusRejectsNon50MBProfile(t *testing.T) {
 		t.Fatalf("unexpected message: %s", report.Failures[0].Message)
 	}
 }
+
+func TestValidateReplacementScenarioEvidenceRejectsSyntheticEvidence(t *testing.T) {
+	report := &guardrailReport{}
+	ev := requiredTestEvidence{
+		RequiredScenarioIDs: map[string]struct{}{
+			"protocol-state-transition": {},
+		},
+		ScenarioOutcome: map[string]string{
+			"protocol-state-transition": "pass",
+		},
+		ScenarioEvidence: map[string]string{
+			"protocol-state-transition": "synthetic",
+		},
+		ScenarioTags: map[string]map[string]struct{}{
+			"protocol-state-transition": {
+				"interop": {},
+			},
+		},
+	}
+
+	validateReplacementScenarioEvidence(report, ev)
+
+	if len(report.Failures) != 1 {
+		t.Fatalf("expected 1 failure, got %#v", report.Failures)
+	}
+	if report.Failures[0].Rule != "replacement-scenario-evidence" {
+		t.Fatalf("unexpected rule: %s", report.Failures[0].Rule)
+	}
+	if !strings.Contains(report.Failures[0].Message, "peer-interop") {
+		t.Fatalf("unexpected message: %s", report.Failures[0].Message)
+	}
+}
+
+func TestValidateReplacementScenarioEvidenceAllowsStrongEvidence(t *testing.T) {
+	report := &guardrailReport{}
+	ev := requiredTestEvidence{
+		RequiredScenarioIDs: map[string]struct{}{
+			"memory-cap-50mb":           {},
+			"protocol-state-transition": {},
+		},
+		ScenarioOutcome: map[string]string{
+			"memory-cap-50mb":           "pass",
+			"protocol-state-transition": "pass",
+		},
+		ScenarioEvidence: map[string]string{
+			"memory-cap-50mb":           "daemon",
+			"protocol-state-transition": "peer-interop",
+		},
+		ScenarioTags: map[string]map[string]struct{}{
+			"memory-cap-50mb": {},
+			"protocol-state-transition": {
+				"interop": {},
+			},
+		},
+	}
+
+	validateReplacementScenarioEvidence(report, ev)
+
+	if len(report.Failures) != 0 {
+		t.Fatalf("expected no failures, got %#v", report.Failures)
+	}
+}

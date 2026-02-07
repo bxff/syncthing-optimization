@@ -36,6 +36,7 @@ type harnessScenario struct {
 	Severity    string     `json:"severity"`
 	Required    bool       `json:"required"`
 	Tags        []string   `json:"tags"`
+	Evidence    string     `json:"evidence"`
 	Comparator  string     `json:"comparator"`
 	Go          sideConfig `json:"go"`
 	Rust        sideConfig `json:"rust"`
@@ -65,11 +66,13 @@ type latestMismatch struct {
 }
 
 type scenarioOutcome struct {
-	ID       string `json:"id"`
-	Severity string `json:"severity"`
-	Required bool   `json:"required"`
-	Status   string `json:"status"`
-	Message  string `json:"message"`
+	ID               string `json:"id"`
+	Severity         string `json:"severity"`
+	Required         bool   `json:"required"`
+	Status           string `json:"status"`
+	Message          string `json:"message"`
+	Evidence         string `json:"evidence"`
+	DeclaredEvidence string `json:"declared_evidence,omitempty"`
 }
 
 type testStatusReport struct {
@@ -169,6 +172,14 @@ func run(args []string) {
 		}
 
 		outcome := scenarioOutcome{ID: sc.ID, Severity: severity, Required: sc.Required}
+		outcome.Evidence = inferScenarioEvidence(sc)
+		if outcome.Evidence == "" {
+			outcome.Evidence = "synthetic"
+		}
+		declaredEvidence := normalizeScenarioEvidence(sc.Evidence)
+		if declaredEvidence != "" {
+			outcome.DeclaredEvidence = declaredEvidence
+		}
 
 		switch {
 		case goErr != nil && rustErr != nil:
@@ -415,6 +426,68 @@ func compareSnapshots(mode string, goSnap, rustSnap map[string]any) (bool, strin
 		return false, "json outputs differ"
 	default:
 		return false, fmt.Sprintf("unsupported comparator %q", mode)
+	}
+}
+
+func inferScenarioEvidence(sc harnessScenario) string {
+	goEvidence := inferSideEvidence(sc.Go)
+	rustEvidence := inferSideEvidence(sc.Rust)
+	if scenarioEvidenceRank(goEvidence) <= scenarioEvidenceRank(rustEvidence) {
+		return goEvidence
+	}
+	return rustEvidence
+}
+
+func inferSideEvidence(side sideConfig) string {
+	if len(side.Command) == 0 {
+		if strings.TrimSpace(side.SnapshotPath) != "" {
+			return "synthetic"
+		}
+		return "component"
+	}
+
+	cmd := strings.ToLower(strings.Join(side.Command, " "))
+	switch {
+	case strings.Contains(cmd, "parity_harness_go.go"):
+		return "synthetic"
+	case strings.Contains(cmd, "syncthing-rs") && strings.Contains(cmd, " scenario"):
+		return "synthetic"
+	case strings.Contains(cmd, "syncthing-rs") && strings.Contains(cmd, " daemon"):
+		return "daemon"
+	case strings.Contains(cmd, "syncthing"):
+		return "daemon"
+	default:
+		return "component"
+	}
+}
+
+func normalizeScenarioEvidence(evidence string) string {
+	switch strings.ToLower(strings.TrimSpace(evidence)) {
+	case "synthetic":
+		return "synthetic"
+	case "component":
+		return "component"
+	case "daemon", "runtime":
+		return "daemon"
+	case "peer-interop", "interop":
+		return "peer-interop"
+	default:
+		return ""
+	}
+}
+
+func scenarioEvidenceRank(evidence string) int {
+	switch normalizeScenarioEvidence(evidence) {
+	case "synthetic":
+		return 0
+	case "component":
+		return 1
+	case "daemon":
+		return 2
+	case "peer-interop":
+		return 3
+	default:
+		return 0
 	}
 }
 

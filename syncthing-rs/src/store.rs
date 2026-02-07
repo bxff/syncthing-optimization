@@ -268,7 +268,7 @@ impl Store {
                 break;
             }
             if let Some(start_path) = start_after_path {
-                if value.path.as_str() <= start_path {
+                if compare_path_order(&value.path, start_path) != Ordering::Greater {
                     continue;
                 }
             }
@@ -1064,6 +1064,55 @@ mod tests {
             .map(|i| format!("{i:04}.dat"))
             .collect::<Vec<_>>();
         assert_eq!(out, expected);
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn folder_pagination_respects_segment_path_order() {
+        let root = temp_root("folder-paging-segment-order");
+        let cfg = StoreConfig::new(&root);
+        let mut store = Store::open(cfg).expect("open");
+        let paths = [
+            "a/x.txt",
+            "a/z.txt",
+            "a.d/x.txt",
+            "a.d/y/z.txt",
+            "a.d/y.txt",
+            "aa.bin",
+            "b.txt",
+        ];
+        for (idx, path) in paths.iter().enumerate() {
+            store
+                .upsert_file(meta("alpha", path, (idx + 1) as u64))
+                .expect("upsert");
+        }
+
+        let mut cursor_path: Option<String> = None;
+        let mut out = Vec::new();
+        loop {
+            let page = store.files_in_folder_ordered_page("alpha", cursor_path.as_deref(), 2);
+            for item in &page.items {
+                out.push(item.path.clone());
+            }
+            match page.next_cursor {
+                Some(next) => cursor_path = Some(next.path),
+                None => break,
+            }
+        }
+
+        assert_eq!(
+            out,
+            vec![
+                "a/x.txt",
+                "a/z.txt",
+                "a.d/x.txt",
+                "a.d/y/z.txt",
+                "a.d/y.txt",
+                "aa.bin",
+                "b.txt",
+            ]
+        );
 
         fs::remove_dir_all(root).expect("cleanup");
     }

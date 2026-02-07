@@ -5,6 +5,7 @@ use crate::index_engine::{FolderUpdate, IndexEngine};
 use crate::model_core::{newFolderConfiguration, NewModel};
 use crate::planner::{classify_paths, compute_need, VersionedFile};
 use crate::store::{FileMetadata, PageCursor, Store, StoreConfig, JOURNAL_FILE_NAME};
+use crate::walker::{walk_deterministic, WalkConfig};
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -18,6 +19,7 @@ pub(crate) fn run_scenario_snapshot(id: &str) -> Result<Value, String> {
         "conflict-and-ignore-semantics" => scenario_conflict_and_ignore_semantics(),
         "folder-type-behavior" => scenario_folder_type_behavior(),
         "protocol-state-transition" => scenario_protocol_state_transition(),
+        "path-order-invariant" => scenario_path_order_invariant(),
         "memory-cap-50mb" => scenario_memory_cap_50mb(),
         "wal-free-durability" => scenario_wal_free_durability(),
         "crash-recovery" => scenario_crash_recovery(),
@@ -32,6 +34,7 @@ pub(crate) fn scenario_ids() -> &'static [&'static str] {
         "conflict-and-ignore-semantics",
         "folder-type-behavior",
         "protocol-state-transition",
+        "path-order-invariant",
         "memory-cap-50mb",
         "wal-free-durability",
         "crash-recovery",
@@ -285,6 +288,80 @@ fn scenario_protocol_state_transition() -> Result<Value, String> {
         "remote_sequence": remote_sequence,
         "request_data_hex": request_data_hex
     }))
+}
+
+fn scenario_path_order_invariant() -> Result<Value, String> {
+    let root = scenario_root("path-order-invariant")?;
+    let fs_root = root.join("fs");
+    let spill_root = root.join("spill");
+    let store_root = root.join("store");
+    fs::create_dir_all(&fs_root).map_err(err_to_string)?;
+    fs::create_dir_all(&spill_root).map_err(err_to_string)?;
+
+    let files = [
+        "a/x.txt",
+        "a/z.txt",
+        "a.d/x.txt",
+        "a.d/y.txt",
+        "a.d/y/z.txt",
+        "aa.bin",
+        "b.txt",
+    ];
+    for file in files {
+        let path = fs_root.join(file);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(err_to_string)?;
+        }
+        fs::write(path, b"v").map_err(err_to_string)?;
+    }
+
+    let cfg = WalkConfig::new(&spill_root).with_spill_threshold_entries(2);
+    let mut walk_paths = Vec::new();
+    let walk_stats = walk_deterministic(&fs_root, &cfg, |path| walk_paths.push(path))
+        .map_err(err_to_string)?;
+
+    let mut store = Store::open(StoreConfig::new(&store_root)).map_err(err_to_string)?;
+    for (idx, path) in walk_paths.iter().enumerate() {
+        store
+            .upsert_file(meta(
+                "default",
+                path,
+                (idx as u64) + 1,
+                false,
+                idx as u64,
+                vec!["h"],
+            ))
+            .map_err(err_to_string)?;
+    }
+
+    let mut db_paths = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let page = store.files_in_folder_ordered_page("default", cursor.as_deref(), 2);
+        for file in page.items {
+            db_paths.push(file.path);
+        }
+        match page.next_cursor {
+            Some(next) => cursor = Some(next.path),
+            None => break,
+        }
+    }
+
+    let paths_match = walk_paths == db_paths;
+    let output = json!({
+        "scenario": "path-order-invariant",
+        "source": "rust",
+        "status": "validated",
+        "walk_paths": walk_paths,
+        "db_paths": db_paths,
+        "match": paths_match,
+        "spill_files_created": walk_stats.spill_files_created,
+        "files_emitted": walk_stats.files_emitted,
+        "directories_seen": walk_stats.directories_seen,
+    });
+
+    cleanup(root);
+    Ok(output)
 }
 
 fn scenario_memory_cap_50mb() -> Result<Value, String> {

@@ -47,6 +47,13 @@
       "message": "go and rust outputs match"
     },
     {
+      "id": "path-order-invariant",
+      "severity": "P0",
+      "required": true,
+      "status": "pass",
+      "message": "go and rust outputs match"
+    },
+    {
       "id": "protocol-state-transition",
       "severity": "P0",
       "required": true,

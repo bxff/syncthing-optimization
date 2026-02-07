@@ -170,6 +170,39 @@
       }
     },
     {
+      "id": "path-order-invariant",
+      "description": "Validate deterministic filesystem walk order matches ordered DB cursor scans.",
+      "severity": "P0",
+      "required": true,
+      "tags": [
+        "core"
+      ],
+      "comparator": "json-equal",
+      "go": {
+        "command": [
+          "go",
+          "run",
+          "./script/parity_harness_go.go",
+          "scenario",
+          "path-order-invariant"
+        ],
+        "snapshot_path": "parity/harness/snapshots/go-path-order-invariant.json"
+      },
+      "rust": {
+        "command": [
+          "cargo",
+          "run",
+          "--quiet",
+          "--manifest-path",
+          "syncthing-rs/Cargo.toml",
+          "--",
+          "scenario",
+          "path-order-invariant"
+        ],
+        "snapshot_path": "parity/harness/snapshots/rust-path-order-invariant.json"
+      }
+    },
+    {
       "id": "memory-cap-50mb",
       "description": "Validate memory-cap profile behavior at 50 MB process cap.",
       "severity": "P0",

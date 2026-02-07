@@ -14,6 +14,7 @@
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
         "scenario/memory-cap-50mb",
+        "scenario/path-order-invariant",
         "scenario/wal-free-durability"
       ],
       "status": "parity-verified"

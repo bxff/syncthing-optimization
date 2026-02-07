@@ -1,0 +1,27 @@
+{
+  "db_paths": [
+    "a/x.txt",
+    "a/z.txt",
+    "a.d/x.txt",
+    "a.d/y/z.txt",
+    "a.d/y.txt",
+    "aa.bin",
+    "b.txt"
+  ],
+  "directories_seen": 4,
+  "files_emitted": 7,
+  "match": true,
+  "scenario": "path-order-invariant",
+  "source": "rust",
+  "spill_files_created": 5,
+  "status": "validated",
+  "walk_paths": [
+    "a/x.txt",
+    "a/z.txt",
+    "a.d/x.txt",
+    "a.d/y/z.txt",
+    "a.d/y.txt",
+    "aa.bin",
+    "b.txt"
+  ]
+}

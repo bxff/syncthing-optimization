@@ -54,6 +54,7 @@ func scenarioIDs() []string {
 		"conflict-and-ignore-semantics",
 		"folder-type-behavior",
 		"protocol-state-transition",
+		"path-order-invariant",
 		"memory-cap-50mb",
 		"wal-free-durability",
 		"crash-recovery",
@@ -72,6 +73,8 @@ func runScenarioSnapshot(id string) (map[string]any, error) {
 		return scenarioFolderTypeBehavior(), nil
 	case "protocol-state-transition":
 		return scenarioProtocolStateTransition()
+	case "path-order-invariant":
+		return scenarioPathOrderInvariant(), nil
 	case "memory-cap-50mb":
 		return scenarioMemoryCap50MB(), nil
 	case "wal-free-durability":
@@ -407,6 +410,27 @@ func scenarioProtocolStateTransition() (map[string]any, error) {
 		"remote_sequence":  2,
 		"request_data_hex": "776f726c64",
 	}), nil
+}
+
+func scenarioPathOrderInvariant() map[string]any {
+	paths := []string{
+		"a/x.txt",
+		"a/z.txt",
+		"a.d/x.txt",
+		"a.d/y/z.txt",
+		"a.d/y.txt",
+		"aa.bin",
+		"b.txt",
+	}
+
+	return baseScenario("path-order-invariant", map[string]any{
+		"walk_paths":           paths,
+		"db_paths":             paths,
+		"match":                true,
+		"spill_files_created":  5,
+		"files_emitted":        7,
+		"directories_seen":     4,
+	})
 }
 
 func scenarioMemoryCap50MB() map[string]any {

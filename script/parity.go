@@ -20,6 +20,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -227,6 +228,15 @@ type dashboardSection struct {
 	Implemented    int     `json:"implemented"`
 	ParityVerified int     `json:"parity_verified"`
 	Coverage       float64 `json:"coverage_percent"`
+}
+
+type replacementGapReport struct {
+	SchemaVersion int      `json:"schema_version"`
+	GeneratedAt   string   `json:"generated_at"`
+	Rule          string   `json:"rule"`
+	SourceCount   int      `json:"source_count"`
+	TargetCount   int      `json:"target_count"`
+	Missing       []string `json:"missing"`
 }
 
 type featureKey struct {
@@ -1184,6 +1194,9 @@ func validateReplacementCapabilityCoverage(report *guardrailReport) {
 	validateReplacementFolderModeCoverage(report, gates.RequiredFolderModes)
 	validateReplacementMemoryDiagnosticsCoverage(report, gates.RequiredMemoryDiagnosticFields)
 	validateReplacementDurabilityCoverage(report, gates.RequiredDurabilityFields)
+	validateGoVsRustRESTSurface(report)
+	validateGoVsRustProtocolSurface(report)
+	validateGoVsRustFolderModeSurface(report)
 }
 
 func validateReplacementAPIEndpointCoverage(report *guardrailReport, required []string) {
@@ -1451,6 +1464,416 @@ func missingRequiredStrings(required []string, covered map[string]struct{}) []st
 	}
 	sort.Strings(missing)
 	return missing
+}
+
+func validateGoVsRustRESTSurface(report *guardrailReport) {
+	goSurface, err := extractGoRESTSurface()
+	if err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-rest-surface",
+			Path:    "lib/api/api.go",
+			Message: fmt.Sprintf("failed to extract go rest surface: %v", err),
+		})
+		return
+	}
+
+	rustSnapshot := map[string]any{}
+	const rustPath = "parity/harness/snapshots/rust-daemon-api-surface.json"
+	if err := readJSON(rustPath, &rustSnapshot); err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-rest-surface",
+			Path:    rustPath,
+			Message: "missing or invalid rust daemon api surface snapshot",
+		})
+		return
+	}
+	rustSurface := toStringSet(rustSnapshot["covered_endpoints"])
+
+	missing := make([]string, 0)
+	for endpoint := range goSurface {
+		if _, ok := rustSurface[endpoint]; ok {
+			continue
+		}
+		missing = append(missing, endpoint)
+	}
+	sort.Strings(missing)
+	if len(missing) == 0 {
+		return
+	}
+
+	const gapPath = "parity/diff-reports/replacement-rest-surface-missing.json"
+	if err := writeReplacementGapFile(gapPath, "replacement-rest-surface", len(goSurface), len(rustSurface), missing); err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-rest-surface",
+			Path:    gapPath,
+			Message: fmt.Sprintf("failed to write replacement gap report: %v", err),
+		})
+	}
+
+	preview := missing
+	if len(preview) > 25 {
+		preview = preview[:25]
+	}
+	report.Failures = append(report.Failures, reportFailure{
+		Rule: "replacement-rest-surface",
+		Path: gapPath,
+		Message: fmt.Sprintf(
+			"go exposes %d REST endpoints while rust daemon evidence covers %d; missing %d endpoint(s), first %d: %s",
+			len(goSurface),
+			len(rustSurface),
+			len(missing),
+			len(preview),
+			strings.Join(preview, ", "),
+		),
+	})
+}
+
+func extractGoRESTSurface() (map[string]struct{}, error) {
+	bs, err := readRepoFile("lib/api/api.go")
+	if err != nil {
+		return nil, err
+	}
+	text := string(bs)
+	endpoints := make(map[string]struct{})
+
+	directPattern := regexp.MustCompile(`restMux\.(?:HandlerFunc|Handler)\(\s*http\.(Method[A-Za-z]+),\s*"(/rest/[^"]+)"`)
+	for _, match := range directPattern.FindAllStringSubmatch(text, -1) {
+		if len(match) != 3 {
+			continue
+		}
+		method := normalizeHTTPMethodToken(match[1])
+		path := strings.TrimSpace(match[2])
+		if method == "" || path == "" {
+			continue
+		}
+		endpoints[method+" "+path] = struct{}{}
+	}
+
+	configRegisterMethods := map[string][]string{
+		"registerConfig":                {"GET", "PUT"},
+		"registerConfigDeprecated":      {"GET", "POST"},
+		"registerConfigInsync":          {"GET"},
+		"registerConfigRequiresRestart": {"GET"},
+		"registerFolders":               {"GET", "PUT", "POST"},
+		"registerDevices":               {"GET", "PUT", "POST"},
+		"registerFolder":                {"GET", "PUT", "PATCH", "DELETE"},
+		"registerDevice":                {"GET", "PUT", "PATCH", "DELETE"},
+		"registerDefaultFolder":         {"GET", "PUT", "PATCH"},
+		"registerDefaultDevice":         {"GET", "PUT", "PATCH"},
+		"registerDefaultIgnores":        {"GET", "PUT"},
+		"registerOptions":               {"GET", "PUT", "PATCH"},
+		"registerLDAP":                  {"GET", "PUT", "PATCH"},
+		"registerGUI":                   {"GET", "PUT", "PATCH"},
+	}
+	registerPattern := regexp.MustCompile(`configBuilder\.(register[A-Za-z0-9]+)\("(/rest/[^"]+)"\)`)
+	for _, match := range registerPattern.FindAllStringSubmatch(text, -1) {
+		if len(match) != 3 {
+			continue
+		}
+		methods := configRegisterMethods[match[1]]
+		if len(methods) == 0 {
+			continue
+		}
+		path := strings.TrimSpace(match[2])
+		if path == "" {
+			continue
+		}
+		for _, method := range methods {
+			endpoints[method+" "+path] = struct{}{}
+		}
+	}
+
+	return endpoints, nil
+}
+
+func validateGoVsRustProtocolSurface(report *guardrailReport) {
+	goSurface, err := extractGoBEPMessageTypes()
+	if err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-protocol-surface",
+			Path:    "internal/gen/bep/bep.pb.go",
+			Message: fmt.Sprintf("failed to extract go bep message surface: %v", err),
+		})
+		return
+	}
+
+	rustSnapshot := map[string]any{}
+	const rustPath = "parity/harness/snapshots/rust-protocol-state-transition.json"
+	if err := readJSON(rustPath, &rustSnapshot); err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-protocol-surface",
+			Path:    rustPath,
+			Message: "missing or invalid rust protocol state transition snapshot",
+		})
+		return
+	}
+
+	rawMessageTypes := toStringSet(rustSnapshot["message_types"])
+	rustSurface := make(map[string]struct{}, len(rawMessageTypes))
+	for raw := range rawMessageTypes {
+		normalized := normalizeBEPMessageType(raw)
+		if normalized == "" {
+			continue
+		}
+		rustSurface[normalized] = struct{}{}
+	}
+
+	missing := make([]string, 0)
+	for messageType := range goSurface {
+		if _, ok := rustSurface[messageType]; ok {
+			continue
+		}
+		missing = append(missing, messageType)
+	}
+	sort.Strings(missing)
+	if len(missing) == 0 {
+		return
+	}
+
+	const gapPath = "parity/diff-reports/replacement-protocol-surface-missing.json"
+	if err := writeReplacementGapFile(gapPath, "replacement-protocol-surface", len(goSurface), len(rustSurface), missing); err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-protocol-surface",
+			Path:    gapPath,
+			Message: fmt.Sprintf("failed to write replacement gap report: %v", err),
+		})
+	}
+
+	preview := missing
+	if len(preview) > 25 {
+		preview = preview[:25]
+	}
+	report.Failures = append(report.Failures, reportFailure{
+		Rule: "replacement-protocol-surface",
+		Path: gapPath,
+		Message: fmt.Sprintf(
+			"go exposes %d BEP message types while rust scenario evidence covers %d; missing %d type(s), first %d: %s",
+			len(goSurface),
+			len(rustSurface),
+			len(missing),
+			len(preview),
+			strings.Join(preview, ", "),
+		),
+	})
+}
+
+func extractGoBEPMessageTypes() (map[string]struct{}, error) {
+	bs, err := readRepoFile("internal/gen/bep/bep.pb.go")
+	if err != nil {
+		return nil, err
+	}
+	text := string(bs)
+	messageTypes := make(map[string]struct{})
+
+	protoReflectPattern := regexp.MustCompile(`func \(x \*([A-Za-z][A-Za-z0-9_]*)\) ProtoReflect\(`)
+	for _, match := range protoReflectPattern.FindAllStringSubmatch(text, -1) {
+		if len(match) != 2 {
+			continue
+		}
+		normalized := normalizeBEPMessageType(match[1])
+		if normalized == "" {
+			continue
+		}
+		messageTypes[normalized] = struct{}{}
+	}
+
+	return messageTypes, nil
+}
+
+func validateGoVsRustFolderModeSurface(report *guardrailReport) {
+	goModes, err := extractGoFolderModes()
+	if err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-folder-mode-surface",
+			Path:    "lib/config/foldertype.go",
+			Message: fmt.Sprintf("failed to extract go folder mode surface: %v", err),
+		})
+		return
+	}
+
+	rustSnapshot := map[string]any{}
+	const rustPath = "parity/harness/snapshots/rust-folder-type-behavior.json"
+	if err := readJSON(rustPath, &rustSnapshot); err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-folder-mode-surface",
+			Path:    rustPath,
+			Message: "missing or invalid rust folder type behavior snapshot",
+		})
+		return
+	}
+
+	rawModes, ok := rustSnapshot["folder_modes"].(map[string]any)
+	if !ok {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-folder-mode-surface",
+			Path:    rustPath,
+			Message: "folder_modes payload missing or invalid",
+		})
+		return
+	}
+	rustModes := make(map[string]struct{}, len(rawModes))
+	for mode := range rawModes {
+		canonical := canonicalFolderMode(mode)
+		if canonical == "" {
+			continue
+		}
+		rustModes[canonical] = struct{}{}
+	}
+
+	missing := make([]string, 0)
+	for mode := range goModes {
+		if _, ok := rustModes[mode]; ok {
+			continue
+		}
+		missing = append(missing, mode)
+	}
+	sort.Strings(missing)
+	if len(missing) == 0 {
+		return
+	}
+
+	const gapPath = "parity/diff-reports/replacement-folder-mode-surface-missing.json"
+	if err := writeReplacementGapFile(gapPath, "replacement-folder-mode-surface", len(goModes), len(rustModes), missing); err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-folder-mode-surface",
+			Path:    gapPath,
+			Message: fmt.Sprintf("failed to write replacement gap report: %v", err),
+		})
+	}
+
+	report.Failures = append(report.Failures, reportFailure{
+		Rule:    "replacement-folder-mode-surface",
+		Path:    gapPath,
+		Message: fmt.Sprintf("rust folder mode evidence missing %d go mode(s): %s", len(missing), strings.Join(missing, ", ")),
+	})
+}
+
+func extractGoFolderModes() (map[string]struct{}, error) {
+	bs, err := readRepoFile("lib/config/foldertype.go")
+	if err != nil {
+		return nil, err
+	}
+	text := string(bs)
+	modes := make(map[string]struct{})
+
+	casePattern := regexp.MustCompile(`case\s+([^\n:]+):`)
+	modePattern := regexp.MustCompile(`"([^"]+)"`)
+	for _, caseMatch := range casePattern.FindAllStringSubmatch(text, -1) {
+		if len(caseMatch) != 2 {
+			continue
+		}
+		for _, modeMatch := range modePattern.FindAllStringSubmatch(caseMatch[1], -1) {
+			if len(modeMatch) != 2 {
+				continue
+			}
+			mode := canonicalFolderMode(modeMatch[1])
+			if mode == "" {
+				continue
+			}
+			modes[mode] = struct{}{}
+		}
+	}
+
+	if len(modes) == 0 {
+		return nil, errors.New("no folder mode literals found")
+	}
+	return modes, nil
+}
+
+func canonicalFolderMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "readwrite", "sendreceive", "sendrecv":
+		return "sendrecv"
+	case "readonly", "sendonly":
+		return "sendonly"
+	case "receiveonly", "recvonly":
+		return "recvonly"
+	case "receiveencrypted", "recvenc", "receive-encrypted":
+		return "recvenc"
+	default:
+		return ""
+	}
+}
+
+func normalizeBEPMessageType(token string) string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ""
+	}
+	token = strings.ReplaceAll(token, ".", "_")
+	token = strings.ReplaceAll(token, "-", "_")
+	reAcronymBoundary := regexp.MustCompile(`([A-Z]+)([A-Z][a-z])`)
+	reWordBoundary := regexp.MustCompile(`([a-z0-9])([A-Z])`)
+	token = reAcronymBoundary.ReplaceAllString(token, "${1}_${2}")
+	token = reWordBoundary.ReplaceAllString(token, "${1}_${2}")
+	token = strings.ToLower(token)
+	token = strings.Trim(token, "_")
+	for strings.Contains(token, "__") {
+		token = strings.ReplaceAll(token, "__", "_")
+	}
+	return token
+}
+
+func normalizeHTTPMethodToken(token string) string {
+	token = strings.TrimSpace(token)
+	if !strings.HasPrefix(token, "Method") {
+		return strings.ToUpper(token)
+	}
+	token = strings.TrimPrefix(token, "Method")
+	if token == "" {
+		return ""
+	}
+	return strings.ToUpper(token)
+}
+
+func readRepoFile(relPath string) ([]byte, error) {
+	relPath = filepath.Clean(relPath)
+	candidatePrefixes := []string{
+		".",
+		"..",
+		"../..",
+	}
+	var lastErr error
+	for _, prefix := range candidatePrefixes {
+		candidate := filepath.Join(prefix, relPath)
+		bs, err := os.ReadFile(candidate)
+		if err == nil {
+			return bs, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			lastErr = err
+		} else if lastErr == nil {
+			lastErr = err
+		}
+	}
+
+	wd, err := os.Getwd()
+	if err == nil {
+		dir := wd
+		for depth := 0; depth < 12; depth++ {
+			candidate := filepath.Join(dir, relPath)
+			bs, readErr := os.ReadFile(candidate)
+			if readErr == nil {
+				return bs, nil
+			}
+			if !errors.Is(readErr, fs.ErrNotExist) {
+				lastErr = readErr
+			} else if lastErr == nil {
+				lastErr = readErr
+			}
+
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+	}
+
+	if lastErr == nil {
+		lastErr = fs.ErrNotExist
+	}
+	return nil, fmt.Errorf("open %s: %w", relPath, lastErr)
 }
 
 func validateExceptions(report *guardrailReport, ex exceptionsFile, mode string) {
@@ -1948,6 +2371,21 @@ func readJSON(path string, out any) error {
 		return err
 	}
 	return nil
+}
+
+func writeReplacementGapFile(path, rule string, sourceCount, targetCount int, missing []string) error {
+	normalizedMissing := make([]string, len(missing))
+	copy(normalizedMissing, missing)
+	sort.Strings(normalizedMissing)
+	report := replacementGapReport{
+		SchemaVersion: schemaVersion,
+		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+		Rule:          rule,
+		SourceCount:   sourceCount,
+		TargetCount:   targetCount,
+		Missing:       normalizedMissing,
+	}
+	return writeJSON(path, report)
 }
 
 func fatalf(format string, args ...any) {

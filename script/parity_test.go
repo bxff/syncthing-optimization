@@ -330,3 +330,61 @@ func TestMissingRequiredStringsReturnsSortedMissingEntries(t *testing.T) {
 		t.Fatalf("expected sorted missing entries, got %#v", missing)
 	}
 }
+
+func TestNormalizeBEPMessageTypeNormalizesCamelCaseAndDelimiters(t *testing.T) {
+	cases := map[string]string{
+		"ClusterConfig":               "cluster_config",
+		"FileDownloadProgressUpdate":  "file_download_progress_update",
+		"ClusterConfig_Folder_Device": "cluster_config_folder_device",
+		"index-update":                "index_update",
+	}
+
+	for in, expected := range cases {
+		if got := normalizeBEPMessageType(in); got != expected {
+			t.Fatalf("normalizeBEPMessageType(%q) = %q, expected %q", in, got, expected)
+		}
+	}
+}
+
+func TestExtractGoBEPMessageTypesContainsCoreMessages(t *testing.T) {
+	types, err := extractGoBEPMessageTypes()
+	if err != nil {
+		t.Fatalf("extractGoBEPMessageTypes error: %v", err)
+	}
+
+	for _, expected := range []string{
+		"hello",
+		"cluster_config",
+		"index",
+		"request",
+		"response",
+		"close",
+	} {
+		if _, ok := types[expected]; !ok {
+			t.Fatalf("expected go bep surface to contain %q", expected)
+		}
+	}
+}
+
+func TestExtractGoFolderModesContainsCanonicalModes(t *testing.T) {
+	modes, err := extractGoFolderModes()
+	if err != nil {
+		t.Fatalf("extractGoFolderModes error: %v", err)
+	}
+
+	for _, expected := range []string{"sendrecv", "sendonly", "recvonly", "recvenc"} {
+		if _, ok := modes[expected]; !ok {
+			t.Fatalf("expected go folder mode surface to contain %q", expected)
+		}
+	}
+}
+
+func TestExtractGoRESTSurfaceContainsKnownEndpoint(t *testing.T) {
+	surface, err := extractGoRESTSurface()
+	if err != nil {
+		t.Fatalf("extractGoRESTSurface error: %v", err)
+	}
+	if _, ok := surface["GET /rest/system/version"]; !ok {
+		t.Fatalf("expected go rest surface to contain GET /rest/system/version")
+	}
+}

@@ -246,7 +246,6 @@ pub(crate) fn run_daemon(config: DaemonConfig) -> Result<(), String> {
     if let Some(api_addr) = config.api_listen_addr.as_ref() {
         let runtime = DaemonApiRuntime {
             model: model.clone(),
-            folders: config.folders.clone(),
             active_peers: active_peers.clone(),
             max_peers: config.max_peers,
             start_time: SystemTime::now(),
@@ -293,7 +292,6 @@ fn load_runtime_config(path: &str) -> Result<RuntimeConfigFile, String> {
 #[derive(Clone)]
 struct DaemonApiRuntime {
     model: Arc<Mutex<model>>,
-    folders: Vec<FolderSpec>,
     active_peers: Arc<AtomicUsize>,
     max_peers: usize,
     start_time: SystemTime,
@@ -372,6 +370,89 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             match system_connections(runtime) {
                 Ok(payload) => ApiReply::json(200, payload),
                 Err(err) => ApiReply::json(500, json!({ "error": err })),
+            }
+        }
+        "/rest/system/config/folders" => match method {
+            Method::Get => match list_config_folders(runtime) {
+                Ok(payload) => ApiReply::json(200, payload),
+                Err(ApiConfigError::BadRequest(err)) => {
+                    ApiReply::json(400, json!({ "error": err }))
+                }
+                Err(ApiConfigError::Missing(id)) => {
+                    ApiReply::json(404, json!({ "error": "folder not found", "folder": id }))
+                }
+                Err(ApiConfigError::Conflict(id)) => {
+                    ApiReply::json(409, json!({ "error": "folder already exists", "folder": id }))
+                }
+                Err(ApiConfigError::Internal(err)) => {
+                    ApiReply::json(500, json!({ "error": err }))
+                }
+            },
+            Method::Post => {
+                let params = parse_query(query);
+                let Some(folder_id) = params.get("id") else {
+                    return ApiReply::json(400, json!({ "error": "missing id query parameter" }));
+                };
+                let Some(path) = params.get("path") else {
+                    return ApiReply::json(400, json!({ "error": "missing path query parameter" }));
+                };
+                match add_config_folder(runtime, folder_id, path) {
+                    Ok(payload) => ApiReply::json(200, payload),
+                    Err(ApiConfigError::BadRequest(err)) => {
+                        ApiReply::json(400, json!({ "error": err }))
+                    }
+                    Err(ApiConfigError::Missing(id)) => {
+                        ApiReply::json(404, json!({ "error": "folder not found", "folder": id }))
+                    }
+                    Err(ApiConfigError::Conflict(id)) => {
+                        ApiReply::json(409, json!({ "error": "folder already exists", "folder": id }))
+                    }
+                    Err(ApiConfigError::Internal(err)) => {
+                        ApiReply::json(500, json!({ "error": err }))
+                    }
+                }
+            }
+            Method::Delete => {
+                let params = parse_query(query);
+                let Some(folder_id) = params.get("id") else {
+                    return ApiReply::json(400, json!({ "error": "missing id query parameter" }));
+                };
+                match remove_config_folder(runtime, folder_id) {
+                    Ok(payload) => ApiReply::json(200, payload),
+                    Err(ApiConfigError::BadRequest(err)) => {
+                        ApiReply::json(400, json!({ "error": err }))
+                    }
+                    Err(ApiConfigError::Missing(id)) => {
+                        ApiReply::json(404, json!({ "error": "folder not found", "folder": id }))
+                    }
+                    Err(ApiConfigError::Conflict(id)) => {
+                        ApiReply::json(409, json!({ "error": "folder already exists", "folder": id }))
+                    }
+                    Err(ApiConfigError::Internal(err)) => {
+                        ApiReply::json(500, json!({ "error": err }))
+                    }
+                }
+            }
+            _ => ApiReply::json(405, json!({ "error": "method not allowed" })),
+        },
+        "/rest/system/config/restart" => {
+            if method != &Method::Post {
+                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+            }
+            let params = parse_query(query);
+            let Some(folder_id) = params.get("folder") else {
+                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+            };
+            match restart_config_folder(runtime, folder_id) {
+                Ok(payload) => ApiReply::json(200, payload),
+                Err(ApiConfigError::BadRequest(err)) => ApiReply::json(400, json!({ "error": err })),
+                Err(ApiConfigError::Missing(id)) => {
+                    ApiReply::json(404, json!({ "error": "folder not found", "folder": id }))
+                }
+                Err(ApiConfigError::Conflict(id)) => {
+                    ApiReply::json(409, json!({ "error": "folder already exists", "folder": id }))
+                }
+                Err(ApiConfigError::Internal(err)) => ApiReply::json(500, json!({ "error": err })),
             }
         }
         "/rest/db/status" => {
@@ -543,6 +624,14 @@ fn parse_limit(
         .unwrap_or(default_limit)
 }
 
+fn memory_policy_name(policy: crate::config::MemoryPolicy) -> &'static str {
+    match policy {
+        crate::config::MemoryPolicy::Throttle => "throttle",
+        crate::config::MemoryPolicy::Fail => "fail",
+        crate::config::MemoryPolicy::BestEffort => "best_effort",
+    }
+}
+
 fn system_status(runtime: &DaemonApiRuntime) -> Result<Value, String> {
     let now = SystemTime::now();
     let start_ts = runtime
@@ -555,7 +644,7 @@ fn system_status(runtime: &DaemonApiRuntime) -> Result<Value, String> {
         .unwrap_or_default()
         .as_secs();
 
-    let (my_id, db_estimated_bytes, db_budget_bytes) = {
+    let (my_id, db_estimated_bytes, db_budget_bytes, folder_count) = {
         let guard = runtime
             .model
             .lock()
@@ -568,6 +657,7 @@ fn system_status(runtime: &DaemonApiRuntime) -> Result<Value, String> {
             guard.id.clone(),
             db.estimated_memory_bytes() as u64,
             db.memory_budget_bytes() as u64,
+            guard.folderCfgs.len(),
         )
     };
 
@@ -575,7 +665,7 @@ fn system_status(runtime: &DaemonApiRuntime) -> Result<Value, String> {
         "myID": my_id,
         "startTime": start_ts,
         "uptimeS": uptime,
-        "folderCount": runtime.folders.len(),
+        "folderCount": folder_count,
         "activePeers": runtime.active_peers.load(Ordering::Relaxed),
         "maxPeers": runtime.max_peers,
         "listenAddress": runtime.bep_listen_addr,
@@ -613,6 +703,13 @@ fn system_connections(runtime: &DaemonApiRuntime) -> Result<Value, String> {
 
 enum ApiFolderStatusError {
     MissingFolder,
+    Internal(String),
+}
+
+enum ApiConfigError {
+    BadRequest(String),
+    Missing(String),
+    Conflict(String),
     Internal(String),
 }
 
@@ -828,6 +925,103 @@ fn browse_needed_files(
         "limit": limit,
         "nextCursor": page.next_cursor,
         "items": items,
+    }))
+}
+
+fn list_config_folders(runtime: &DaemonApiRuntime) -> Result<Value, ApiConfigError> {
+    let guard = runtime
+        .model
+        .lock()
+        .map_err(|_| ApiConfigError::Internal("model lock poisoned".to_string()))?;
+    let mut folders = guard
+        .folderCfgs
+        .values()
+        .map(|cfg| {
+            json!({
+                "id": cfg.id,
+                "path": cfg.path,
+                "folderType": cfg.folder_type.as_str(),
+                "memoryMaxMB": cfg.memory_max_mb,
+                "memoryPolicy": memory_policy_name(cfg.memory_policy),
+            })
+        })
+        .collect::<Vec<_>>();
+    folders.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    Ok(json!({
+        "count": folders.len(),
+        "folders": folders,
+    }))
+}
+
+fn add_config_folder(
+    runtime: &DaemonApiRuntime,
+    folder_id: &str,
+    path: &str,
+) -> Result<Value, ApiConfigError> {
+    if folder_id.trim().is_empty() {
+        return Err(ApiConfigError::BadRequest(
+            "folder id must not be empty".to_string(),
+        ));
+    }
+    if path.trim().is_empty() {
+        return Err(ApiConfigError::BadRequest("folder path must not be empty".to_string()));
+    }
+    let mut guard = runtime
+        .model
+        .lock()
+        .map_err(|_| ApiConfigError::Internal("model lock poisoned".to_string()))?;
+    if guard.folderCfgs.contains_key(folder_id) {
+        return Err(ApiConfigError::Conflict(folder_id.to_string()));
+    }
+    let cfg = newFolderConfiguration(folder_id, path);
+    guard.newFolder(cfg.clone());
+    Ok(json!({
+        "added": true,
+        "folder": {
+            "id": cfg.id,
+            "path": cfg.path,
+        }
+    }))
+}
+
+fn remove_config_folder(runtime: &DaemonApiRuntime, folder_id: &str) -> Result<Value, ApiConfigError> {
+    let mut guard = runtime
+        .model
+        .lock()
+        .map_err(|_| ApiConfigError::Internal("model lock poisoned".to_string()))?;
+    if !guard.folderCfgs.contains_key(folder_id) {
+        return Err(ApiConfigError::Missing(folder_id.to_string()));
+    }
+    guard.folderCfgs.remove(folder_id);
+    guard.cfg.remove(folder_id);
+    guard.folderIgnores.remove(folder_id);
+    guard.cleanupFolderLocked(folder_id);
+    Ok(json!({
+        "removed": true,
+        "folder": folder_id,
+    }))
+}
+
+fn restart_config_folder(
+    runtime: &DaemonApiRuntime,
+    folder_id: &str,
+) -> Result<Value, ApiConfigError> {
+    let mut guard = runtime
+        .model
+        .lock()
+        .map_err(|_| ApiConfigError::Internal("model lock poisoned".to_string()))?;
+    guard
+        .restartFolder(folder_id)
+        .map_err(|err| {
+            if err.contains("folder missing") {
+                ApiConfigError::Missing(folder_id.to_string())
+            } else {
+                ApiConfigError::Internal(err)
+            }
+        })?;
+    Ok(json!({
+        "restarted": true,
+        "folder": folder_id,
     }))
 }
 
@@ -1155,12 +1349,11 @@ mod tests {
 
     fn test_api_runtime(
         model: Arc<Mutex<model>>,
-        folders: Vec<FolderSpec>,
+        _folders: Vec<FolderSpec>,
         active_peers: usize,
     ) -> DaemonApiRuntime {
         let runtime = DaemonApiRuntime {
             model,
-            folders,
             active_peers: Arc::new(AtomicUsize::new(active_peers)),
             max_peers: 16,
             start_time: SystemTime::now(),
@@ -1171,14 +1364,7 @@ mod tests {
 
     #[test]
     fn api_ping_returns_pong() {
-        let runtime = test_api_runtime(
-            Arc::new(Mutex::new(NewModel())),
-            vec![FolderSpec {
-                id: "default".to_string(),
-                path: "/tmp/default".to_string(),
-            }],
-            3,
-        );
+        let runtime = test_api_runtime(Arc::new(Mutex::new(NewModel())), Vec::new(), 3);
 
         let reply = build_api_response(&Method::Get, "/rest/system/ping", &runtime);
         assert_eq!(reply.status_code, StatusCode(200));
@@ -1188,14 +1374,13 @@ mod tests {
 
     #[test]
     fn api_status_reports_memory_and_peer_fields() {
-        let runtime = test_api_runtime(
-            Arc::new(Mutex::new(NewModel())),
-            vec![FolderSpec {
-                id: "default".to_string(),
-                path: "/tmp/default".to_string(),
-            }],
-            2,
-        );
+        let root = temp_root("api-system-status");
+        let model = Arc::new(Mutex::new(NewModel()));
+        {
+            let mut guard = model.lock().expect("lock");
+            guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+        }
+        let runtime = test_api_runtime(model, Vec::new(), 2);
         let reply = build_api_response(&Method::Get, "/rest/system/status", &runtime);
         assert_eq!(reply.status_code, StatusCode(200));
         let payload: Value = serde_json::from_slice(&reply.body).expect("decode json");
@@ -1203,6 +1388,7 @@ mod tests {
         assert_eq!(payload["maxPeers"], 16);
         assert_eq!(payload["folderCount"], 1);
         assert!(payload["memoryBudgetBytes"].as_u64().is_some());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1445,6 +1631,85 @@ mod tests {
         let status_post =
             build_api_response(&Method::Post, "/rest/db/status?folder=default", &runtime);
         assert_eq!(status_post.status_code, StatusCode(405));
+    }
+
+    #[test]
+    fn api_config_folders_crud_and_restart() {
+        let root = temp_root("api-config-folders");
+        let folder_path = root.join("docs");
+        fs::create_dir_all(&folder_path).expect("create folder");
+        let runtime = test_api_runtime(Arc::new(Mutex::new(NewModel())), Vec::new(), 0);
+
+        let add = build_api_response(
+            &Method::Post,
+            &format!(
+                "/rest/system/config/folders?id=docs&path={}",
+                folder_path.to_string_lossy()
+            ),
+            &runtime,
+        );
+        assert_eq!(add.status_code, StatusCode(200));
+        let add_payload: Value = serde_json::from_slice(&add.body).expect("decode json");
+        assert_eq!(add_payload["added"], true);
+        assert_eq!(add_payload["folder"]["id"], "docs");
+
+        let list = build_api_response(&Method::Get, "/rest/system/config/folders", &runtime);
+        assert_eq!(list.status_code, StatusCode(200));
+        let list_payload: Value = serde_json::from_slice(&list.body).expect("decode json");
+        assert_eq!(list_payload["count"], 1);
+        assert_eq!(list_payload["folders"][0]["id"], "docs");
+        assert_eq!(list_payload["folders"][0]["folderType"], "sendrecv");
+        assert_eq!(list_payload["folders"][0]["memoryPolicy"], "throttle");
+
+        let restart = build_api_response(
+            &Method::Post,
+            "/rest/system/config/restart?folder=docs",
+            &runtime,
+        );
+        assert_eq!(restart.status_code, StatusCode(200));
+        let restart_payload: Value = serde_json::from_slice(&restart.body).expect("decode json");
+        assert_eq!(restart_payload["restarted"], true);
+        assert_eq!(restart_payload["folder"], "docs");
+
+        let remove = build_api_response(
+            &Method::Delete,
+            "/rest/system/config/folders?id=docs",
+            &runtime,
+        );
+        assert_eq!(remove.status_code, StatusCode(200));
+        let remove_payload: Value = serde_json::from_slice(&remove.body).expect("decode json");
+        assert_eq!(remove_payload["removed"], true);
+        assert_eq!(remove_payload["folder"], "docs");
+
+        let restart_missing = build_api_response(
+            &Method::Post,
+            "/rest/system/config/restart?folder=docs",
+            &runtime,
+        );
+        assert_eq!(restart_missing.status_code, StatusCode(404));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn api_config_folders_validate_inputs() {
+        let runtime = test_api_runtime(Arc::new(Mutex::new(NewModel())), Vec::new(), 0);
+
+        let missing_id =
+            build_api_response(&Method::Post, "/rest/system/config/folders?path=/tmp/docs", &runtime);
+        assert_eq!(missing_id.status_code, StatusCode(400));
+
+        let missing_path =
+            build_api_response(&Method::Post, "/rest/system/config/folders?id=docs", &runtime);
+        assert_eq!(missing_path.status_code, StatusCode(400));
+
+        let missing_delete_id =
+            build_api_response(&Method::Delete, "/rest/system/config/folders", &runtime);
+        assert_eq!(missing_delete_id.status_code, StatusCode(400));
+
+        let missing_restart_folder =
+            build_api_response(&Method::Post, "/rest/system/config/restart", &runtime);
+        assert_eq!(missing_restart_folder.status_code, StatusCode(400));
     }
 
     #[test]

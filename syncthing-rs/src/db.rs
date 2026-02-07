@@ -483,7 +483,7 @@ impl WalFreeDb {
             if meta.ignored {
                 continue;
             }
-            let candidate = store_to_file_info_without_blocks(meta);
+            let candidate = store_to_file_info_without_blocks(&meta);
             let use_candidate = match best_info.as_ref() {
                 Some(current) => prefer_global(&candidate, current),
                 None => true,
@@ -579,7 +579,7 @@ impl WalFreeDb {
         let mut out = Vec::new();
         self.store
             .for_each_file_in_folder_device(folder, device, |meta| {
-                out.push(store_to_file_info_without_blocks(meta));
+                out.push(store_to_file_info_without_blocks(&meta));
                 true
             });
         out
@@ -622,7 +622,7 @@ impl WalFreeDb {
     fn get_device_file_light(&self, folder: &str, device: &str, file: &str) -> Option<FileInfo> {
         self.store
             .get_file(folder, device, file)
-            .map(store_to_file_info_without_blocks)
+            .map(|meta| store_to_file_info_without_blocks(&meta))
     }
 }
 
@@ -798,7 +798,7 @@ impl Db for WalFreeDb {
         let mut out = Vec::new();
         let mut first_error: Option<String> = None;
         self.store.for_each_file_in_folder(folder, |meta| {
-            let hashes = match self.store.resolve_file_block_hashes(meta) {
+            let hashes = match self.store.resolve_file_block_hashes(&meta) {
                 Ok(v) => v,
                 Err(err) => {
                     first_error = Some(format!(
@@ -810,7 +810,7 @@ impl Db for WalFreeDb {
             };
             if hashes.iter().any(|h| h == &target) {
                 out.push(file_metadata_from_info(store_to_file_info_without_blocks(
-                    meta,
+                    &meta,
                 )));
             }
             true
@@ -893,7 +893,7 @@ impl Db for WalFreeDb {
         let mut first_error: Option<String> = None;
 
         self.store.for_each_file_in_folder(folder, |meta| {
-            let hashes = match self.store.resolve_file_block_hashes(meta) {
+            let hashes = match self.store.resolve_file_block_hashes(&meta) {
                 Ok(v) => v,
                 Err(err) => {
                     first_error = Some(format!(

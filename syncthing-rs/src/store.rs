@@ -68,6 +68,18 @@ pub(crate) struct FileMetadata {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct StoredFileMetadata {
+    sequence: u64,
+    deleted: bool,
+    ignored: bool,
+    local_flags: u32,
+    file_type: String,
+    modified_ns: u64,
+    size: u64,
+    block_hashes: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StoreStats {
     pub(crate) file_count: usize,
     pub(crate) deleted_tombstone_count: usize,
@@ -82,7 +94,7 @@ pub(crate) struct Store {
     manifest: StoreManifest,
     journal_path: PathBuf,
     block_blob_path: PathBuf,
-    files: BTreeMap<String, FileMetadata>,
+    files: BTreeMap<String, StoredFileMetadata>,
     deleted_tombstones: VecDeque<String>,
     tombstone_set: HashSet<String>,
     approx_memory_bytes: usize,
@@ -175,11 +187,12 @@ impl Store {
 
     pub(crate) fn upsert_file(&mut self, mut file: FileMetadata) -> io::Result<()> {
         let key = composite_key(&file.folder, &file.device, &file.path);
-        let mut budget_file = file.clone();
+        let mut budget_file = stored_from_file(&file);
         budget_file.block_hashes = in_memory_block_hash_shape(&budget_file.block_hashes);
         let next_bytes = projected_upsert_memory_bytes(
             self.approx_memory_bytes,
             self.files.get(&key),
+            &key,
             &budget_file,
         );
         let budget_bytes = self.config.memory_budget_bytes();
@@ -194,7 +207,7 @@ impl Store {
         }
         self.append_op(&JournalOp::Upsert(file.clone()))?;
         file.block_hashes = spill_block_hashes(&self.block_blob_path, &file.block_hashes)?;
-        self.apply_upsert(file);
+        self.apply_upsert(key, stored_from_file(&file));
         Ok(())
     }
 
@@ -209,15 +222,17 @@ impl Store {
         if let Some(prev) = self.files.remove(&key) {
             self.approx_memory_bytes = self
                 .approx_memory_bytes
-                .saturating_sub(estimate_file_bytes(&prev));
+                .saturating_sub(estimate_entry_bytes(&key, &prev));
         }
         self.record_tombstone(&key);
 
         Ok(())
     }
 
-    pub(crate) fn get_file(&self, folder: &str, device: &str, path: &str) -> Option<&FileMetadata> {
-        self.files.get(&composite_key(folder, device, path))
+    pub(crate) fn get_file(&self, folder: &str, device: &str, path: &str) -> Option<FileMetadata> {
+        let key = composite_key(folder, device, path);
+        let stored = self.files.get(&key)?;
+        file_from_entry(&key, stored)
     }
 
     pub(crate) fn resolve_file_block_hashes(&self, meta: &FileMetadata) -> io::Result<Vec<String>> {
@@ -230,16 +245,18 @@ impl Store {
         device: &str,
         path: &str,
     ) -> io::Result<Option<FileMetadata>> {
-        let Some(file) = self.get_file(folder, device, path) else {
+        let Some(mut out) = self.get_file(folder, device, path) else {
             return Ok(None);
         };
-        let mut out = file.clone();
-        out.block_hashes = self.resolve_file_block_hashes(file)?;
+        out.block_hashes = self.resolve_file_block_hashes(&out)?;
         Ok(Some(out))
     }
 
     pub(crate) fn all_files_lexicographic(&self) -> Vec<FileMetadata> {
-        self.files.values().cloned().collect()
+        self.files
+            .iter()
+            .filter_map(|(key, value)| file_from_entry(key, value))
+            .collect()
     }
 
     pub(crate) fn all_files_in_folder_prefix(
@@ -254,8 +271,10 @@ impl Store {
             if !key.starts_with(&folder_prefix) {
                 break;
             }
-            if value.path.starts_with(prefix) {
-                out.push(value.clone());
+            if let Some(file) = file_from_entry(key, value) {
+                if file.path.starts_with(prefix) {
+                    out.push(file);
+                }
             }
         }
 
@@ -264,10 +283,13 @@ impl Store {
 
     pub(crate) fn for_each_file<F>(&self, mut visit: F)
     where
-        F: FnMut(&FileMetadata) -> bool,
+        F: FnMut(FileMetadata) -> bool,
     {
-        for value in self.files.values() {
-            if !visit(value) {
+        for (key, value) in &self.files {
+            let Some(file) = file_from_entry(key, value) else {
+                continue;
+            };
+            if !visit(file) {
                 break;
             }
         }
@@ -275,14 +297,17 @@ impl Store {
 
     pub(crate) fn for_each_file_in_folder<F>(&self, folder: &str, mut visit: F)
     where
-        F: FnMut(&FileMetadata) -> bool,
+        F: FnMut(FileMetadata) -> bool,
     {
         let prefix = folder_prefix(folder);
         for (key, value) in self.files.range(prefix.clone()..) {
             if !key.starts_with(&prefix) {
                 break;
             }
-            if !visit(value) {
+            let Some(file) = file_from_entry(key, value) else {
+                continue;
+            };
+            if !visit(file) {
                 break;
             }
         }
@@ -290,14 +315,17 @@ impl Store {
 
     pub(crate) fn for_each_file_in_folder_device<F>(&self, folder: &str, device: &str, mut visit: F)
     where
-        F: FnMut(&FileMetadata) -> bool,
+        F: FnMut(FileMetadata) -> bool,
     {
         let prefix = folder_device_prefix(folder, device);
         for (key, value) in self.files.range(prefix.clone()..) {
             if !key.starts_with(&prefix) {
                 break;
             }
-            if !visit(value) {
+            let Some(file) = file_from_entry(key, value) else {
+                continue;
+            };
+            if !visit(file) {
                 break;
             }
         }
@@ -306,11 +334,13 @@ impl Store {
     pub(crate) fn devices_in_folder(&self, folder: &str) -> Vec<String> {
         let prefix = folder_prefix(folder);
         let mut devices = BTreeSet::new();
-        for (key, value) in self.files.range(prefix.clone()..) {
+        for (key, _) in self.files.range(prefix.clone()..) {
             if !key.starts_with(&prefix) {
                 break;
             }
-            devices.insert(value.device.clone());
+            if let Some((_, device, _)) = split_composite_key(key) {
+                devices.insert(device);
+            }
         }
         devices.into_iter().collect()
     }
@@ -344,17 +374,23 @@ impl Store {
         match start_after {
             Some(cursor) => {
                 let start_key = composite_key(&cursor.folder, &cursor.device, &cursor.path);
-                for (_, value) in self
+                for (entry_key, value) in self
                     .files
                     .range((Bound::Excluded(start_key), Bound::Unbounded))
                     .take(limit.saturating_add(1))
                 {
-                    items.push(value.clone());
+                    let Some(file) = file_from_entry(entry_key, value) else {
+                        continue;
+                    };
+                    items.push(file);
                 }
             }
             None => {
-                for value in self.files.values().take(limit.saturating_add(1)) {
-                    items.push(value.clone());
+                for (key, value) in self.files.iter().take(limit.saturating_add(1)) {
+                    let Some(file) = file_from_entry(key, value) else {
+                        continue;
+                    };
+                    items.push(file);
                 }
             }
         }
@@ -381,12 +417,15 @@ impl Store {
             if !key.starts_with(&folder_start) {
                 break;
             }
+            let Some(file) = file_from_entry(key, value) else {
+                continue;
+            };
             if let Some(start_path) = start_after_path {
-                if compare_path_order(&value.path, start_path) != Ordering::Greater {
+                if compare_path_order(&file.path, start_path) != Ordering::Greater {
                     continue;
                 }
             }
-            items.push(value.clone());
+            items.push(file);
             if items.len() > limit {
                 break;
             }
@@ -420,7 +459,10 @@ impl Store {
                     if !entry_key.starts_with(&prefix) {
                         break;
                     }
-                    items.push(value.clone());
+                    let Some(file) = file_from_entry(entry_key, value) else {
+                        continue;
+                    };
+                    items.push(file);
                     if items.len() > limit {
                         break;
                     }
@@ -431,7 +473,10 @@ impl Store {
                     if !entry_key.starts_with(&prefix) {
                         break;
                     }
-                    items.push(value.clone());
+                    let Some(file) = file_from_entry(entry_key, value) else {
+                        continue;
+                    };
+                    items.push(file);
                     if items.len() > limit {
                         break;
                     }
@@ -472,13 +517,16 @@ impl Store {
             if !entry_key.starts_with(&device_prefix) {
                 break;
             }
-            if !value.path.starts_with(prefix) {
-                if compare_path_order(&value.path, prefix) == Ordering::Greater {
+            let Some(file) = file_from_entry(entry_key, value) else {
+                continue;
+            };
+            if !file.path.starts_with(prefix) {
+                if compare_path_order(&file.path, prefix) == Ordering::Greater {
                     break;
                 }
                 continue;
             }
-            items.push(value.clone());
+            items.push(file);
             if items.len() > limit {
                 break;
             }
@@ -491,9 +539,11 @@ impl Store {
         let tmp = self.config.root.join(COMPACT_SEGMENT_TMP_NAME);
         let mut file = File::create(&tmp)?;
 
-        for record in self.files.values() {
-            let mut materialized = record.clone();
-            materialized.block_hashes = self.resolve_file_block_hashes(record)?;
+        for (key, record) in &self.files {
+            let Some(mut materialized) = file_from_entry(key, record) else {
+                continue;
+            };
+            materialized.block_hashes = self.resolve_file_block_hashes(&materialized)?;
             Self::write_record(&mut file, &JournalOp::Upsert(materialized))?;
         }
         for tombstone in &self.deleted_tombstones {
@@ -551,12 +601,16 @@ impl Store {
         segments: &[String],
         block_blob_path: &Path,
         max_tombstones: usize,
-    ) -> io::Result<(BTreeMap<String, FileMetadata>, VecDeque<String>, usize)> {
+    ) -> io::Result<(
+        BTreeMap<String, StoredFileMetadata>,
+        VecDeque<String>,
+        usize,
+    )> {
         let mut block_blob = OpenOptions::new()
             .create(true)
             .append(true)
             .open(block_blob_path)?;
-        let mut files: BTreeMap<String, FileMetadata> = BTreeMap::new();
+        let mut files: BTreeMap<String, StoredFileMetadata> = BTreeMap::new();
         let mut deleted_tombstones = VecDeque::new();
         let mut tombstone_set = HashSet::new();
         let mut payload_buf: Vec<u8> = Vec::new();
@@ -613,7 +667,10 @@ impl Store {
             }
         }
 
-        let approx_bytes = files.values().map(estimate_file_bytes).sum();
+        let approx_bytes = files
+            .iter()
+            .map(|(key, value)| estimate_entry_bytes(key, value))
+            .sum();
         Ok((files, deleted_tombstones, approx_bytes))
     }
 
@@ -677,16 +734,15 @@ impl Store {
         Ok(())
     }
 
-    fn apply_upsert(&mut self, file: FileMetadata) {
-        let key = composite_key(&file.folder, &file.device, &file.path);
+    fn apply_upsert(&mut self, key: String, file: StoredFileMetadata) {
         if let Some(prev) = self.files.insert(key.clone(), file.clone()) {
             self.approx_memory_bytes = self
                 .approx_memory_bytes
-                .saturating_sub(estimate_file_bytes(&prev));
+                .saturating_sub(estimate_entry_bytes(&key, &prev));
         }
         self.approx_memory_bytes = self
             .approx_memory_bytes
-            .saturating_add(estimate_file_bytes(&file));
+            .saturating_add(estimate_entry_bytes(&key, &file));
         if self.tombstone_set.remove(&key) {
             self.deleted_tombstones.retain(|k| *k != key);
         }
@@ -871,7 +927,7 @@ fn persist_manifest(root: &Path, manifest_path: &Path, manifest: &StoreManifest)
 }
 
 fn apply_op(
-    files: &mut BTreeMap<String, FileMetadata>,
+    files: &mut BTreeMap<String, StoredFileMetadata>,
     deleted_tombstones: &mut VecDeque<String>,
     tombstone_set: &mut HashSet<String>,
     max_tombstones: usize,
@@ -882,7 +938,7 @@ fn apply_op(
         JournalOp::Upsert(mut file) => {
             file.block_hashes = spill_block_hashes_to_writer(block_blob, &file.block_hashes)?;
             let key = composite_key(&file.folder, &file.device, &file.path);
-            files.insert(key.clone(), file);
+            files.insert(key.clone(), stored_from_file(&file));
             if tombstone_set.remove(&key) {
                 deleted_tombstones.retain(|k| *k != key);
             }
@@ -1321,19 +1377,57 @@ fn parse_block_blob_marker(marker: &str) -> Option<(u64, u32, u32)> {
     Some((offset, len, checksum))
 }
 
-fn estimate_file_bytes(file: &FileMetadata) -> usize {
+fn stored_from_file(file: &FileMetadata) -> StoredFileMetadata {
+    StoredFileMetadata {
+        sequence: file.sequence,
+        deleted: file.deleted,
+        ignored: file.ignored,
+        local_flags: file.local_flags,
+        file_type: file.file_type.clone(),
+        modified_ns: file.modified_ns,
+        size: file.size,
+        block_hashes: file.block_hashes.clone(),
+    }
+}
+
+fn file_from_entry(key: &str, stored: &StoredFileMetadata) -> Option<FileMetadata> {
+    let (folder, device, path) = split_composite_key(key)?;
+    Some(FileMetadata {
+        folder,
+        device,
+        path,
+        sequence: stored.sequence,
+        deleted: stored.deleted,
+        ignored: stored.ignored,
+        local_flags: stored.local_flags,
+        file_type: stored.file_type.clone(),
+        modified_ns: stored.modified_ns,
+        size: stored.size,
+        block_hashes: stored.block_hashes.clone(),
+    })
+}
+
+fn estimate_stored_file_bytes(file: &StoredFileMetadata) -> usize {
     let hash_bytes: usize = file.block_hashes.iter().map(String::len).sum();
-    file.folder.len() + file.path.len() + file.device.len() + file.file_type.len() + hash_bytes + 64
+    file.file_type.len() + hash_bytes + 64
+}
+
+fn estimate_entry_bytes(key: &str, file: &StoredFileMetadata) -> usize {
+    key.len().saturating_add(estimate_stored_file_bytes(file))
 }
 
 fn projected_upsert_memory_bytes(
     current_bytes: usize,
-    current_file: Option<&FileMetadata>,
-    next_file: &FileMetadata,
+    current_file: Option<&StoredFileMetadata>,
+    key: &str,
+    next_file: &StoredFileMetadata,
 ) -> usize {
-    let without_current =
-        current_bytes.saturating_sub(current_file.map(estimate_file_bytes).unwrap_or(0));
-    without_current.saturating_add(estimate_file_bytes(next_file))
+    let without_current = current_bytes.saturating_sub(
+        current_file
+            .map(|file| estimate_entry_bytes(key, file))
+            .unwrap_or(0),
+    );
+    without_current.saturating_add(estimate_entry_bytes(key, next_file))
 }
 
 fn sync_dir(path: &Path) -> io::Result<()> {
@@ -1599,6 +1693,44 @@ mod tests {
         assert_eq!(stats.memory_budget_bytes, 50 * 1024 * 1024);
         assert_eq!(stats.deleted_tombstone_count, 0);
         assert!(stats.estimated_memory_bytes < stats.memory_budget_bytes);
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn compact_entry_memory_estimate_excludes_duplicate_path_strings() {
+        let root = temp_root("compact-entry-estimate");
+        let cfg = StoreConfig::new(&root).with_memory_cap_mb(50);
+        let mut store = Store::open(cfg).expect("open");
+
+        let folder = "very-long-folder-id-for-memory-estimate";
+        let device = "remote-device-id-with-long-prefix";
+        let path = "deep/nested/path/with/a/very/long/file-name-that-would-hurt-memory.bin";
+        store
+            .upsert_file(FileMetadata {
+                folder: folder.to_string(),
+                device: device.to_string(),
+                path: path.to_string(),
+                sequence: 1,
+                deleted: false,
+                ignored: false,
+                local_flags: 0,
+                file_type: "file".to_string(),
+                modified_ns: 1,
+                size: 1,
+                block_hashes: vec!["h-1".to_string()],
+            })
+            .expect("upsert");
+
+        let stored = store
+            .get_file(folder, device, path)
+            .expect("stored entry should exist");
+        let expected = composite_key(folder, device, path).len()
+            + stored.file_type.len()
+            + stored.block_hashes.iter().map(String::len).sum::<usize>()
+            + 64;
+
+        assert_eq!(store.stats().estimated_memory_bytes, expected);
 
         fs::remove_dir_all(root).expect("cleanup");
     }

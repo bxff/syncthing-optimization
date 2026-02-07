@@ -4,11 +4,13 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, ErrorKind, Read, Write};
 use std::ops::Bound;
+use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
 const LOG_RECORD_MAX_BYTES: u32 = 32 * 1024 * 1024;
 pub(crate) const JOURNAL_FILE_NAME: &str = "events.log";
 const KEY_SEP: char = '\u{001f}';
+const PATH_SEG_SEP: char = '\u{001e}';
 
 #[derive(Clone, Debug)]
 pub(crate) struct StoreConfig {
@@ -44,9 +46,13 @@ impl StoreConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct FileMetadata {
     pub(crate) folder: String,
+    pub(crate) device: String,
     pub(crate) path: String,
     pub(crate) sequence: u64,
     pub(crate) deleted: bool,
+    pub(crate) ignored: bool,
+    pub(crate) local_flags: u32,
+    pub(crate) file_type: String,
     pub(crate) modified_ns: u64,
     pub(crate) size: u64,
     pub(crate) block_hashes: Vec<String>,
@@ -73,6 +79,7 @@ pub(crate) struct Store {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PageCursor {
     pub(crate) folder: String,
+    pub(crate) device: String,
     pub(crate) path: String,
 }
 
@@ -85,7 +92,11 @@ pub(crate) struct FilePage {
 #[derive(Clone, Debug)]
 enum JournalOp {
     Upsert(FileMetadata),
-    Delete { folder: String, path: String },
+    Delete {
+        folder: String,
+        device: String,
+        path: String,
+    },
 }
 
 impl Store {
@@ -116,13 +127,14 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) fn delete_file(&mut self, folder: &str, path: &str) -> io::Result<()> {
+    pub(crate) fn delete_file(&mut self, folder: &str, device: &str, path: &str) -> io::Result<()> {
         self.append_op(&JournalOp::Delete {
             folder: folder.to_string(),
+            device: device.to_string(),
             path: path.to_string(),
         })?;
 
-        let key = composite_key(folder, path);
+        let key = composite_key(folder, device, path);
         if let Some(prev) = self.files.remove(&key) {
             self.approx_memory_bytes = self
                 .approx_memory_bytes
@@ -133,8 +145,8 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) fn get_file(&self, folder: &str, path: &str) -> Option<&FileMetadata> {
-        self.files.get(&composite_key(folder, path))
+    pub(crate) fn get_file(&self, folder: &str, device: &str, path: &str) -> Option<&FileMetadata> {
+        self.files.get(&composite_key(folder, device, path))
     }
 
     pub(crate) fn all_files_lexicographic(&self) -> Vec<FileMetadata> {
@@ -169,8 +181,8 @@ impl Store {
         self.deleted_tombstones.len()
     }
 
-    pub(crate) fn has_tombstone(&self, folder: &str, path: &str) -> bool {
-        let key = composite_key(folder, path);
+    pub(crate) fn has_tombstone(&self, folder: &str, device: &str, path: &str) -> bool {
+        let key = composite_key(folder, device, path);
         self.tombstone_set.contains(&key)
     }
 
@@ -189,7 +201,7 @@ impl Store {
         let mut items = Vec::with_capacity(limit.saturating_add(1));
         match start_after {
             Some(cursor) => {
-                let start_key = composite_key(&cursor.folder, &cursor.path);
+                let start_key = composite_key(&cursor.folder, &cursor.device, &cursor.path);
                 for (_, value) in self
                     .files
                     .range((Bound::Excluded(start_key), Bound::Unbounded))
@@ -223,23 +235,67 @@ impl Store {
 
         let mut items = Vec::with_capacity(limit.saturating_add(1));
         let folder_start = folder_prefix(folder);
-        let range_start = match start_after_path {
-            Some(path) => composite_key(folder, path),
-            None => folder_start.clone(),
-        };
-        let lower = if start_after_path.is_some() {
-            Bound::Excluded(range_start)
-        } else {
-            Bound::Included(range_start)
-        };
-
-        for (key, value) in self.files.range((lower, Bound::Unbounded)) {
+        for (key, value) in self.files.range(folder_start.clone()..) {
             if !key.starts_with(&folder_start) {
                 break;
+            }
+            if let Some(start_path) = start_after_path {
+                if value.path.as_str() <= start_path {
+                    continue;
+                }
             }
             items.push(value.clone());
             if items.len() > limit {
                 break;
+            }
+        }
+
+        finalize_page(items, limit)
+    }
+
+    pub(crate) fn files_in_folder_device_ordered_page(
+        &self,
+        folder: &str,
+        device: &str,
+        start_after_path: Option<&str>,
+        limit: usize,
+    ) -> FilePage {
+        if limit == 0 {
+            return FilePage {
+                items: Vec::new(),
+                next_cursor: None,
+            };
+        }
+
+        let mut items = Vec::with_capacity(limit.saturating_add(1));
+        let prefix = folder_device_prefix(folder, device);
+        let start_key = start_after_path.map(|p| composite_key(folder, device, p));
+
+        match start_key {
+            Some(key) => {
+                for (entry_key, value) in self
+                    .files
+                    .range((Bound::Excluded(key), Bound::Unbounded))
+                {
+                    if !entry_key.starts_with(&prefix) {
+                        break;
+                    }
+                    items.push(value.clone());
+                    if items.len() > limit {
+                        break;
+                    }
+                }
+            }
+            None => {
+                for (entry_key, value) in self.files.range(prefix.clone()..) {
+                    if !entry_key.starts_with(&prefix) {
+                        break;
+                    }
+                    items.push(value.clone());
+                    if items.len() > limit {
+                        break;
+                    }
+                }
             }
         }
 
@@ -254,12 +310,13 @@ impl Store {
             Self::write_record(&mut file, &JournalOp::Upsert(record.clone()))?;
         }
         for tombstone in &self.deleted_tombstones {
-            if let Some((folder, path)) = split_composite_key(tombstone) {
+            if let Some((folder, device, path)) = split_composite_key(tombstone) {
                 Self::write_record(
                     &mut file,
                     &JournalOp::Delete {
-                        folder: folder.to_string(),
-                        path: path.to_string(),
+                        folder,
+                        device,
+                        path,
                     },
                 )?;
             }
@@ -371,7 +428,7 @@ impl Store {
     }
 
     fn apply_upsert(&mut self, file: FileMetadata) {
-        let key = composite_key(&file.folder, &file.path);
+        let key = composite_key(&file.folder, &file.device, &file.path);
         if let Some(prev) = self.files.insert(key.clone(), file.clone()) {
             self.approx_memory_bytes = self
                 .approx_memory_bytes
@@ -412,14 +469,18 @@ fn apply_op(
 ) {
     match op {
         JournalOp::Upsert(file) => {
-            let key = composite_key(&file.folder, &file.path);
+            let key = composite_key(&file.folder, &file.device, &file.path);
             files.insert(key.clone(), file);
             if tombstone_set.remove(&key) {
                 deleted_tombstones.retain(|k| *k != key);
             }
         }
-        JournalOp::Delete { folder, path } => {
-            let key = composite_key(&folder, &path);
+        JournalOp::Delete {
+            folder,
+            device,
+            path,
+        } => {
+            let key = composite_key(&folder, &device, &path);
             files.remove(&key);
             if max_tombstones > 0 {
                 if tombstone_set.contains(&key) {
@@ -448,18 +509,31 @@ fn encode_op(op: &JournalOp) -> Vec<u8> {
                 .collect::<Vec<_>>()
                 .join(",");
             format!(
-                "U\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                "U\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 escape(&file.folder),
+                escape(&file.device),
                 escape(&file.path),
                 file.sequence,
                 if file.deleted { 1 } else { 0 },
                 file.modified_ns,
                 file.size,
-                hashes,
+                if file.ignored { 1 } else { 0 },
+                file.local_flags,
+                escape(&file.file_type),
+                hashes
             )
         }
-        JournalOp::Delete { folder, path } => {
-            format!("D\t{}\t{}\n", escape(folder), escape(path))
+        JournalOp::Delete {
+            folder,
+            device,
+            path,
+        } => {
+            format!(
+                "D\t{}\t{}\t{}\n",
+                escape(folder),
+                escape(device),
+                escape(path)
+            )
         }
     };
     line.into_bytes()
@@ -493,20 +567,66 @@ fn decode_op(payload: &[u8]) -> Option<JournalOp> {
                     .map(|v| unescape(&v))
                     .collect::<Option<Vec<_>>>()?
             };
-
             Some(JournalOp::Upsert(FileMetadata {
                 folder,
+                device: "local".to_string(),
                 path,
                 sequence,
                 deleted,
+                ignored: false,
+                local_flags: 0,
+                file_type: "file".to_string(),
                 modified_ns,
                 size,
                 block_hashes,
             }))
         }
-        "D" if parts.len() == 3 => Some(JournalOp::Delete {
+        "U" if parts.len() == 12 => {
+            let folder = unescape(&parts[1])?;
+            let device = unescape(&parts[2])?;
+            let path = unescape(&parts[3])?;
+            let sequence = parts[4].parse().ok()?;
+            let deleted = match parts[5].as_str() {
+                "0" => false,
+                "1" => true,
+                _ => return None,
+            };
+            let modified_ns = parts[6].parse().ok()?;
+            let size = parts[7].parse().ok()?;
+            let ignored = match parts[8].as_str() {
+                "0" => false,
+                "1" => true,
+                _ => return None,
+            };
+            let local_flags = parts[9].parse().ok()?;
+            let file_type = unescape(&parts[10])?;
+            let block_hashes = if parts[11].is_empty() {
+                Vec::new()
+            } else {
+                split_escaped_comma(&parts[11])
+                    .into_iter()
+                    .map(|v| unescape(&v))
+                    .collect::<Option<Vec<_>>>()?
+            };
+
+            Some(JournalOp::Upsert(FileMetadata {
+                folder,
+                device,
+                path,
+                sequence,
+                deleted,
+                ignored,
+                local_flags,
+                file_type,
+                modified_ns,
+                size,
+                block_hashes,
+            }))
+        }
+        "D" if parts.len() == 4 => Some(JournalOp::Delete {
             folder: unescape(&parts[1])?,
-            path: unescape(&parts[2])?,
+            device: unescape(&parts[2])?,
+            path: unescape(&parts[3])?,
         }),
         _ => None,
     }
@@ -586,16 +706,70 @@ fn checksum(bytes: &[u8]) -> u32 {
     hasher.finalize()
 }
 
-fn composite_key(folder: &str, path: &str) -> String {
-    format!("{folder}{KEY_SEP}{path}")
+fn composite_key(folder: &str, device: &str, path: &str) -> String {
+    let path_key = encode_path_key(path);
+    format!("{folder}{KEY_SEP}{device}{KEY_SEP}{path_key}")
 }
 
-fn split_composite_key(key: &str) -> Option<(&str, &str)> {
-    key.split_once(KEY_SEP)
+fn split_composite_key(key: &str) -> Option<(String, String, String)> {
+    let (folder, rest) = key.split_once(KEY_SEP)?;
+    let (device, path_key) = rest.split_once(KEY_SEP)?;
+    let path = decode_path_key(path_key)?;
+    Some((folder.to_string(), device.to_string(), path))
 }
 
 fn folder_prefix(folder: &str) -> String {
     format!("{folder}{KEY_SEP}")
+}
+
+fn folder_device_prefix(folder: &str, device: &str) -> String {
+    format!("{folder}{KEY_SEP}{device}{KEY_SEP}")
+}
+
+pub(crate) fn encode_path_key(path: &str) -> String {
+    let normalized = normalize_path(path);
+    if normalized.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    for segment in normalized.split('/') {
+        if segment.is_empty() {
+            continue;
+        }
+        out.push(PATH_SEG_SEP);
+        out.push_str(segment);
+    }
+    out
+}
+
+pub(crate) fn decode_path_key(path_key: &str) -> Option<String> {
+    if path_key.is_empty() {
+        return Some(String::new());
+    }
+    let mut segments = Vec::new();
+    for part in path_key.split(PATH_SEG_SEP) {
+        if part.is_empty() {
+            continue;
+        }
+        if part.contains(PATH_SEG_SEP) {
+            return None;
+        }
+        segments.push(part);
+    }
+    Some(segments.join("/"))
+}
+
+pub(crate) fn normalize_path(path: &str) -> String {
+    path.replace('\\', "/")
+        .trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+pub(crate) fn compare_path_order(a: &str, b: &str) -> Ordering {
+    encode_path_key(a).cmp(&encode_path_key(b))
 }
 
 fn finalize_page(mut items: Vec<FileMetadata>, limit: usize) -> FilePage {
@@ -606,6 +780,7 @@ fn finalize_page(mut items: Vec<FileMetadata>, limit: usize) -> FilePage {
     let next_cursor = if has_more {
         items.last().map(|last| PageCursor {
             folder: last.folder.clone(),
+            device: last.device.clone(),
             path: last.path.clone(),
         })
     } else {
@@ -642,9 +817,13 @@ mod tests {
     fn meta(folder: &str, path: &str, sequence: u64) -> FileMetadata {
         FileMetadata {
             folder: folder.to_string(),
+            device: "local".to_string(),
             path: path.to_string(),
             sequence,
             deleted: false,
+            ignored: false,
+            local_flags: 0,
+            file_type: "file".to_string(),
             modified_ns: sequence,
             size: sequence,
             block_hashes: vec![format!("h-{sequence:08}")],
@@ -665,7 +844,7 @@ mod tests {
                 .upsert_file(meta("alpha", "a.txt", 1))
                 .expect("upsert");
             store.upsert_file(meta("beta", "z.txt", 7)).expect("upsert");
-            store.delete_file("beta", "z.txt").expect("delete");
+            store.delete_file("beta", "local", "z.txt").expect("delete");
         }
 
         let store = Store::open(cfg).expect("reopen store");
@@ -710,7 +889,7 @@ mod tests {
 
         let store = Store::open(cfg).expect("reopen");
         assert_eq!(store.file_count(), 1);
-        assert!(store.get_file("alpha", "a.txt").is_some());
+        assert!(store.get_file("alpha", "local", "a.txt").is_some());
 
         fs::remove_dir_all(root).expect("cleanup");
     }
@@ -730,7 +909,7 @@ mod tests {
             }
             for i in 0_u64..100 {
                 store
-                    .delete_file("alpha", &format!("{i:04}.dat"))
+                    .delete_file("alpha", "local", &format!("{i:04}.dat"))
                     .expect("delete");
             }
             before_size = fs::metadata(store.journal_path())
@@ -803,6 +982,56 @@ mod tests {
     }
 
     #[test]
+    fn device_scoped_keyset_pagination_is_stable() {
+        let root = temp_root("device-paging");
+        let cfg = StoreConfig::new(&root);
+        let mut store = Store::open(cfg).expect("open");
+
+        for i in 0_u64..12 {
+            store
+                .upsert_file(FileMetadata {
+                    device: "local".to_string(),
+                    ..meta("alpha", &format!("{i:04}.dat"), i + 1)
+                })
+                .expect("upsert local");
+        }
+        for i in 0_u64..8 {
+            store
+                .upsert_file(FileMetadata {
+                    device: "remote-a".to_string(),
+                    ..meta("alpha", &format!("{i:04}.dat"), i + 1)
+                })
+                .expect("upsert remote");
+        }
+
+        let mut cursor_path: Option<String> = None;
+        let mut out = Vec::new();
+        loop {
+            let page = store.files_in_folder_device_ordered_page(
+                "alpha",
+                "local",
+                cursor_path.as_deref(),
+                5,
+            );
+            for item in &page.items {
+                out.push(item.path.clone());
+                assert_eq!(item.device, "local");
+            }
+            match page.next_cursor {
+                Some(next) => cursor_path = Some(next.path),
+                None => break,
+            }
+        }
+
+        let expected = (0_u64..12)
+            .map(|i| format!("{i:04}.dat"))
+            .collect::<Vec<_>>();
+        assert_eq!(out, expected);
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn bounded_tombstones_keep_latest_deletes_only() {
         let root = temp_root("tombstones");
         let cfg = StoreConfig::new(&root).with_deleted_tombstone_cap(3);
@@ -813,15 +1042,41 @@ mod tests {
             store
                 .upsert_file(meta("alpha", &path, i + 1))
                 .expect("upsert");
-            store.delete_file("alpha", &path).expect("delete");
+            store.delete_file("alpha", "local", &path).expect("delete");
         }
 
         assert_eq!(store.tombstone_count(), 3);
-        assert!(!store.has_tombstone("alpha", "0000.dat"));
-        assert!(!store.has_tombstone("alpha", "0001.dat"));
-        assert!(store.has_tombstone("alpha", "0002.dat"));
-        assert!(store.has_tombstone("alpha", "0003.dat"));
-        assert!(store.has_tombstone("alpha", "0004.dat"));
+        assert!(!store.has_tombstone("alpha", "local", "0000.dat"));
+        assert!(!store.has_tombstone("alpha", "local", "0001.dat"));
+        assert!(store.has_tombstone("alpha", "local", "0002.dat"));
+        assert!(store.has_tombstone("alpha", "local", "0003.dat"));
+        assert!(store.has_tombstone("alpha", "local", "0004.dat"));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn segment_path_ordering_beats_raw_ascii_path_ordering() {
+        let root = temp_root("path-order");
+        let cfg = StoreConfig::new(&root);
+        let mut store = Store::open(cfg).expect("open");
+
+        store
+            .upsert_file(meta("alpha", "a.d/x.txt", 1))
+            .expect("upsert a.d/x");
+        store
+            .upsert_file(meta("alpha", "a/x.txt", 2))
+            .expect("upsert a/x");
+        store
+            .upsert_file(meta("alpha", "a/z.txt", 3))
+            .expect("upsert a/z");
+
+        let ordered = store
+            .all_files_lexicographic()
+            .into_iter()
+            .map(|f| f.path)
+            .collect::<Vec<_>>();
+        assert_eq!(ordered, vec!["a/x.txt", "a/z.txt", "a.d/x.txt"]);
 
         fs::remove_dir_all(root).expect("cleanup");
     }

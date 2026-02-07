@@ -6,6 +6,6 @@
     "b.txt"
   ],
   "scenario": "crash-recovery",
-  "source": "rust",
+  "source": "go",
   "status": "prototype"
 }

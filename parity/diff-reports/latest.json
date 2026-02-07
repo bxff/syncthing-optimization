@@ -1,64 +1,113 @@
 {
   "schema_version": 1,
   "produced_by": "parity-harness",
-  "match": true,
-  "mismatches": [],
+  "match": false,
+  "mismatches": [
+    {
+      "id": "crash-recovery",
+      "severity": "P0",
+      "open": true,
+      "message": "go and rust sides unavailable: scenario status=prototype is not allowed for parity gating | scenario status=prototype is not allowed for parity gating"
+    },
+    {
+      "id": "folder-type-behavior",
+      "severity": "P0",
+      "open": true,
+      "message": "go and rust sides unavailable: scenario status=prototype is not allowed for parity gating | scenario status=prototype is not allowed for parity gating"
+    },
+    {
+      "id": "global-need-decision",
+      "severity": "P0",
+      "open": true,
+      "message": "go and rust sides unavailable: scenario status=prototype is not allowed for parity gating | scenario status=prototype is not allowed for parity gating"
+    },
+    {
+      "id": "index-sequence-behavior",
+      "severity": "P0",
+      "open": true,
+      "message": "go and rust sides unavailable: scenario status=prototype is not allowed for parity gating | scenario status=prototype is not allowed for parity gating"
+    },
+    {
+      "id": "memory-cap-50mb",
+      "severity": "P0",
+      "open": true,
+      "message": "go and rust sides unavailable: scenario status=prototype is not allowed for parity gating | scenario status=prototype is not allowed for parity gating"
+    },
+    {
+      "id": "protocol-state-transition",
+      "severity": "P0",
+      "open": true,
+      "message": "go and rust sides unavailable: scenario status=prototype is not allowed for parity gating | scenario status=prototype is not allowed for parity gating"
+    },
+    {
+      "id": "wal-free-durability",
+      "severity": "P0",
+      "open": true,
+      "message": "go and rust sides unavailable: scenario status=prototype is not allowed for parity gating | scenario status=prototype is not allowed for parity gating"
+    },
+    {
+      "id": "conflict-and-ignore-semantics",
+      "severity": "P1",
+      "open": true,
+      "message": "go and rust sides unavailable: scenario status=prototype is not allowed for parity gating | scenario status=prototype is not allowed for parity gating"
+    }
+  ],
   "scenarios": [
     {
       "id": "conflict-and-ignore-semantics",
       "severity": "P1",
       "required": true,
-      "status": "pass",
-      "message": "go and rust outputs match"
+      "status": "blocked",
+      "message": "go and rust sides unavailable: scenario status=prototype is not allowed for parity gating | scenario status=prototype is not allowed for parity gating"
     },
     {
       "id": "crash-recovery",
       "severity": "P0",
       "required": true,
-      "status": "pass",
-      "message": "go and rust outputs match"
+      "status": "blocked",
+      "message": "go and rust sides unavailable: scenario status=prototype is not allowed for parity gating | scenario status=prototype is not allowed for parity gating"
     },
     {
       "id": "folder-type-behavior",
       "severity": "P0",
       "required": true,
-      "status": "pass",
-      "message": "go and rust outputs match"
+      "status": "blocked",
+      "message": "go and rust sides unavailable: scenario status=prototype is not allowed for parity gating | scenario status=prototype is not allowed for parity gating"
     },
     {
       "id": "global-need-decision",
       "severity": "P0",
       "required": true,
-      "status": "pass",
-      "message": "go and rust outputs match"
+      "status": "blocked",
+      "message": "go and rust sides unavailable: scenario status=prototype is not allowed for parity gating | scenario status=prototype is not allowed for parity gating"
     },
     {
       "id": "index-sequence-behavior",
       "severity": "P0",
       "required": true,
-      "status": "pass",
-      "message": "go and rust outputs match"
+      "status": "blocked",
+      "message": "go and rust sides unavailable: scenario status=prototype is not allowed for parity gating | scenario status=prototype is not allowed for parity gating"
     },
     {
       "id": "memory-cap-50mb",
       "severity": "P0",
       "required": true,
-      "status": "pass",
-      "message": "go and rust outputs match"
+      "status": "blocked",
+      "message": "go and rust sides unavailable: scenario status=prototype is not allowed for parity gating | scenario status=prototype is not allowed for parity gating"
     },
     {
       "id": "protocol-state-transition",
       "severity": "P0",
       "required": true,
-      "status": "pass",
-      "message": "go and rust outputs match"
+      "status": "blocked",
+      "message": "go and rust sides unavailable: scenario status=prototype is not allowed for parity gating | scenario status=prototype is not allowed for parity gating"
     },
     {
       "id": "wal-free-durability",
       "severity": "P0",
       "required": true,
-      "status": "pass",
-      "message": "go and rust outputs match"
+      "status": "blocked",
+      "message": "go and rust sides unavailable: scenario status=prototype is not allowed for parity gating | scenario status=prototype is not allowed for parity gating"
     }
   ]
 }

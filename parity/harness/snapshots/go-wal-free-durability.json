@@ -7,6 +7,6 @@
     "two.txt"
   ],
   "scenario": "wal-free-durability",
-  "source": "rust",
+  "source": "go",
   "status": "prototype"
 }

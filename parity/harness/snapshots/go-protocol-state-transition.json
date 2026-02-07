@@ -14,7 +14,7 @@
     "ping"
   ],
   "scenario": "protocol-state-transition",
-  "source": "rust",
+  "source": "go",
   "status": "prototype",
   "transitions": [
     "dial",

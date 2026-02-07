@@ -2,16 +2,26 @@
 #![allow(non_camel_case_types)]
 #![allow(dead_code)]
 
-use crate::config::FolderConfiguration;
+use crate::config::{FolderConfiguration, MemoryPolicy};
 use crate::db::{self, Db};
 use crate::folder_modes::{mode_actions, FolderMode};
 use crate::planner::{classify_paths, compute_need, VersionedFile};
+use crate::store::compare_path_order;
+use crate::walker::{walk_deterministic, WalkConfig};
+use crc32fast::Hasher;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fs::{self, File};
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::UNIX_EPOCH;
 
 pub(crate) const deletedBatchSize: usize = 1000;
 pub(crate) const kqueueItemCountThreshold: usize = 100_000;
 pub(crate) const maxToRemove: usize = 10_000;
+const LOCAL_DEVICE_ID: &str = "local";
+const SCAN_DB_BATCH_SIZE: usize = 256;
+const BLOCK_CHUNK_SIZE: usize = 128 * 1024;
 
 pub(crate) const dbUpdateDeleteDir: u8 = 1;
 pub(crate) const dbUpdateDeleteFile: u8 = 2;
@@ -45,6 +55,28 @@ pub(crate) static errUnexpectedDirOnFileDel: &str = "unexpected directory for fi
 pub(crate) struct FileError {
     pub(crate) Path: String,
     pub(crate) Err: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PullStats {
+    pub(crate) needed_files: usize,
+    pub(crate) total_blocks: usize,
+    pub(crate) reused_same_path_blocks: usize,
+    pub(crate) fetched_blocks: usize,
+    pub(crate) throttled: bool,
+    pub(crate) hard_blocked: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct MemoryTelemetry {
+    pub(crate) estimated_bytes: usize,
+    pub(crate) budget_bytes: usize,
+    pub(crate) soft_limit_bytes: usize,
+    pub(crate) throttle_events: u64,
+    pub(crate) hard_block_events: u64,
+    pub(crate) last_cap_violation: Option<String>,
+    pub(crate) pull_throttled: bool,
+    pub(crate) pull_hard_blocked: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -240,6 +272,70 @@ pub(crate) struct folder {
     pub(crate) watchErr: Option<String>,
     pub(crate) watchRunning: bool,
     pub(crate) localFlags: u32,
+    pub(crate) pullStats: PullStats,
+    pub(crate) memoryThrottleEvents: u64,
+    pub(crate) memoryHardBlockEvents: u64,
+    pub(crate) lastCapViolation: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ScanExecutionStats {
+    files_seen: usize,
+    files_updated: usize,
+    files_deleted: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+struct LocalFileCursor {
+    page: Vec<db::FileInfo>,
+    index: usize,
+    next_cursor: Option<String>,
+    done: bool,
+}
+
+impl LocalFileCursor {
+    fn next(
+        &mut self,
+        db: &db::WalFreeDb,
+        folder: &str,
+        device: &str,
+    ) -> Result<Option<db::FileInfo>, String> {
+        loop {
+            if let Some(item) = self.page.get(self.index).cloned() {
+                self.index += 1;
+                return Ok(Some(item));
+            }
+            if self.done {
+                return Ok(None);
+            }
+            let page = db.all_local_files_ordered_page(
+                folder,
+                device,
+                self.next_cursor.as_deref(),
+                1024,
+            )?;
+            self.page = page.items;
+            self.index = 0;
+            self.next_cursor = page.next_cursor;
+            if self.page.is_empty() {
+                if self.next_cursor.is_none() {
+                    self.done = true;
+                    return Ok(None);
+                }
+                continue;
+            }
+            if self.next_cursor.is_none() {
+                self.done = true;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ScanScope {
+    prefix: String,
+    dir: Option<PathBuf>,
+    file: Option<String>,
 }
 
 impl folder {
@@ -283,7 +379,18 @@ impl folder {
     }
 
     pub(crate) fn Scan(&mut self, subdirs: &[String]) {
+        self.clearScanErrors();
         self.scanSubdirs(subdirs);
+        let normalized_subdirs = normalize_scan_subdirs(subdirs);
+        let scan_root = self.config.path.clone();
+        match self.scan_filesystem_deterministic(&normalized_subdirs) {
+            Ok(stats) => {
+                if stats.files_seen > 0 {
+                    self.pullScheduled = true;
+                }
+            }
+            Err(err) => self.newScanError(&scan_root, &err),
+        }
         self.scanScheduled = false;
     }
 
@@ -385,17 +492,107 @@ impl folder {
     pub(crate) fn pull(&mut self) -> Result<usize, String> {
         self.pullBasePause();
         self.pullScheduled = false;
+
         let db = self.db.lock().map_err(|_| "db lock poisoned".to_string())?;
+        let estimated = db.estimated_memory_bytes();
+        let budget = db.memory_budget_bytes();
+        let soft_limit = if budget == 0 {
+            0
+        } else {
+            budget
+                .saturating_mul(self.config.memory_soft_percent.max(1) as usize)
+                / 100
+        };
+
+        let mut throttled = false;
+        let mut query_limit = 10_000;
+        self.lastCapViolation = None;
+        match self.config.memory_policy {
+            MemoryPolicy::Throttle => {
+                if estimated > soft_limit {
+                    throttled = true;
+                    self.memoryThrottleEvents = self.memoryThrottleEvents.saturating_add(1);
+                    // Apply backpressure by shrinking this pull iteration's batch.
+                    query_limit = 256;
+                }
+            }
+            MemoryPolicy::Fail => {
+                if budget == 0 || estimated > budget {
+                    self.memoryHardBlockEvents = self.memoryHardBlockEvents.saturating_add(1);
+                    self.lastCapViolation = Some(format!(
+                        "memory cap exceeded: estimated={} budget={} folder={}",
+                        estimated, budget, self.config.id
+                    ));
+                    self.pullStats = PullStats {
+                        hard_blocked: true,
+                        ..Default::default()
+                    };
+                    return Err("memory cap exceeded".to_string());
+                }
+            }
+            MemoryPolicy::BestEffort => {}
+        }
+
         let needed = db
             .all_needed_global_files(
                 &self.config.id,
                 "local",
                 db::PullOrder::Alphabetic,
-                10_000,
+                query_limit,
                 0,
             )
             .map_err(|e| format!("pull query: {e}"))?;
+
+        let mut total_blocks = 0_usize;
+        let mut reused_same_path_blocks = 0_usize;
+        for global in &needed {
+            total_blocks = total_blocks.saturating_add(global.block_hashes.len());
+            if let Ok(Some(local_prev)) = db.get_device_file(&self.config.id, "local", &global.path)
+            {
+                reused_same_path_blocks = reused_same_path_blocks
+                    .saturating_add(count_same_path_reuse_blocks(&local_prev, global));
+            }
+        }
+        let fetched_blocks = total_blocks.saturating_sub(reused_same_path_blocks);
+
+        self.pullStats = PullStats {
+            needed_files: needed.len(),
+            total_blocks,
+            reused_same_path_blocks,
+            fetched_blocks,
+            throttled,
+            hard_blocked: false,
+        };
         Ok(needed.len())
+    }
+
+    pub(crate) fn PullStats(&self) -> PullStats {
+        self.pullStats
+    }
+
+    pub(crate) fn MemoryTelemetry(&self) -> MemoryTelemetry {
+        let (estimated_bytes, budget_bytes) = self
+            .db
+            .lock()
+            .map(|db| (db.estimated_memory_bytes(), db.memory_budget_bytes()))
+            .unwrap_or((0, 0));
+        let soft_limit_bytes = if budget_bytes == 0 {
+            0
+        } else {
+            budget_bytes
+                .saturating_mul(self.config.memory_soft_percent.max(1) as usize)
+                / 100
+        };
+        MemoryTelemetry {
+            estimated_bytes,
+            budget_bytes,
+            soft_limit_bytes,
+            throttle_events: self.memoryThrottleEvents,
+            hard_block_events: self.memoryHardBlockEvents,
+            last_cap_violation: self.lastCapViolation.clone(),
+            pull_throttled: self.pullStats.throttled,
+            pull_hard_blocked: self.pullStats.hard_blocked,
+        }
     }
 
     pub(crate) fn pullBasePause(&self) -> f64 {
@@ -432,9 +629,105 @@ impl folder {
         }
     }
 
+    fn scan_filesystem_deterministic(
+        &mut self,
+        subdirs: &[String],
+    ) -> Result<ScanExecutionStats, String> {
+        let root = PathBuf::from(&self.config.path);
+        if !root.exists() {
+            return Err(format!("scan root missing: {}", root.display()));
+        }
+        if !root.is_dir() {
+            return Err(format!("scan root not a directory: {}", root.display()));
+        }
+
+        let mut spill_dir = root.join(".stfolder");
+        spill_dir.push("scan-spill");
+        fs::create_dir_all(&spill_dir).map_err(|e| format!("create spill dir: {e}"))?;
+        let walk_cfg = WalkConfig::new(&spill_dir);
+        let scopes = resolve_scan_scopes(&root, subdirs)?;
+
+        let mut db = self
+            .db
+            .lock()
+            .map_err(|_| "db lock poisoned".to_string())?;
+        let mut cursor = LocalFileCursor::default();
+        let mut current_local = cursor.next(&db, &self.config.id, LOCAL_DEVICE_ID)?;
+        let mut next_sequence = db
+            .get_device_sequence(&self.config.id, LOCAL_DEVICE_ID)?
+            .saturating_add(1);
+        let mut stats = ScanExecutionStats::default();
+        let mut updates = Vec::new();
+        let mut scan_error: Option<String> = None;
+        let ignore_delete = self.config.ignore_delete;
+
+        let mut process_path = |relative_path: String| {
+            if scan_error.is_some() {
+                return;
+            }
+            if let Err(err) = process_scanned_file(
+                &root,
+                &self.config.id,
+                &relative_path,
+                subdirs,
+                ignore_delete,
+                &mut db,
+                &mut cursor,
+                &mut current_local,
+                &mut updates,
+                &mut next_sequence,
+                &mut stats,
+            ) {
+                scan_error = Some(err);
+                return;
+            }
+            if let Err(err) = flush_scan_updates_if_full(&self.config.id, &mut db, &mut updates) {
+                scan_error = Some(err);
+            }
+        };
+
+        for scope in &scopes {
+            if let Some(file_path) = &scope.file {
+                process_path(file_path.clone());
+                continue;
+            }
+            let abs_dir = match &scope.dir {
+                Some(path) => path,
+                None => continue,
+            };
+            walk_deterministic(abs_dir, &walk_cfg, |relative_from_scope| {
+                if scope.prefix.is_empty() {
+                    process_path(relative_from_scope);
+                } else {
+                    process_path(format!("{}/{}", scope.prefix, relative_from_scope));
+                }
+            })
+            .map_err(|e| format!("walk {}: {e}", abs_dir.display()))?;
+        }
+        if let Some(err) = scan_error {
+            return Err(err);
+        }
+
+        while let Some(existing) = current_local.clone() {
+            if !path_in_scopes(&existing.path, subdirs) {
+                current_local = cursor.next(&db, &self.config.id, LOCAL_DEVICE_ID)?;
+                continue;
+            }
+            if !ignore_delete {
+                queue_deleted_file(&existing, &mut updates, &mut next_sequence);
+                stats.files_deleted = stats.files_deleted.saturating_add(1);
+            }
+            current_local = cursor.next(&db, &self.config.id, LOCAL_DEVICE_ID)?;
+            flush_scan_updates_if_full(&self.config.id, &mut db, &mut updates)?;
+        }
+        flush_scan_updates(&self.config.id, &mut db, &mut updates)?;
+
+        Ok(stats)
+    }
+
     pub(crate) fn scanTimerFired(&mut self) {
-        self.handleForcedRescans(&self.forcedRescanPaths.iter().cloned().collect::<Vec<_>>());
-        self.scanScheduled = false;
+        let forced = self.forcedRescanPaths.iter().cloned().collect::<Vec<_>>();
+        self.Scan(&forced);
     }
 
     pub(crate) fn scheduleWatchRestart(&mut self) {
@@ -495,6 +788,253 @@ impl folder {
         }
         cleaned
     }
+}
+
+fn normalize_scan_subdirs(subdirs: &[String]) -> Vec<String> {
+    if subdirs.is_empty() {
+        return Vec::new();
+    }
+    let mut raw = unifySubs(subdirs);
+    if raw.iter().any(|s| s.is_empty() || s == ".") {
+        return Vec::new();
+    }
+    raw.sort_by(|a, b| compare_path_order(a, b));
+
+    let mut collapsed = Vec::new();
+    for sub in raw {
+        if collapsed
+            .iter()
+            .any(|base: &String| sub == *base || sub.starts_with(&format!("{base}/")))
+        {
+            continue;
+        }
+        collapsed.push(sub);
+    }
+    collapsed
+}
+
+fn resolve_scan_scopes(root: &Path, subdirs: &[String]) -> Result<Vec<ScanScope>, String> {
+    if subdirs.is_empty() {
+        return Ok(vec![ScanScope {
+            prefix: String::new(),
+            dir: Some(root.to_path_buf()),
+            file: None,
+        }]);
+    }
+
+    let mut scopes = Vec::new();
+    for sub in subdirs {
+        let abs = root.join(sub);
+        match fs::metadata(&abs) {
+            Ok(meta) if meta.is_dir() => scopes.push(ScanScope {
+                prefix: sub.clone(),
+                dir: Some(abs),
+                file: None,
+            }),
+            Ok(meta) if meta.is_file() => scopes.push(ScanScope {
+                prefix: sub.clone(),
+                dir: None,
+                file: Some(sub.clone()),
+            }),
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => scopes.push(ScanScope {
+                prefix: sub.clone(),
+                dir: None,
+                file: None,
+            }),
+            Err(err) => {
+                return Err(format!("stat {}: {err}", abs.display()));
+            }
+        }
+    }
+    scopes.sort_by(|a, b| compare_path_order(&a.prefix, &b.prefix));
+    Ok(scopes)
+}
+
+fn path_in_scopes(path: &str, subdirs: &[String]) -> bool {
+    if subdirs.is_empty() {
+        return true;
+    }
+    let normalized = path.trim_matches('/');
+    subdirs.iter().any(|sub| {
+        let base = sub.trim_matches('/');
+        normalized == base || normalized.starts_with(&format!("{base}/"))
+    })
+}
+
+fn should_skip_scan_path(path: &str) -> bool {
+    path.starts_with(".stfolder/")
+        || path == ".stfolder"
+        || path.starts_with(".syncthing.")
+        || path.ends_with("/.DS_Store")
+        || path.ends_with(".tmp")
+}
+
+fn process_scanned_file(
+    root: &Path,
+    folder_id: &str,
+    relative_path: &str,
+    scoped_subdirs: &[String],
+    ignore_delete: bool,
+    db: &mut db::WalFreeDb,
+    cursor: &mut LocalFileCursor,
+    current_local: &mut Option<db::FileInfo>,
+    updates: &mut Vec<db::FileInfo>,
+    next_sequence: &mut i64,
+    stats: &mut ScanExecutionStats,
+) -> Result<(), String> {
+    let relative_path = relative_path.trim_matches('/').to_string();
+    if relative_path.is_empty() || should_skip_scan_path(&relative_path) {
+        return Ok(());
+    }
+
+    while let Some(existing) = current_local.clone() {
+        if !path_in_scopes(&existing.path, scoped_subdirs) {
+            *current_local = cursor.next(db, folder_id, LOCAL_DEVICE_ID)?;
+            continue;
+        }
+        match compare_path_order(&existing.path, &relative_path) {
+            std::cmp::Ordering::Less => {
+                if !ignore_delete {
+                    queue_deleted_file(&existing, updates, next_sequence);
+                    stats.files_deleted = stats.files_deleted.saturating_add(1);
+                }
+                *current_local = cursor.next(db, folder_id, LOCAL_DEVICE_ID)?;
+            }
+            std::cmp::Ordering::Equal | std::cmp::Ordering::Greater => break,
+        }
+    }
+
+    let abs = root.join(&relative_path);
+    let metadata = fs::symlink_metadata(&abs)
+        .map_err(|e| format!("stat {}: {e}", abs.display()))?;
+    if !metadata.is_file() {
+        return Ok(());
+    }
+    stats.files_seen = stats.files_seen.saturating_add(1);
+
+    let modified_ns = file_modified_ns(&metadata).map_err(|e| format!("mtime {}: {e}", abs.display()))?;
+    let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
+
+    if let Some(existing) = current_local.clone() {
+        if existing.path == relative_path
+            && !existing.deleted
+            && !existing.ignored
+            && existing.file_type == db::FileInfoType::File
+            && existing.modified_ns == modified_ns
+            && existing.size == size
+        {
+            *current_local = cursor.next(db, folder_id, LOCAL_DEVICE_ID)?;
+            return Ok(());
+        }
+    }
+
+    let block_hashes = hash_file_blocks(&abs)?;
+    let new_path = relative_path.clone();
+    let new_file = db::FileInfo {
+        folder: folder_id.to_string(),
+        path: new_path.clone(),
+        sequence: *next_sequence,
+        modified_ns,
+        size,
+        deleted: false,
+        ignored: false,
+        local_flags: 0,
+        file_type: db::FileInfoType::File,
+        block_hashes,
+    };
+    *next_sequence = next_sequence.saturating_add(1);
+    stats.files_updated = stats.files_updated.saturating_add(1);
+    updates.push(new_file);
+
+    if let Some(existing) = current_local.clone() {
+        if existing.path == new_path {
+            *current_local = cursor.next(db, folder_id, LOCAL_DEVICE_ID)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn flush_scan_updates_if_full(
+    folder_id: &str,
+    db: &mut db::WalFreeDb,
+    updates: &mut Vec<db::FileInfo>,
+) -> Result<(), String> {
+    if updates.len() < SCAN_DB_BATCH_SIZE {
+        return Ok(());
+    }
+    flush_scan_updates(folder_id, db, updates)
+}
+
+fn flush_scan_updates(
+    folder_id: &str,
+    db: &mut db::WalFreeDb,
+    updates: &mut Vec<db::FileInfo>,
+) -> Result<(), String> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let batch = std::mem::take(updates);
+    db.update(folder_id, LOCAL_DEVICE_ID, batch)
+        .map_err(|e| format!("persist scan batch: {e}"))
+}
+
+fn queue_deleted_file(
+    existing: &db::FileInfo,
+    updates: &mut Vec<db::FileInfo>,
+    next_sequence: &mut i64,
+) {
+    if existing.deleted {
+        return;
+    }
+    let mut deleted = existing.clone();
+    deleted.deleted = true;
+    deleted.ignored = false;
+    deleted.sequence = *next_sequence;
+    deleted.block_hashes.clear();
+    deleted.local_flags = 0;
+    *next_sequence = next_sequence.saturating_add(1);
+    updates.push(deleted);
+}
+
+fn file_modified_ns(metadata: &fs::Metadata) -> Result<i64, String> {
+    let modified = metadata
+        .modified()
+        .map_err(|e| e.to_string())?
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?;
+    i64::try_from(modified.as_nanos()).map_err(|_| "mtime overflow".to_string())
+}
+
+fn hash_file_blocks(path: &Path) -> Result<Vec<String>, String> {
+    let mut file = File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let mut buf = vec![0_u8; BLOCK_CHUNK_SIZE];
+    let mut hashes = Vec::new();
+    loop {
+        let read = file
+            .read(&mut buf)
+            .map_err(|e| format!("read {}: {e}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        let mut hasher = Hasher::new();
+        hasher.update(&buf[..read]);
+        hashes.push(format!("{:08x}", hasher.finalize()));
+    }
+    Ok(hashes)
+}
+
+fn count_same_path_reuse_blocks(local_prev: &db::FileInfo, target: &db::FileInfo) -> usize {
+    let mut reused = 0_usize;
+    for (idx, wanted) in target.block_hashes.iter().enumerate() {
+        if let Some(existing) = local_prev.block_hashes.get(idx) {
+            if existing == wanted {
+                reused += 1;
+            }
+        }
+    }
+    reused
 }
 
 #[derive(Clone, Debug, Default)]
@@ -888,6 +1428,45 @@ enum FlagMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_root(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        path.push(format!(
+            "syncthing-rs-folder-core-{name}-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).expect("create temp root");
+        path
+    }
+
+    fn file(path: &str, seq: i64, hashes: &[&str]) -> db::FileInfo {
+        db::FileInfo {
+            folder: "default".to_string(),
+            path: path.to_string(),
+            sequence: seq,
+            modified_ns: seq,
+            size: 1,
+            deleted: false,
+            ignored: false,
+            local_flags: 0,
+            file_type: db::FileInfoType::File,
+            block_hashes: hashes.iter().map(|h| (*h).to_string()).collect(),
+        }
+    }
+
+    fn scan_cfg(root: &Path) -> FolderConfiguration {
+        let mut cfg = FolderConfiguration::default();
+        cfg.id = "default".to_string();
+        cfg.path = root.to_string_lossy().to_string();
+        cfg
+    }
 
     #[test]
     fn scan_batch_flushes() {
@@ -911,5 +1490,141 @@ mod tests {
     fn conflict_helpers_detect_conflicts() {
         let p = conflictName("x.txt");
         assert!(isConflict(&p));
+    }
+
+    #[test]
+    fn pull_reuses_blocks_from_same_path_only() {
+        let root = temp_root("same-path-reuse");
+        let mut dbv = db::WalFreeDb::open_runtime(&root, 50).expect("open runtime db");
+        dbv.update(
+            "default",
+            "local",
+            vec![
+                file("same.txt", 1, &["h1", "hx", "h3"]),
+                file("other.txt", 1, &["h2"]),
+            ],
+        )
+        .expect("update local");
+        dbv.update(
+            "default",
+            "remote",
+            vec![file("same.txt", 2, &["h1", "h2", "h3"])],
+        )
+        .expect("update remote");
+
+        let db = Arc::new(Mutex::new(dbv));
+        let mut cfg = FolderConfiguration::default();
+        cfg.id = "default".to_string();
+        cfg.path = root.to_string_lossy().to_string();
+        let mut f = newFolder(cfg, db);
+        let pulled = f.pull().expect("pull");
+        let stats = f.PullStats();
+
+        assert_eq!(pulled, 1);
+        assert_eq!(stats.needed_files, 1);
+        assert_eq!(stats.total_blocks, 3);
+        assert_eq!(stats.reused_same_path_blocks, 2);
+        assert_eq!(stats.fetched_blocks, 1);
+        assert!(!stats.hard_blocked);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pull_hard_blocks_when_fail_policy_exceeds_cap() {
+        let root = temp_root("fail-policy");
+        let mut dbv = db::WalFreeDb::open_runtime(&root, 0).expect("open runtime db");
+        dbv.update(
+            "default",
+            "local",
+            vec![file("same.txt", 1, &["h1"])],
+        )
+        .expect("update local");
+        dbv.update(
+            "default",
+            "remote",
+            vec![file("same.txt", 2, &["h1", "h2"])],
+        )
+        .expect("update remote");
+
+        let db = Arc::new(Mutex::new(dbv));
+        let mut cfg = FolderConfiguration::default();
+        cfg.id = "default".to_string();
+        cfg.path = root.to_string_lossy().to_string();
+        cfg.memory_policy = MemoryPolicy::Fail;
+        let mut f = newFolder(cfg, db);
+
+        let err = f.pull().expect_err("must block on hard cap");
+        assert!(err.contains("memory cap exceeded"));
+        assert_eq!(f.memoryHardBlockEvents, 1);
+        assert!(f.PullStats().hard_blocked);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scan_persists_files_in_segment_path_order() {
+        let root = temp_root("scan-order");
+        fs::create_dir_all(root.join("a")).expect("mkdir a");
+        fs::create_dir_all(root.join("a.d")).expect("mkdir a.d");
+        fs::write(root.join("a").join("x.txt"), b"x").expect("write");
+        fs::write(root.join("a").join("z.txt"), b"z").expect("write");
+        fs::write(root.join("a.d").join("x.txt"), b"x").expect("write");
+        fs::write(root.join("b.txt"), b"b").expect("write");
+
+        let db_root = temp_root("scan-order-db");
+        let db = Arc::new(Mutex::new(
+            db::WalFreeDb::open_runtime(&db_root, 50).expect("open runtime db"),
+        ));
+        let mut f = newFolder(scan_cfg(&root), db.clone());
+        f.Scan(&[]);
+
+        let ordered = db
+            .lock()
+            .expect("db lock")
+            .all_local_files_ordered("default", "local")
+            .expect("all local ordered")
+            .into_iter()
+            .map(|fi| fi.path)
+            .collect::<Vec<_>>();
+        assert_eq!(ordered, vec!["a/x.txt", "a/z.txt", "a.d/x.txt", "b.txt"]);
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(db_root);
+    }
+
+    #[test]
+    fn scoped_scan_deletes_only_within_target_subdir() {
+        let root = temp_root("scan-scope");
+        fs::create_dir_all(root.join("foo")).expect("mkdir foo");
+        fs::create_dir_all(root.join("bar")).expect("mkdir bar");
+        fs::write(root.join("foo").join("a.txt"), b"a").expect("write foo/a");
+        fs::write(root.join("bar").join("b.txt"), b"b").expect("write bar/b");
+
+        let db_root = temp_root("scan-scope-db");
+        let db = Arc::new(Mutex::new(
+            db::WalFreeDb::open_runtime(&db_root, 50).expect("open runtime db"),
+        ));
+        let mut f = newFolder(scan_cfg(&root), db.clone());
+        f.Scan(&[]);
+
+        fs::remove_file(root.join("foo").join("a.txt")).expect("remove foo/a");
+        f.Scan(&[String::from("foo")]);
+
+        let guard = db.lock().expect("db lock");
+        let foo = guard
+            .get_device_file("default", "local", "foo/a.txt")
+            .expect("lookup foo")
+            .expect("foo record");
+        let bar = guard
+            .get_device_file("default", "local", "bar/b.txt")
+            .expect("lookup bar")
+            .expect("bar record");
+
+        assert!(foo.deleted);
+        assert!(!bar.deleted);
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(db_root);
     }
 }

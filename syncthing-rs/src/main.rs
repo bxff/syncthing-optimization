@@ -11,6 +11,7 @@ mod planner;
 mod protocol;
 mod scenarios;
 mod store;
+mod walker;
 
 use scenarios::{run_scenario_snapshot, scenario_ids};
 use std::process;

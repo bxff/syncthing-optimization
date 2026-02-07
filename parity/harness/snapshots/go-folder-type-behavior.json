@@ -57,6 +57,6 @@
     }
   },
   "scenario": "folder-type-behavior",
-  "source": "rust",
+  "source": "go",
   "status": "prototype"
 }

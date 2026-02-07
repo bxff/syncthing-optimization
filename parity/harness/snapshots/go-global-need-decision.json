@@ -5,7 +5,7 @@
     "d.txt"
   ],
   "scenario": "global-need-decision",
-  "source": "rust",
+  "source": "go",
   "stale_delete_count": 1,
   "stale_deletes": [
     "e.txt"

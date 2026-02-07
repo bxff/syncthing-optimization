@@ -155,6 +155,12 @@ func run(args []string) {
 
 		goSnap, goErr := loadSideSnapshot(sc.Go, defaultTimeout)
 		rustSnap, rustErr := loadSideSnapshot(sc.Rust, defaultTimeout)
+		if goErr == nil {
+			goErr = validateScenarioSnapshot(sc.ID, "go", goSnap)
+		}
+		if rustErr == nil {
+			rustErr = validateScenarioSnapshot(sc.ID, "rust", rustSnap)
+		}
 
 		outcome := scenarioOutcome{ID: sc.ID, Severity: severity, Required: sc.Required}
 
@@ -257,6 +263,49 @@ func run(args []string) {
 	if !report.Match {
 		os.Exit(1)
 	}
+}
+
+func validateScenarioSnapshot(expectedID, expectedSource string, snap map[string]any) error {
+	getString := func(key string) (string, error) {
+		raw, ok := snap[key]
+		if !ok {
+			return "", fmt.Errorf("scenario payload missing %q", key)
+		}
+		str, ok := raw.(string)
+		if !ok {
+			return "", fmt.Errorf("scenario payload %q must be string", key)
+		}
+		str = strings.TrimSpace(str)
+		if str == "" {
+			return "", fmt.Errorf("scenario payload %q must not be empty", key)
+		}
+		return str, nil
+	}
+
+	id, err := getString("scenario")
+	if err != nil {
+		return err
+	}
+	if id != expectedID {
+		return fmt.Errorf("scenario id mismatch: expected %q got %q", expectedID, id)
+	}
+
+	source, err := getString("source")
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(source, expectedSource) {
+		return fmt.Errorf("scenario source mismatch: expected %q got %q", expectedSource, source)
+	}
+
+	status, err := getString("status")
+	if err != nil {
+		return err
+	}
+	if strings.EqualFold(status, "prototype") {
+		return errors.New("scenario status=prototype is not allowed for parity gating")
+	}
+	return nil
 }
 
 func readConfig(path string) (harnessConfig, error) {

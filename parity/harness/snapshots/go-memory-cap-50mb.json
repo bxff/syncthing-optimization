@@ -5,7 +5,7 @@
   "page_count": 10,
   "scanned_entries": 10000,
   "scenario": "memory-cap-50mb",
-  "source": "rust",
+  "source": "go",
   "status": "prototype",
   "under_budget": true
 }

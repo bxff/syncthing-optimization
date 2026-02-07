@@ -26,6 +26,6 @@
   "prefix_a_count": 1,
   "rejected_updates": 3,
   "scenario": "index-sequence-behavior",
-  "source": "rust",
+  "source": "go",
   "status": "prototype"
 }

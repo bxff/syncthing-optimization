@@ -298,6 +298,10 @@ pub(crate) struct model {
 
 impl Default for model {
     fn default() -> Self {
+        let db_root = runtime_db_root();
+        let db_memory_cap_mb = runtime_db_memory_cap_mb();
+        let sdb = db::WalFreeDb::open_runtime(&db_root, db_memory_cap_mb)
+            .unwrap_or_else(|err| panic!("failed to open runtime db at {}: {err}", db_root.display()));
         Self {
             id: "local-device".to_string(),
             shortID: "local".to_string(),
@@ -329,11 +333,32 @@ impl Default for model {
             indexHandlers: BTreeMap::new(),
             globalRequestLimiter: 4,
             mut_count: 0,
-            sdb: Arc::new(Mutex::new(db::WalFreeDb::default())),
+            sdb: Arc::new(Mutex::new(sdb)),
             evLogger: Vec::new(),
             fatalChan: None,
         }
     }
+}
+
+fn runtime_db_root() -> PathBuf {
+    if let Ok(path) = std::env::var("SYNCTHING_RS_DB_ROOT") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    let mut root = std::env::temp_dir();
+    root.push("syncthing-rs-db");
+    root
+}
+
+fn runtime_db_memory_cap_mb() -> usize {
+    const DEFAULT_MB: usize = 50;
+    std::env::var("SYNCTHING_RS_MEMORY_MAX_MB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_MB)
 }
 
 impl Model for model {
@@ -395,11 +420,46 @@ impl model {
 
     pub(crate) fn FolderStatistics(&self, folder_id: &str) -> BTreeMap<String, Value> {
         let c = self.folderCompletion(folder_id);
-        BTreeMap::from([
+        let mut out = BTreeMap::from([
             ("completionPct".to_string(), Value::from(c.CompletionPct)),
             ("needItems".to_string(), Value::from(c.NeedItems)),
             ("needBytes".to_string(), Value::from(c.NeedBytes)),
-        ])
+        ]);
+        if let Some(runner) = self.folderRunners.get(folder_id) {
+            let telemetry = runner.MemoryTelemetry();
+            out.insert(
+                "memoryEstimatedBytes".to_string(),
+                Value::from(telemetry.estimated_bytes as u64),
+            );
+            out.insert(
+                "memoryBudgetBytes".to_string(),
+                Value::from(telemetry.budget_bytes as u64),
+            );
+            out.insert(
+                "memorySoftLimitBytes".to_string(),
+                Value::from(telemetry.soft_limit_bytes as u64),
+            );
+            out.insert(
+                "memoryThrottleEvents".to_string(),
+                Value::from(telemetry.throttle_events as u64),
+            );
+            out.insert(
+                "memoryHardBlockEvents".to_string(),
+                Value::from(telemetry.hard_block_events as u64),
+            );
+            out.insert(
+                "memoryPullThrottled".to_string(),
+                Value::from(telemetry.pull_throttled),
+            );
+            out.insert(
+                "memoryPullHardBlocked".to_string(),
+                Value::from(telemetry.pull_hard_blocked),
+            );
+            if let Some(last) = telemetry.last_cap_violation {
+                out.insert("memoryLastCapViolation".to_string(), Value::from(last));
+            }
+        }
+        out
     }
 
     pub(crate) fn Completion(&self, folder_id: &str, _device: &str) -> FolderCompletion {
@@ -582,7 +642,7 @@ impl model {
         self.folderRunners
             .get_mut(folder_id)
             .ok_or_else(|| ErrFolderMissing.to_string())?
-            .ScheduleScan();
+            .Scan(&[]);
         Ok(())
     }
 
@@ -590,7 +650,7 @@ impl model {
         self.folderRunners
             .get_mut(folder_id)
             .ok_or_else(|| ErrFolderMissing.to_string())?
-            .ScheduleForceRescan(subs);
+            .Scan(subs);
         Ok(())
     }
 
@@ -1167,6 +1227,9 @@ mod tests {
         let cfg = newFolderConfiguration("default", "/tmp/default");
         m.newFolder(cfg);
         assert_eq!(m.State("default"), "running");
+        let stats = m.FolderStatistics("default");
+        assert!(stats.contains_key("memoryEstimatedBytes"));
+        assert!(stats.contains_key("memoryBudgetBytes"));
         m.removeFolder("default");
         assert_eq!(m.State("default"), "idle");
     }

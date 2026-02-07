@@ -185,12 +185,15 @@ type harnessScenarioFile struct {
 }
 
 type harnessScenario struct {
-	ID string `json:"id"`
+	ID       string `json:"id"`
+	Required bool   `json:"required"`
 }
 
 type requiredTestEvidence struct {
-	ScenarioIDs     map[string]struct{}
-	ScenarioOutcome map[string]string
+	ScenarioIDs         map[string]struct{}
+	RequiredScenarioIDs map[string]struct{}
+	ScenarioOutcome     map[string]string
+	ScenarioRefs        map[string]int
 }
 
 type dashboardJSON struct {
@@ -426,12 +429,14 @@ func runCheck(args []string) {
 			}
 		case "implemented":
 			report.Summary.Implemented++
-			validateImplementedLike(&report, feat, mi, testEvidence)
+			validateImplementedLike(&report, feat, mi, &testEvidence)
 		case "parity-verified":
 			report.Summary.ParityVerified++
-			validateImplementedLike(&report, feat, mi, testEvidence)
+			validateImplementedLike(&report, feat, mi, &testEvidence)
 		}
 	}
+
+	validateRequiredScenarioCoverage(&report, testEvidence)
 
 	report.Summary.TotalFeatures = len(manifest.Items)
 
@@ -847,8 +852,10 @@ func loadOrInitExceptions(path string) exceptionsFile {
 
 func loadRequiredTestEvidence(report *guardrailReport) requiredTestEvidence {
 	ev := requiredTestEvidence{
-		ScenarioIDs:     make(map[string]struct{}),
-		ScenarioOutcome: make(map[string]string),
+		ScenarioIDs:         make(map[string]struct{}),
+		RequiredScenarioIDs: make(map[string]struct{}),
+		ScenarioOutcome:     make(map[string]string),
+		ScenarioRefs:        make(map[string]int),
 	}
 
 	cfg := harnessScenarioFile{}
@@ -880,6 +887,9 @@ func loadRequiredTestEvidence(report *guardrailReport) requiredTestEvidence {
 			continue
 		}
 		ev.ScenarioIDs[id] = struct{}{}
+		if sc.Required {
+			ev.RequiredScenarioIDs[id] = struct{}{}
+		}
 	}
 
 	latest := differentialReport{}
@@ -901,7 +911,7 @@ func loadRequiredTestEvidence(report *guardrailReport) requiredTestEvidence {
 	return ev
 }
 
-func validateImplementedLike(report *guardrailReport, feat featureItem, mi mappingItem, ev requiredTestEvidence) {
+func validateImplementedLike(report *guardrailReport, feat featureItem, mi mappingItem, ev *requiredTestEvidence) {
 	if strings.TrimSpace(mi.RustComponent) == "" {
 		report.Failures = append(report.Failures, reportFailure{
 			Rule:    "mapping-rust-component",
@@ -959,6 +969,7 @@ func validateImplementedLike(report *guardrailReport, feat featureItem, mi mappi
 			})
 			continue
 		}
+		ev.ScenarioRefs[scenarioID]++
 		if mi.Status == "parity-verified" {
 			status := strings.ToLower(strings.TrimSpace(ev.ScenarioOutcome[scenarioID]))
 			if status != "pass" {
@@ -975,6 +986,24 @@ func validateImplementedLike(report *guardrailReport, feat featureItem, mi mappi
 			Rule:    "mapping-required-tests",
 			ID:      mi.ID,
 			Message: fmt.Sprintf("feature %s (%s) must include at least one scenario/<id> required_test", feat.Symbol, feat.Source),
+		})
+	}
+}
+
+func validateRequiredScenarioCoverage(report *guardrailReport, ev requiredTestEvidence) {
+	ids := make([]string, 0, len(ev.RequiredScenarioIDs))
+	for id := range ev.RequiredScenarioIDs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if ev.ScenarioRefs[id] > 0 {
+			continue
+		}
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "required-scenario-unmapped",
+			Path:    "parity/harness/scenarios.json",
+			Message: fmt.Sprintf("required scenario %q is not referenced by any feature required_tests", id),
 		})
 	}
 }

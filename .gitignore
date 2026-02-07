@@ -20,4 +20,5 @@ deb
 /compat.json
 benchmark-results
 /syncthing-rs/target
+/syncthing-rs/.syncthing-rs-db/
 /.gocache

@@ -316,7 +316,7 @@ fn scenario_wal_free_durability() -> Result<Value, String> {
             .upsert_file(meta("default", "tmp-delete.txt", 3, false, 300, vec!["h3"]))
             .map_err(err_to_string)?;
         store
-            .delete_file("default", "tmp-delete.txt")
+            .delete_file("default", "local", "tmp-delete.txt")
             .map_err(err_to_string)?;
         store.compact().map_err(err_to_string)?;
     }
@@ -366,7 +366,7 @@ fn scenario_crash_recovery() -> Result<Value, String> {
     }
 
     let recovered = Store::open(StoreConfig::new(&root)).map_err(err_to_string)?;
-    let a_present = recovered.get_file("default", "a.txt").is_some();
+    let a_present = recovered.get_file("default", "local", "a.txt").is_some();
     let out = json!({
         "scenario": "crash-recovery",
         "source": "rust",
@@ -412,9 +412,13 @@ fn meta(
 ) -> FileMetadata {
     FileMetadata {
         folder: folder.to_string(),
+        device: "local".to_string(),
         path: path.to_string(),
         sequence,
         deleted,
+        ignored: false,
+        local_flags: 0,
+        file_type: "file".to_string(),
         modified_ns,
         size: 0,
         block_hashes: block_hashes.into_iter().map(str::to_string).collect(),

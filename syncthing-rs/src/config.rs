@@ -60,6 +60,14 @@ pub(crate) enum CopyRangeMethod {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MemoryPolicy {
+    Throttle,
+    Fail,
+    BestEffort,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum FilesystemType {
     Basic,
@@ -151,6 +159,14 @@ pub(crate) struct FolderConfiguration {
     pub(crate) scan_progress_interval_s: i32,
     pub(crate) puller_pause_s: i32,
     pub(crate) puller_delay_s: f64,
+    #[serde(default = "default_memory_max_mb")]
+    pub(crate) memory_max_mb: i32,
+    #[serde(default = "default_memory_policy")]
+    pub(crate) memory_policy: MemoryPolicy,
+    #[serde(default = "default_memory_soft_percent")]
+    pub(crate) memory_soft_percent: i32,
+    #[serde(default = "default_memory_telemetry_interval_s")]
+    pub(crate) memory_telemetry_interval_s: i32,
     pub(crate) max_conflicts: i32,
     pub(crate) disable_sparse_files: bool,
     pub(crate) paused: bool,
@@ -198,6 +214,10 @@ impl Default for FolderConfiguration {
             scan_progress_interval_s: 0,
             puller_pause_s: 0,
             puller_delay_s: 1.0,
+            memory_max_mb: default_memory_max_mb(),
+            memory_policy: default_memory_policy(),
+            memory_soft_percent: default_memory_soft_percent(),
+            memory_telemetry_interval_s: default_memory_telemetry_interval_s(),
             max_conflicts: 10,
             disable_sparse_files: false,
             paused: false,
@@ -259,6 +279,24 @@ impl FolderConfiguration {
             return Err(format!(
                 "folder {} max_conflicts must be >= -1 (got {})",
                 self.id, self.max_conflicts
+            ));
+        }
+        if self.memory_max_mb <= 0 {
+            return Err(format!(
+                "folder {} memory_max_mb must be > 0 (got {})",
+                self.id, self.memory_max_mb
+            ));
+        }
+        if !(1..=99).contains(&self.memory_soft_percent) {
+            return Err(format!(
+                "folder {} memory_soft_percent must be between 1 and 99 (got {})",
+                self.id, self.memory_soft_percent
+            ));
+        }
+        if self.memory_telemetry_interval_s <= 0 {
+            return Err(format!(
+                "folder {} memory_telemetry_interval_s must be > 0 (got {})",
+                self.id, self.memory_telemetry_interval_s
             ));
         }
         if self.folder_type == FolderType::ReceiveEncrypted && !self.ignore_perms {
@@ -365,7 +403,13 @@ impl FolderConfiguration {
             "folder": {
                 "id": self.id,
                 "label": self.label,
-                "type": self.folder_type.as_str()
+                "type": self.folder_type.as_str(),
+                "memory": {
+                    "max_mb": self.memory_max_mb,
+                    "policy": format!("{:?}", self.memory_policy).to_lowercase(),
+                    "soft_percent": self.memory_soft_percent,
+                    "telemetry_interval_s": self.memory_telemetry_interval_s
+                }
             }
         })
     }
@@ -414,6 +458,15 @@ impl FolderConfiguration {
             self.max_concurrent_writes = MAX_CONCURRENT_WRITES_DEFAULT as i32;
         } else if self.max_concurrent_writes > MAX_CONCURRENT_WRITES_LIMIT as i32 {
             self.max_concurrent_writes = MAX_CONCURRENT_WRITES_LIMIT as i32;
+        }
+        if self.memory_max_mb <= 0 {
+            self.memory_max_mb = default_memory_max_mb();
+        }
+        if !(1..=99).contains(&self.memory_soft_percent) {
+            self.memory_soft_percent = default_memory_soft_percent();
+        }
+        if self.memory_telemetry_interval_s <= 0 {
+            self.memory_telemetry_interval_s = default_memory_telemetry_interval_s();
         }
         if self.folder_type == FolderType::ReceiveEncrypted {
             self.ignore_perms = true;
@@ -541,6 +594,22 @@ fn wildcard_match(pattern: &str, value: &str) -> bool {
         }
     }
     true
+}
+
+fn default_memory_max_mb() -> i32 {
+    50
+}
+
+fn default_memory_policy() -> MemoryPolicy {
+    MemoryPolicy::Throttle
+}
+
+fn default_memory_soft_percent() -> i32 {
+    85
+}
+
+fn default_memory_telemetry_interval_s() -> i32 {
+    5
 }
 
 #[cfg(test)]
@@ -685,5 +754,24 @@ mod tests {
         .expect("xml parse");
         assert_eq!(xml_cfg.id, "fx");
         assert_eq!(xml_cfg.folder_type, FolderType::ReceiveOnly);
+    }
+
+    #[test]
+    fn memory_profile_defaults_and_prepare_clamps_invalid_values() {
+        let mut cfg = FolderConfiguration::default();
+        cfg.id = "m1".to_string();
+        cfg.path = "/tmp/m1".to_string();
+        cfg.memory_max_mb = -10;
+        cfg.memory_soft_percent = 0;
+        cfg.memory_telemetry_interval_s = -1;
+        cfg.max_conflicts = 1;
+
+        cfg.prepare("local-device", &[]);
+
+        assert_eq!(cfg.memory_max_mb, 50);
+        assert_eq!(cfg.memory_policy, MemoryPolicy::Throttle);
+        assert_eq!(cfg.memory_soft_percent, 85);
+        assert_eq!(cfg.memory_telemetry_interval_s, 5);
+        assert!(cfg.validate().is_ok());
     }
 }

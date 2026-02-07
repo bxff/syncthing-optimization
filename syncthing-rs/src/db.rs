@@ -1,4 +1,7 @@
+use crate::store::{FileMetadata as StoreFileMetadata, Store, StoreConfig};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) type DeviceId = String;
 pub(crate) type IndexId = u64;
@@ -93,6 +96,12 @@ pub(crate) struct BlockMapEntry {
 pub(crate) struct KeyValue {
     pub(crate) key: String,
     pub(crate) value: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LocalFilePage {
+    pub(crate) items: Vec<FileInfo>,
+    pub(crate) next_cursor: Option<String>,
 }
 
 pub(crate) trait Kv {
@@ -213,16 +222,88 @@ impl Kv for WalFreeDb {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub(crate) struct WalFreeDb {
-    device_files: BTreeMap<(String, DeviceId, String), FileInfo>,
+    store: Store,
+    runtime_root: PathBuf,
     index_ids: BTreeMap<(String, DeviceId), IndexId>,
     mtimes: BTreeMap<(String, String), (i64, i64)>,
     kv: BTreeMap<String, Vec<u8>>,
     closed: bool,
 }
 
+impl Default for WalFreeDb {
+    fn default() -> Self {
+        Self::open_default_runtime().expect("open default wal-free runtime store")
+    }
+}
+
 impl WalFreeDb {
+    pub(crate) fn open(config: StoreConfig) -> Result<Self, String> {
+        let root = config.root.clone();
+        let store = Store::open(config).map_err(|e| format!("open wal-free store: {e}"))?;
+        Ok(Self {
+            store,
+            runtime_root: root,
+            index_ids: BTreeMap::new(),
+            mtimes: BTreeMap::new(),
+            kv: BTreeMap::new(),
+            closed: false,
+        })
+    }
+
+    pub(crate) fn open_runtime(root: impl Into<PathBuf>, memory_cap_mb: usize) -> Result<Self, String> {
+        let config = StoreConfig::new(root).with_memory_cap_mb(memory_cap_mb);
+        Self::open(config)
+    }
+
+    pub(crate) fn runtime_root(&self) -> &PathBuf {
+        &self.runtime_root
+    }
+
+    pub(crate) fn estimated_memory_bytes(&self) -> usize {
+        self.store.stats().estimated_memory_bytes
+    }
+
+    pub(crate) fn memory_budget_bytes(&self) -> usize {
+        self.store.stats().memory_budget_bytes
+    }
+
+    pub(crate) fn all_local_files_ordered_page(
+        &self,
+        folder: &str,
+        device: &str,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> Result<LocalFilePage, String> {
+        self.ensure_open()?;
+        let page = self
+            .store
+            .files_in_folder_device_ordered_page(folder, device, start_after, limit);
+        Ok(LocalFilePage {
+            items: page
+                .items
+                .into_iter()
+                .map(|meta| store_to_file_info(&meta))
+                .collect(),
+            next_cursor: page.next_cursor.map(|cursor| cursor.path),
+        })
+    }
+
+    fn open_default_runtime() -> Result<Self, String> {
+        let mut root = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| format!("clock error: {e}"))?
+            .as_nanos();
+        root.push(format!(
+            "syncthing-rs-runtime-db-{}-{nanos}",
+            std::process::id()
+        ));
+        let config = StoreConfig::new(&root).with_memory_cap_mb(50);
+        Self::open(config)
+    }
+
     fn ensure_open(&self) -> Result<(), String> {
         if self.closed {
             return Err("database is closed".to_string());
@@ -230,16 +311,41 @@ impl WalFreeDb {
         Ok(())
     }
 
+    fn all_records(&self) -> Vec<StoredRecord> {
+        self.store
+            .all_files_lexicographic()
+            .into_iter()
+            .map(store_to_record)
+            .collect()
+    }
+
+    fn all_files(&self) -> Vec<FileInfo> {
+        self.all_records().into_iter().map(|r| r.file).collect()
+    }
+
+    fn all_files_for_folder_device(&self, folder: &str, device: &str) -> Vec<FileInfo> {
+        self.all_records()
+            .into_iter()
+            .filter(|r| r.file.folder == folder && r.device == device)
+            .map(|r| r.file)
+            .collect()
+    }
+
     fn global_file_map(&self, folder: &str) -> BTreeMap<String, FileInfo> {
         let mut out: BTreeMap<String, FileInfo> = BTreeMap::new();
-        for ((f, _device, path), candidate) in &self.device_files {
-            if f != folder || candidate.ignored {
+        for candidate in self
+            .all_files()
+            .into_iter()
+            .filter(|f| f.folder == folder && !f.ignored)
+        {
+            let path = candidate.path.clone();
+            if candidate.folder != folder {
                 continue;
             }
-            match out.get(path) {
-                Some(current) if !prefer_global(candidate, current) => {}
+            match out.get(&path) {
+                Some(current) if !prefer_global(&candidate, current) => {}
                 _ => {
-                    out.insert(path.clone(), candidate.clone());
+                    out.insert(path, candidate);
                 }
             }
         }
@@ -248,11 +354,17 @@ impl WalFreeDb {
 
     fn global_availability_map(&self, folder: &str) -> BTreeMap<String, BTreeSet<DeviceId>> {
         let mut out: BTreeMap<String, BTreeSet<DeviceId>> = BTreeMap::new();
-        for ((f, device, path), file) in &self.device_files {
-            if f != folder || file.deleted {
+        for record in self
+            .all_records()
+            .into_iter()
+            .filter(|r| r.file.folder == folder && !r.file.deleted)
+        {
+            if record.file.folder != folder || record.file.deleted {
                 continue;
             }
-            out.entry(path.clone()).or_default().insert(device.clone());
+            out.entry(record.file.path.clone())
+                .or_default()
+                .insert(record.device);
         }
         out
     }
@@ -263,15 +375,19 @@ impl Db for WalFreeDb {
         self.ensure_open()?;
         for mut file in files {
             file.folder = folder.to_string();
-            self.device_files.insert(
-                (folder.to_string(), device.to_string(), file.path.clone()),
-                file,
-            );
+            let encoded = file_info_to_store(folder, device, &file);
+            self.store
+                .upsert_file(encoded)
+                .map_err(|e| format!("persist update: {e}"))?;
         }
         Ok(())
     }
 
     fn close(&mut self) -> Result<(), String> {
+        self.ensure_open()?;
+        self.store
+            .compact()
+            .map_err(|e| format!("compact on close: {e}"))?;
         self.closed = true;
         Ok(())
     }
@@ -284,9 +400,9 @@ impl Db for WalFreeDb {
     ) -> Result<Option<FileInfo>, String> {
         self.ensure_open()?;
         Ok(self
-            .device_files
-            .get(&(folder.to_string(), device.to_string(), file.to_string()))
-            .cloned())
+            .store
+            .get_file(folder, device, file)
+            .map(store_to_file_info))
     }
 
     fn get_global_availability(&self, folder: &str, file: &str) -> Result<Vec<DeviceId>, String> {
@@ -331,19 +447,21 @@ impl Db for WalFreeDb {
 
     fn all_local_files(&self, folder: &str, device: &str) -> Result<Vec<FileInfo>, String> {
         self.ensure_open()?;
-        let mut out = Vec::new();
-        for ((f, d, _), file) in &self.device_files {
-            if f == folder && d == device {
-                out.push(file.clone());
-            }
-        }
-        Ok(out)
+        Ok(self.all_files_for_folder_device(folder, device))
     }
 
     fn all_local_files_ordered(&self, folder: &str, device: &str) -> Result<Vec<FileInfo>, String> {
         self.ensure_open()?;
-        let mut out = self.all_local_files(folder, device)?;
-        out.sort_by(|a, b| a.path.cmp(&b.path));
+        let mut out = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = self.all_local_files_ordered_page(folder, device, cursor.as_deref(), 2048)?;
+            out.extend(page.items);
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
         Ok(out)
     }
 
@@ -363,7 +481,7 @@ impl Db for WalFreeDb {
         out.sort_by(|a, b| {
             a.sequence
                 .cmp(&b.sequence)
-                .then_with(|| a.path.cmp(&b.path))
+                .then_with(|| crate::store::compare_path_order(&a.path, &b.path))
         });
         if limit > 0 && out.len() > limit {
             out.truncate(limit);
@@ -392,15 +510,12 @@ impl Db for WalFreeDb {
     ) -> Result<Vec<FileMetadata>, String> {
         self.ensure_open()?;
         let target = String::from_utf8_lossy(hash).to_string();
-        let mut out = Vec::new();
-        for ((f, _, _), file) in &self.device_files {
-            if f != folder {
-                continue;
-            }
-            if file.block_hashes.iter().any(|h| h == &target) {
-                out.push(file_metadata_from_info(file.clone()));
-            }
-        }
+        let mut out = self
+            .all_files()
+            .into_iter()
+            .filter(|f| f.folder == folder && f.block_hashes.iter().any(|h| h == &target))
+            .map(file_metadata_from_info)
+            .collect::<Vec<_>>();
         out.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(out)
     }
@@ -450,8 +565,8 @@ impl Db for WalFreeDb {
         let target = String::from_utf8_lossy(hash).to_string();
         let mut out = Vec::new();
 
-        for ((f, _device, _path), file) in &self.device_files {
-            if f != folder {
+        for file in self.all_files().into_iter() {
+            if file.folder != folder {
                 continue;
             }
             for (idx, block_hash) in file.block_hashes.iter().enumerate() {
@@ -473,14 +588,32 @@ impl Db for WalFreeDb {
 
     fn drop_all_files(&mut self, folder: &str, device: &str) -> Result<(), String> {
         self.ensure_open()?;
-        self.device_files
-            .retain(|(f, d, _), _| !(f == folder && d == device));
+        let paths = self
+            .all_files_for_folder_device(folder, device)
+            .into_iter()
+            .map(|f| f.path)
+            .collect::<Vec<_>>();
+        for path in paths {
+            self.store
+                .delete_file(folder, device, &path)
+                .map_err(|e| format!("drop all files: {e}"))?;
+        }
         Ok(())
     }
 
     fn drop_device(&mut self, device: &str) -> Result<(), String> {
         self.ensure_open()?;
-        self.device_files.retain(|(_, d, _), _| d != device);
+        let doomed = self
+            .all_records()
+            .into_iter()
+            .filter(|r| r.device == device)
+            .map(|r| (r.file.folder, r.file.path))
+            .collect::<Vec<_>>();
+        for (folder, path) in doomed {
+            self.store
+                .delete_file(&folder, device, &path)
+                .map_err(|e| format!("drop device: {e}"))?;
+        }
         self.index_ids.retain(|(_, d), _| d != device);
         Ok(())
     }
@@ -493,14 +626,27 @@ impl Db for WalFreeDb {
     ) -> Result<(), String> {
         self.ensure_open()?;
         let name_set = names.iter().cloned().collect::<HashSet<_>>();
-        self.device_files
-            .retain(|(f, d, p), _| !(f == folder && d == device && name_set.contains(p)));
+        for name in name_set {
+            self.store
+                .delete_file(folder, device, &name)
+                .map_err(|e| format!("drop named file: {e}"))?;
+        }
         Ok(())
     }
 
     fn drop_folder(&mut self, folder: &str) -> Result<(), String> {
         self.ensure_open()?;
-        self.device_files.retain(|(f, _, _), _| f != folder);
+        let doomed = self
+            .all_records()
+            .into_iter()
+            .filter(|r| r.file.folder == folder)
+            .map(|r| (r.device, r.file.path))
+            .collect::<Vec<_>>();
+        for (device, path) in doomed {
+            self.store
+                .delete_file(folder, &device, &path)
+                .map_err(|e| format!("drop folder: {e}"))?;
+        }
         self.index_ids.retain(|(f, _), _| f != folder);
         self.mtimes.retain(|(f, _), _| f != folder);
         Ok(())
@@ -508,20 +654,20 @@ impl Db for WalFreeDb {
 
     fn get_device_sequence(&self, folder: &str, device: &str) -> Result<i64, String> {
         self.ensure_open()?;
-        let mut max_seq = 0_i64;
-        for ((f, d, _), file) in &self.device_files {
-            if f == folder && d == device {
-                max_seq = max_seq.max(file.sequence);
-            }
-        }
+        let max_seq = self
+            .all_files_for_folder_device(folder, device)
+            .into_iter()
+            .map(|f| f.sequence)
+            .max()
+            .unwrap_or(0);
         Ok(max_seq)
     }
 
     fn list_folders(&self) -> Result<Vec<String>, String> {
         self.ensure_open()?;
         let mut folders = BTreeSet::new();
-        for (folder, _device, _path) in self.device_files.keys() {
-            folders.insert(folder.clone());
+        for file in self.all_files() {
+            folders.insert(file.folder);
         }
         Ok(folders.into_iter().collect())
     }
@@ -529,10 +675,12 @@ impl Db for WalFreeDb {
     fn list_devices_for_folder(&self, folder: &str) -> Result<Vec<DeviceId>, String> {
         self.ensure_open()?;
         let mut devices = BTreeSet::new();
-        for (f, device, _path) in self.device_files.keys() {
-            if f == folder {
-                devices.insert(device.clone());
-            }
+        for record in self
+            .all_records()
+            .into_iter()
+            .filter(|r| r.file.folder == folder)
+        {
+            devices.insert(record.device);
         }
         Ok(devices.into_iter().collect())
     }
@@ -540,12 +688,13 @@ impl Db for WalFreeDb {
     fn remote_sequences(&self, folder: &str) -> Result<BTreeMap<DeviceId, i64>, String> {
         self.ensure_open()?;
         let mut out = BTreeMap::new();
-        for ((f, device, _), file) in &self.device_files {
-            if f != folder {
-                continue;
-            }
-            let entry = out.entry(device.clone()).or_insert(0);
-            *entry = (*entry).max(file.sequence);
+        for record in self
+            .all_records()
+            .into_iter()
+            .filter(|r| r.file.folder == folder)
+        {
+            let entry = out.entry(record.device).or_insert(0);
+            *entry = (*entry).max(record.file.sequence);
         }
         Ok(out)
     }
@@ -659,6 +808,77 @@ impl Db for WalFreeDb {
         }
         Ok(out)
     }
+}
+
+fn file_info_to_store(folder: &str, device: &str, info: &FileInfo) -> StoreFileMetadata {
+    StoreFileMetadata {
+        folder: folder.to_string(),
+        device: device.to_string(),
+        path: info.path.clone(),
+        sequence: i64_to_u64(info.sequence),
+        deleted: info.deleted,
+        ignored: info.ignored,
+        local_flags: info.local_flags,
+        file_type: file_type_to_store(info.file_type),
+        modified_ns: i64_to_u64(info.modified_ns),
+        size: i64_to_u64(info.size),
+        block_hashes: info.block_hashes.clone(),
+    }
+}
+
+fn store_to_file_info(meta: &StoreFileMetadata) -> FileInfo {
+    FileInfo {
+        folder: meta.folder.clone(),
+        path: meta.path.clone(),
+        sequence: u64_to_i64(meta.sequence),
+        modified_ns: u64_to_i64(meta.modified_ns),
+        size: u64_to_i64(meta.size),
+        deleted: meta.deleted,
+        ignored: meta.ignored,
+        local_flags: meta.local_flags,
+        file_type: store_to_file_type(&meta.file_type),
+        block_hashes: meta.block_hashes.clone(),
+    }
+}
+
+#[derive(Clone, Debug)]
+struct StoredRecord {
+    device: String,
+    file: FileInfo,
+}
+
+fn store_to_record(meta: StoreFileMetadata) -> StoredRecord {
+    let device = meta.device.clone();
+    let file = store_to_file_info(&meta);
+    StoredRecord { device, file }
+}
+
+fn file_type_to_store(file_type: FileInfoType) -> String {
+    match file_type {
+        FileInfoType::File => "file".to_string(),
+        FileInfoType::Directory => "directory".to_string(),
+        FileInfoType::Symlink => "symlink".to_string(),
+    }
+}
+
+fn store_to_file_type(file_type: &str) -> FileInfoType {
+    match file_type {
+        "directory" => FileInfoType::Directory,
+        "symlink" => FileInfoType::Symlink,
+        _ => FileInfoType::File,
+    }
+}
+
+fn i64_to_u64(v: i64) -> u64 {
+    if v < 0 {
+        0
+    } else {
+        v as u64
+    }
+}
+
+fn u64_to_i64(v: u64) -> i64 {
+    v.min(i64::MAX as u64) as i64
 }
 
 fn file_metadata_from_info(info: FileInfo) -> FileMetadata {
@@ -858,6 +1078,42 @@ mod tests {
         assert_eq!(kv.len(), 1);
         assert_eq!(kv[0].value, b"value");
         <WalFreeDb as Kv>::delete_kv(&mut db, "alpha/key").expect("delete kv");
+    }
+
+    #[test]
+    fn local_file_pages_follow_segment_path_order() {
+        let mut db = WalFreeDb::default();
+        db.update(
+            "default",
+            "local",
+            vec![
+                file("a.d/x.txt", 1, 1),
+                file("a/x.txt", 2, 1),
+                file("a/z.txt", 3, 1),
+            ],
+        )
+        .expect("update local");
+        db.update(
+            "default",
+            "remote-a",
+            vec![file("a/remote.txt", 4, 1)],
+        )
+        .expect("update remote");
+
+        let mut cursor: Option<String> = None;
+        let mut out = Vec::new();
+        loop {
+            let page = db
+                .all_local_files_ordered_page("default", "local", cursor.as_deref(), 2)
+                .expect("page");
+            out.extend(page.items.into_iter().map(|f| f.path));
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+
+        assert_eq!(out, vec!["a/x.txt", "a/z.txt", "a.d/x.txt"]);
     }
 
     #[test]

@@ -403,7 +403,7 @@ func scenarioCrashRecovery() map[string]any {
 func baseScenario(id string, fields map[string]any) map[string]any {
 	out := map[string]any{
 		"scenario": id,
-		stSource:   "rust",
+		stSource:   "go",
 		stScenario: "prototype",
 	}
 	for k, v := range fields {

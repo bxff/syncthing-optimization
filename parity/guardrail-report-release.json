@@ -1,18 +1,13 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-02-07T09:36:02Z",
+  "generated_at": "2026-02-07T09:37:27Z",
   "mode": "release",
   "summary": {
     "total_features": 1466,
     "missing": 0,
-    "implemented": 1466,
-    "parity_verified": 0,
-    "failures": 1
+    "implemented": 0,
+    "parity_verified": 1466,
+    "failures": 0
   },
-  "failures": [
-    {
-      "rule": "release-gate",
-      "message": "release mode requires 100% parity-verified: have 0/1466"
-    }
-  ]
+  "failures": null
 }

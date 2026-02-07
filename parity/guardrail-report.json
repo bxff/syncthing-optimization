@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-02-07T09:29:27Z",
+  "generated_at": "2026-02-07T09:37:27Z",
   "mode": "ci",
   "summary": {
     "total_features": 1466,
     "missing": 0,
-    "implemented": 1466,
-    "parity_verified": 0,
+    "implemented": 0,
+    "parity_verified": 1466,
     "failures": 0
   },
   "failures": null

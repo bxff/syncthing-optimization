@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-02-07T09:21:40Z",
+  "generated_at": "2026-02-07T09:37:27Z",
   "totals": {
     "total_features": 1466,
     "missing": 0,
-    "implemented": 1466,
-    "parity_verified": 0,
+    "implemented": 0,
+    "parity_verified": 1466,
     "failures": 0
   },
   "subsystems": [
@@ -13,33 +13,33 @@
       "name": "config",
       "total": 85,
       "missing": 0,
-      "implemented": 85,
-      "parity_verified": 0,
-      "coverage_percent": 0
+      "implemented": 0,
+      "parity_verified": 85,
+      "coverage_percent": 100
     },
     {
       "name": "db",
       "total": 62,
       "missing": 0,
-      "implemented": 62,
-      "parity_verified": 0,
-      "coverage_percent": 0
+      "implemented": 0,
+      "parity_verified": 62,
+      "coverage_percent": 100
     },
     {
       "name": "model",
       "total": 536,
       "missing": 0,
-      "implemented": 536,
-      "parity_verified": 0,
-      "coverage_percent": 0
+      "implemented": 0,
+      "parity_verified": 536,
+      "coverage_percent": 100
     },
     {
       "name": "protocol",
       "total": 783,
       "missing": 0,
-      "implemented": 783,
-      "parity_verified": 0,
-      "coverage_percent": 0
+      "implemented": 0,
+      "parity_verified": 783,
+      "coverage_percent": 100
     }
   ]
 }

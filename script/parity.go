@@ -447,7 +447,7 @@ func runCheck(args []string) {
 		}
 	}
 
-	rustSymbols := scanRustSurfaceSymbols()
+	rustSymbols, publicRustSymbols := scanRustSurfaceSymbols()
 	if len(rustSymbols) > 0 {
 		mappedRustSymbols := make(map[string]mappingItem)
 		for _, mi := range mapping.Items {
@@ -465,7 +465,7 @@ func runCheck(args []string) {
 				}
 			}
 		}
-		for sym := range rustSymbols {
+		for sym := range publicRustSymbols {
 			if _, ok := mappedRustSymbols[sym]; !ok {
 				if !exceptionAllowed(exceptions.Items, "rust-surface-unmapped", "", sym) {
 					report.Failures = append(report.Failures, reportFailure{
@@ -1025,8 +1025,25 @@ func validateExceptions(report *guardrailReport, ex exceptionsFile, mode string)
 	}
 }
 
-func scanRustSurfaceSymbols() map[string]bool {
+type rustSurfacePrefix struct {
+	Prefix   string
+	IsPublic bool
+}
+
+func scanRustSurfaceSymbols() (map[string]bool, map[string]bool) {
 	symbols := make(map[string]bool)
+	publicSymbols := make(map[string]bool)
+	prefixes := []rustSurfacePrefix{
+		{Prefix: "pub fn ", IsPublic: true},
+		{Prefix: "pub struct ", IsPublic: true},
+		{Prefix: "pub enum ", IsPublic: true},
+		{Prefix: "pub trait ", IsPublic: true},
+		{Prefix: "pub(crate) fn ", IsPublic: false},
+		{Prefix: "pub(crate) struct ", IsPublic: false},
+		{Prefix: "pub(crate) enum ", IsPublic: false},
+		{Prefix: "pub(crate) trait ", IsPublic: false},
+	}
+
 	for _, root := range parityCriticalRoots {
 		info, err := os.Stat(root)
 		if err != nil || !info.IsDir() {
@@ -1042,32 +1059,38 @@ func scanRustSurfaceSymbols() map[string]bool {
 			}
 			for _, line := range strings.Split(string(bs), "\n") {
 				line = strings.TrimSpace(line)
-				if strings.HasPrefix(line, "pub fn ") {
-					name := strings.Fields(strings.TrimPrefix(line, "pub fn "))
-					if len(name) > 0 {
-						symbols[name[0]] = true
+				for _, prefix := range prefixes {
+					if !strings.HasPrefix(line, prefix.Prefix) {
+						continue
 					}
-				} else if strings.HasPrefix(line, "pub struct ") {
-					name := strings.Fields(strings.TrimPrefix(line, "pub struct "))
-					if len(name) > 0 {
-						symbols[name[0]] = true
+					name := strings.Fields(strings.TrimPrefix(line, prefix.Prefix))
+					if len(name) == 0 {
+						continue
 					}
-				} else if strings.HasPrefix(line, "pub enum ") {
-					name := strings.Fields(strings.TrimPrefix(line, "pub enum "))
-					if len(name) > 0 {
-						symbols[name[0]] = true
+					sym := name[0]
+					if idx := strings.Index(sym, "("); idx >= 0 {
+						sym = sym[:idx]
 					}
-				} else if strings.HasPrefix(line, "pub trait ") {
-					name := strings.Fields(strings.TrimPrefix(line, "pub trait "))
-					if len(name) > 0 {
-						symbols[name[0]] = true
+					if idx := strings.Index(sym, "<"); idx >= 0 {
+						sym = sym[:idx]
 					}
+					sym = strings.TrimSuffix(sym, "{")
+					sym = strings.TrimSuffix(sym, ";")
+					sym = strings.TrimSpace(sym)
+					if sym == "" {
+						continue
+					}
+					symbols[sym] = true
+					if prefix.IsPublic {
+						publicSymbols[sym] = true
+					}
+					break
 				}
 			}
 			return nil
 		})
 	}
-	return symbols
+	return symbols, publicSymbols
 }
 
 func scanTODOFixme(report *guardrailReport, exceptions []guardException) {

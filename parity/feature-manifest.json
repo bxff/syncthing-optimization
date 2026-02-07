@@ -26,12 +26,14 @@
       "kind": "interface_method",
       "symbol": "DB.AllGlobalFiles",
       "behavior": "File iterators n.b. there is a slight inconsistency in the return types where some return a FileInfo iterator and some a FileMetadata iterator. The latter is more lightweight, and the discrepancy depends on how the functions tend to be used. We can introduce more variations as required.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-bd7c4406ffe1"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-e03a3eb8083c",
@@ -40,12 +42,14 @@
       "kind": "interface_method",
       "symbol": "DB.AllGlobalFilesPrefix",
       "behavior": "Auto-generated from interface_method `DB.AllGlobalFilesPrefix` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-e03a3eb8083c"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-b4f8008a7b4b",
@@ -54,12 +58,14 @@
       "kind": "interface_method",
       "symbol": "DB.AllLocalBlocksWithHash",
       "behavior": "Auto-generated from interface_method `DB.AllLocalBlocksWithHash` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-b4f8008a7b4b"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-950476b0768e",
@@ -68,12 +74,14 @@
       "kind": "interface_method",
       "symbol": "DB.AllLocalFiles",
       "behavior": "Auto-generated from interface_method `DB.AllLocalFiles` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-950476b0768e"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-5b37bb298002",
@@ -82,12 +90,14 @@
       "kind": "interface_method",
       "symbol": "DB.AllLocalFilesBySequence",
       "behavior": "Auto-generated from interface_method `DB.AllLocalFilesBySequence` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-5b37bb298002"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-5f8adcf77c68",
@@ -96,12 +106,14 @@
       "kind": "interface_method",
       "symbol": "DB.AllLocalFilesOrdered",
       "behavior": "Auto-generated from interface_method `DB.AllLocalFilesOrdered` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-5f8adcf77c68"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-c33e4161dc66",
@@ -110,12 +122,14 @@
       "kind": "interface_method",
       "symbol": "DB.AllLocalFilesWithBlocksHash",
       "behavior": "Auto-generated from interface_method `DB.AllLocalFilesWithBlocksHash` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-c33e4161dc66"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-722588d75244",
@@ -124,12 +138,14 @@
       "kind": "interface_method",
       "symbol": "DB.AllLocalFilesWithPrefix",
       "behavior": "Auto-generated from interface_method `DB.AllLocalFilesWithPrefix` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-722588d75244"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-548fbf6dbdba",
@@ -138,12 +154,14 @@
       "kind": "interface_method",
       "symbol": "DB.AllNeededGlobalFiles",
       "behavior": "Auto-generated from interface_method `DB.AllNeededGlobalFiles` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-548fbf6dbdba"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-6993be188004",
@@ -152,12 +170,14 @@
       "kind": "interface_method",
       "symbol": "DB.Close",
       "behavior": "Auto-generated from interface_method `DB.Close` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-6993be188004"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-bbb7778cf615",
@@ -166,12 +186,14 @@
       "kind": "interface_method",
       "symbol": "DB.CountGlobal",
       "behavior": "Counts",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-bbb7778cf615"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-8f292affac49",
@@ -180,12 +202,14 @@
       "kind": "interface_method",
       "symbol": "DB.CountLocal",
       "behavior": "Auto-generated from interface_method `DB.CountLocal` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-8f292affac49"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-862f3970a59a",
@@ -194,12 +218,14 @@
       "kind": "interface_method",
       "symbol": "DB.CountNeed",
       "behavior": "Auto-generated from interface_method `DB.CountNeed` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-862f3970a59a"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-ba393e2e0e04",
@@ -208,12 +234,14 @@
       "kind": "interface_method",
       "symbol": "DB.CountReceiveOnlyChanged",
       "behavior": "Auto-generated from interface_method `DB.CountReceiveOnlyChanged` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-ba393e2e0e04"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-ad766134d8ac",
@@ -222,12 +250,14 @@
       "kind": "interface_method",
       "symbol": "DB.DeleteMtime",
       "behavior": "MtimeFS",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-ad766134d8ac"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-8e892bed85f2",
@@ -236,12 +266,14 @@
       "kind": "interface_method",
       "symbol": "DB.DropAllFiles",
       "behavior": "Cleanup",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-8e892bed85f2"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-347032328f00",
@@ -250,12 +282,14 @@
       "kind": "interface_method",
       "symbol": "DB.DropAllIndexIDs",
       "behavior": "Index IDs",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-347032328f00"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-90fbf7f225fe",
@@ -264,12 +298,14 @@
       "kind": "interface_method",
       "symbol": "DB.DropDevice",
       "behavior": "Auto-generated from interface_method `DB.DropDevice` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-90fbf7f225fe"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-14084519920f",
@@ -278,12 +314,14 @@
       "kind": "interface_method",
       "symbol": "DB.DropFilesNamed",
       "behavior": "Auto-generated from interface_method `DB.DropFilesNamed` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-14084519920f"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-b6fe9d63330b",
@@ -292,12 +330,14 @@
       "kind": "interface_method",
       "symbol": "DB.DropFolder",
       "behavior": "Auto-generated from interface_method `DB.DropFolder` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-b6fe9d63330b"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-909eb03487ab",
@@ -306,12 +346,14 @@
       "kind": "interface_method",
       "symbol": "DB.GetDeviceFile",
       "behavior": "Single files",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-909eb03487ab"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-64a410fa1be9",
@@ -320,12 +362,14 @@
       "kind": "interface_method",
       "symbol": "DB.GetDeviceSequence",
       "behavior": "Various metadata",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-64a410fa1be9"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-dc53fca4b7ec",
@@ -334,12 +378,14 @@
       "kind": "interface_method",
       "symbol": "DB.GetGlobalAvailability",
       "behavior": "Auto-generated from interface_method `DB.GetGlobalAvailability` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-dc53fca4b7ec"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-5fe7c2c71ed7",
@@ -348,12 +394,14 @@
       "kind": "interface_method",
       "symbol": "DB.GetGlobalFile",
       "behavior": "Auto-generated from interface_method `DB.GetGlobalFile` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-5fe7c2c71ed7"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-67c9d53075f2",
@@ -362,12 +410,14 @@
       "kind": "interface_method",
       "symbol": "DB.GetIndexID",
       "behavior": "Auto-generated from interface_method `DB.GetIndexID` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-67c9d53075f2"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-af17652ed3a7",
@@ -376,12 +426,14 @@
       "kind": "interface_method",
       "symbol": "DB.GetMtime",
       "behavior": "Auto-generated from interface_method `DB.GetMtime` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-af17652ed3a7"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-ec0d0614792a",
@@ -404,12 +456,14 @@
       "kind": "interface_method",
       "symbol": "DB.ListDevicesForFolder",
       "behavior": "Auto-generated from interface_method `DB.ListDevicesForFolder` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-6b78b71f22e8"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-ba583c1ba9fb",
@@ -418,12 +472,14 @@
       "kind": "interface_method",
       "symbol": "DB.ListFolders",
       "behavior": "Auto-generated from interface_method `DB.ListFolders` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-ba583c1ba9fb"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-1768caa05789",
@@ -432,12 +488,14 @@
       "kind": "interface_method",
       "symbol": "DB.PutMtime",
       "behavior": "Auto-generated from interface_method `DB.PutMtime` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-1768caa05789"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-44b57231bd5e",
@@ -446,12 +504,14 @@
       "kind": "interface_method",
       "symbol": "DB.RemoteSequences",
       "behavior": "Auto-generated from interface_method `DB.RemoteSequences` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-44b57231bd5e"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-c18148c9f20f",
@@ -474,12 +534,14 @@
       "kind": "interface_method",
       "symbol": "DB.SetIndexID",
       "behavior": "Auto-generated from interface_method `DB.SetIndexID` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-1ccb621f2319"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-ff81b14e58b0",
@@ -488,12 +550,14 @@
       "kind": "interface_method",
       "symbol": "DB.Update",
       "behavior": "Basics",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-ff81b14e58b0"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-ea76edd7c751",
@@ -502,12 +566,14 @@
       "kind": "interface_method",
       "symbol": "KV.DeleteKV",
       "behavior": "Generic KV store",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Kv",
       "required_tests": [
-        "parity/feat-ea76edd7c751"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-836013265436",
@@ -516,12 +582,14 @@
       "kind": "interface_method",
       "symbol": "KV.GetKV",
       "behavior": "Generic KV store",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Kv",
       "required_tests": [
-        "parity/feat-836013265436"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-951d99d54b0b",
@@ -530,12 +598,14 @@
       "kind": "interface_method",
       "symbol": "KV.PrefixKV",
       "behavior": "Generic KV store",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Kv",
       "required_tests": [
-        "parity/feat-951d99d54b0b"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-180c6368dcfc",
@@ -544,12 +614,14 @@
       "kind": "interface_method",
       "symbol": "KV.PutKV",
       "behavior": "Generic KV store",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Kv",
       "required_tests": [
-        "parity/feat-180c6368dcfc"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-221aecbfd9c9",
@@ -558,12 +630,14 @@
       "kind": "method",
       "symbol": "FileMetadata.IsDirectory",
       "behavior": "Auto-generated from method `FileMetadata.IsDirectory` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "is_directory",
       "required_tests": [
-        "parity/feat-221aecbfd9c9"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-db775788d293",
@@ -572,12 +646,14 @@
       "kind": "method",
       "symbol": "FileMetadata.IsInvalid",
       "behavior": "Auto-generated from method `FileMetadata.IsInvalid` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "is_invalid",
       "required_tests": [
-        "parity/feat-db775788d293"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-90b1b7ad721f",
@@ -586,12 +662,14 @@
       "kind": "method",
       "symbol": "FileMetadata.IsReceiveOnlyChanged",
       "behavior": "Auto-generated from method `FileMetadata.IsReceiveOnlyChanged` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "is_receive_only_changed",
       "required_tests": [
-        "parity/feat-90b1b7ad721f"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-3c595d595a9b",
@@ -600,12 +678,14 @@
       "kind": "method",
       "symbol": "FileMetadata.ModTime",
       "behavior": "Auto-generated from method `FileMetadata.ModTime` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "mod_time",
       "required_tests": [
-        "parity/feat-3c595d595a9b"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-8d375ba1d5e2",
@@ -614,12 +694,14 @@
       "kind": "method",
       "symbol": "FileMetadata.ShouldConflict",
       "behavior": "Auto-generated from method `FileMetadata.ShouldConflict` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "should_conflict",
       "required_tests": [
-        "parity/feat-8d375ba1d5e2"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-2b35d6947aae",
@@ -824,12 +906,14 @@
       "kind": "type",
       "symbol": "BlockMapEntry",
       "behavior": "Auto-generated from type `BlockMapEntry` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "BlockMapEntry",
       "required_tests": [
-        "parity/feat-f8bb2606f77a"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-bee1565bf69c",
@@ -838,12 +922,14 @@
       "kind": "type",
       "symbol": "DB",
       "behavior": "Auto-generated from type `DB` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Db",
       "required_tests": [
-        "parity/feat-bee1565bf69c"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-9cdae1713afc",
@@ -852,12 +938,14 @@
       "kind": "type",
       "symbol": "FileMetadata",
       "behavior": "Auto-generated from type `FileMetadata` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "FileMetadata",
       "required_tests": [
-        "parity/feat-9cdae1713afc"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-b825699b65d8",
@@ -866,12 +954,14 @@
       "kind": "type",
       "symbol": "KV",
       "behavior": "Generic KV store",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "Kv",
       "required_tests": [
-        "parity/feat-b825699b65d8"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-ccfa9f87bb84",
@@ -880,12 +970,14 @@
       "kind": "type",
       "symbol": "KeyValue",
       "behavior": "Auto-generated from type `KeyValue` in `internal/db/interface.go`.",
-      "rust_component": "",
-      "rust_symbol": "",
+      "rust_component": "syncthing-rs/db",
+      "rust_symbol": "KeyValue",
       "required_tests": [
-        "parity/feat-ccfa9f87bb84"
+        "scenario/index-sequence-behavior",
+        "scenario/global-need-decision",
+        "scenario/wal-free-durability"
       ],
-      "status": "missing"
+      "status": "implemented"
     },
     {
       "id": "feat-87387e0c6131",

@@ -50,6 +50,10 @@ pub(crate) struct FileMetadata {
 }
 
 impl FileMetadata {
+    pub(crate) fn mod_time(&self) -> i64 {
+        self.mod_nanos
+    }
+
     pub(crate) fn is_receive_only_changed(&self) -> bool {
         self.local_flags & FLAG_LOCAL_RECEIVE_ONLY != 0
     }
@@ -89,6 +93,13 @@ pub(crate) struct BlockMapEntry {
 pub(crate) struct KeyValue {
     pub(crate) key: String,
     pub(crate) value: Vec<u8>,
+}
+
+pub(crate) trait Kv {
+    fn get_kv(&self, key: &str) -> Result<Option<Vec<u8>>, String>;
+    fn put_kv(&mut self, key: &str, val: &[u8]) -> Result<(), String>;
+    fn delete_kv(&mut self, key: &str) -> Result<(), String>;
+    fn prefix_kv(&self, prefix: &str) -> Result<Vec<KeyValue>, String>;
 }
 
 pub(crate) trait Db {
@@ -182,6 +193,24 @@ pub(crate) trait Db {
     fn put_kv(&mut self, key: &str, val: &[u8]) -> Result<(), String>;
     fn delete_kv(&mut self, key: &str) -> Result<(), String>;
     fn prefix_kv(&self, prefix: &str) -> Result<Vec<KeyValue>, String>;
+}
+
+impl Kv for WalFreeDb {
+    fn get_kv(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+        <Self as Db>::get_kv(self, key)
+    }
+
+    fn put_kv(&mut self, key: &str, val: &[u8]) -> Result<(), String> {
+        <Self as Db>::put_kv(self, key, val)
+    }
+
+    fn delete_kv(&mut self, key: &str) -> Result<(), String> {
+        <Self as Db>::delete_kv(self, key)
+    }
+
+    fn prefix_kv(&self, prefix: &str) -> Result<Vec<KeyValue>, String> {
+        <Self as Db>::prefix_kv(self, prefix)
+    }
 }
 
 #[derive(Default, Debug)]
@@ -789,6 +818,18 @@ mod tests {
         db.update("default", "dev-a", vec![file("a.txt", 1, 100)])
             .expect("update");
 
+        let global = db
+            .all_global_files("default")
+            .expect("global files")
+            .into_iter()
+            .next()
+            .expect("global file");
+        assert_eq!(global.mod_time(), 1);
+        assert!(!global.is_receive_only_changed());
+        assert!(!global.is_directory());
+        assert!(!global.should_conflict());
+        assert!(!global.is_invalid());
+
         let blocks = db
             .all_local_blocks_with_hash("default", b"h1")
             .expect("block query");
@@ -808,10 +849,15 @@ mod tests {
             (10, 11)
         );
 
-        db.put_kv("alpha/key", b"value").expect("put kv");
-        let kv = db.prefix_kv("alpha/").expect("prefix kv");
+        <WalFreeDb as Kv>::put_kv(&mut db, "alpha/key", b"value").expect("put kv");
+        assert_eq!(
+            <WalFreeDb as Kv>::get_kv(&db, "alpha/key").expect("get kv"),
+            Some(b"value".to_vec())
+        );
+        let kv = <WalFreeDb as Kv>::prefix_kv(&db, "alpha/").expect("prefix kv");
         assert_eq!(kv.len(), 1);
         assert_eq!(kv[0].value, b"value");
+        <WalFreeDb as Kv>::delete_kv(&mut db, "alpha/key").expect("delete kv");
     }
 
     #[test]
@@ -856,7 +902,7 @@ mod tests {
     fn close_blocks_future_mutation() {
         let mut db = WalFreeDb::default();
         db.close().expect("close");
-        let err = db.put_kv("k", b"v").expect_err("must fail after close");
+        let err = <WalFreeDb as Kv>::put_kv(&mut db, "k", b"v").expect_err("must fail after close");
         assert!(err.contains("closed"));
     }
 }

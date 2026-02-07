@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-02-07T08:00:55Z",
+  "generated_at": "2026-02-07T08:08:50Z",
   "totals": {
     "total_features": 1466,
-    "missing": 1466,
-    "implemented": 0,
+    "missing": 1420,
+    "implemented": 46,
     "parity_verified": 0,
     "failures": 0
   },
@@ -20,8 +20,8 @@
     {
       "name": "db",
       "total": 62,
-      "missing": 62,
-      "implemented": 0,
+      "missing": 16,
+      "implemented": 46,
       "parity_verified": 0,
       "coverage_percent": 0
     },

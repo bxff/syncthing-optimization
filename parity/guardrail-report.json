@@ -1,145 +1,15 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-02-07T08:01:00Z",
+  "generated_at": "2026-02-07T08:08:45Z",
   "mode": "ci",
   "summary": {
     "total_features": 1466,
-    "missing": 1466,
-    "implemented": 0,
+    "missing": 1420,
+    "implemented": 46,
     "parity_verified": 0,
-    "failures": 1466
+    "failures": 1420
   },
   "failures": [
-    {
-      "rule": "status-missing",
-      "id": "feat-bd7c4406ffe1",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-e03a3eb8083c",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-b4f8008a7b4b",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-950476b0768e",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-5b37bb298002",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-5f8adcf77c68",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-c33e4161dc66",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-722588d75244",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-548fbf6dbdba",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-6993be188004",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-bbb7778cf615",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-8f292affac49",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-862f3970a59a",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-ba393e2e0e04",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-ad766134d8ac",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-8e892bed85f2",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-347032328f00",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-90fbf7f225fe",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-14084519920f",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-b6fe9d63330b",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-909eb03487ab",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-64a410fa1be9",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-dc53fca4b7ec",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-5fe7c2c71ed7",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-67c9d53075f2",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-af17652ed3a7",
-      "message": "feature status is missing"
-    },
     {
       "rule": "status-missing",
       "id": "feat-ec0d0614792a",
@@ -147,82 +17,7 @@
     },
     {
       "rule": "status-missing",
-      "id": "feat-6b78b71f22e8",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-ba583c1ba9fb",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-1768caa05789",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-44b57231bd5e",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
       "id": "feat-c18148c9f20f",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-1ccb621f2319",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-ff81b14e58b0",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-ea76edd7c751",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-836013265436",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-951d99d54b0b",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-180c6368dcfc",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-221aecbfd9c9",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-db775788d293",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-90b1b7ad721f",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-3c595d595a9b",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-8d375ba1d5e2",
       "message": "feature status is missing"
     },
     {
@@ -293,31 +88,6 @@
     {
       "rule": "status-missing",
       "id": "feat-66b15a6cf8eb",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-f8bb2606f77a",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-bee1565bf69c",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-9cdae1713afc",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-b825699b65d8",
-      "message": "feature status is missing"
-    },
-    {
-      "rule": "status-missing",
-      "id": "feat-ccfa9f87bb84",
       "message": "feature status is missing"
     },
     {

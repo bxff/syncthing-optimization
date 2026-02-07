@@ -1,11 +1,14 @@
 mod bep;
+mod bep_compat;
+mod bep_core;
 mod config;
 mod db;
+mod folder_core;
 mod folder_modes;
 mod index_engine;
+mod model_core;
 mod planner;
 mod protocol;
-mod protocol_surface;
 mod scenarios;
 mod store;
 

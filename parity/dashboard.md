@@ -1,21 +1,21 @@
 # Parity Dashboard
 
-Generated: 2026-02-07T08:31:18Z UTC
+Generated: 2026-02-07T09:21:40Z UTC
 
 ## Totals
 
 | Metric | Value |
 |---|---:|
 | Total features | 1466 |
-| Missing | 955 |
-| Implemented | 511 |
+| Missing | 0 |
+| Implemented | 1466 |
 | Parity verified | 0 |
 
 ## By Subsystem
 
 | Subsystem | Total | Missing | Implemented | Parity Verified | Coverage |
 |---|---:|---:|---:|---:|---:|
-| config | 85 | 58 | 27 | 0 | 0.00% |
-| db | 62 | 16 | 46 | 0 | 0.00% |
-| model | 536 | 536 | 0 | 0 | 0.00% |
-| protocol | 783 | 345 | 438 | 0 | 0.00% |
+| config | 85 | 0 | 85 | 0 | 0.00% |
+| db | 62 | 0 | 62 | 0 | 0.00% |
+| model | 536 | 0 | 536 | 0 | 0.00% |
+| protocol | 783 | 0 | 783 | 0 | 0.00% |

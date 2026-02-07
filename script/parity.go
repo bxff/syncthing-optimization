@@ -47,7 +47,14 @@ var allowedExceptionRules = map[string]struct{}{
 	"status-missing":        {},
 	"rust-surface-missing":  {},
 	"rust-surface-unmapped": {},
+	"implementation-stub":   {},
 	"todo-fixme":            {},
+}
+
+var disallowedStubComponents = map[string]struct{}{
+	"syncthing-rs/model-surface":    {},
+	"syncthing-rs/protocol-surface": {},
+	"syncthing-rs/parity-symbols":   {},
 }
 
 type featureManifest struct {
@@ -902,6 +909,13 @@ func validateImplementedLike(report *guardrailReport, feat featureItem, mi mappi
 			Message: "implemented feature is missing rust_component",
 		})
 	}
+	if _, isStub := disallowedStubComponents[strings.TrimSpace(mi.RustComponent)]; isStub {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "implementation-stub",
+			ID:      mi.ID,
+			Message: fmt.Sprintf("feature is mapped to stub/surface component %q", mi.RustComponent),
+		})
+	}
 	if strings.TrimSpace(mi.RustSymbol) == "" {
 		report.Failures = append(report.Failures, reportFailure{
 			Rule:    "mapping-rust-symbol",
@@ -1038,10 +1052,14 @@ func scanRustSurfaceSymbols() (map[string]bool, map[string]bool) {
 		{Prefix: "pub struct ", IsPublic: true},
 		{Prefix: "pub enum ", IsPublic: true},
 		{Prefix: "pub trait ", IsPublic: true},
+		{Prefix: "pub const ", IsPublic: true},
+		{Prefix: "pub static ", IsPublic: true},
 		{Prefix: "pub(crate) fn ", IsPublic: false},
 		{Prefix: "pub(crate) struct ", IsPublic: false},
 		{Prefix: "pub(crate) enum ", IsPublic: false},
 		{Prefix: "pub(crate) trait ", IsPublic: false},
+		{Prefix: "pub(crate) const ", IsPublic: false},
+		{Prefix: "pub(crate) static ", IsPublic: false},
 	}
 
 	for _, root := range parityCriticalRoots {
@@ -1074,6 +1092,7 @@ func scanRustSurfaceSymbols() (map[string]bool, map[string]bool) {
 					if idx := strings.Index(sym, "<"); idx >= 0 {
 						sym = sym[:idx]
 					}
+					sym = strings.TrimSuffix(sym, ":")
 					sym = strings.TrimSuffix(sym, "{")
 					sym = strings.TrimSuffix(sym, ";")
 					sym = strings.TrimSpace(sym)

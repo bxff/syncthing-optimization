@@ -1,0 +1,1180 @@
+#![allow(non_snake_case)]
+#![allow(non_camel_case_types)]
+#![allow(dead_code)]
+
+use crate::config::FolderConfiguration;
+use crate::db::{self, Db};
+use crate::folder_core;
+use crate::folder_modes::FolderMode;
+use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+pub(crate) static ErrFolderMissing: &str = "folder missing";
+pub(crate) static ErrFolderNotRunning: &str = "folder not running";
+pub(crate) static ErrFolderPaused: &str = "folder paused";
+pub(crate) static errDevicePaused: &str = "device paused";
+pub(crate) static errDeviceUnknown: &str = "device unknown";
+pub(crate) static errEncryptionInvConfigLocal: &str = "local encryption config invalid";
+pub(crate) static errEncryptionInvConfigRemote: &str = "remote encryption config invalid";
+pub(crate) static errEncryptionNotEncryptedLocal: &str = "local folder is not encrypted";
+pub(crate) static errEncryptionNotEncryptedUntrusted: &str = "untrusted remote folder is not encrypted";
+pub(crate) static errEncryptionPassword: &str = "invalid encryption password";
+pub(crate) static errEncryptionPlainForReceiveEncrypted: &str = "receive encrypted folder has plain data";
+pub(crate) static errEncryptionPlainForRemoteEncrypted: &str = "remote encrypted folder has plain data";
+pub(crate) static errEncryptionTokenRead: &str = "failed reading encryption token";
+pub(crate) static errEncryptionTokenWrite: &str = "failed writing encryption token";
+pub(crate) static errMissingLocalInClusterConfig: &str = "local device missing in cluster config";
+pub(crate) static errMissingRemoteInClusterConfig: &str = "remote device missing in cluster config";
+pub(crate) static errNoVersioner: &str = "no versioner configured";
+pub(crate) static errStopped: &str = "model stopped";
+pub(crate) static folderFactories: &str = "folder_factories";
+pub(crate) static underscore_var: &str = "_";
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Availability {
+    pub(crate) ID: String,
+    pub(crate) FromTemporary: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ClusterConfigReceivedEventData {
+    pub(crate) Device: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ConnectionInfo {
+    pub(crate) Address: String,
+    pub(crate) Type: String,
+    pub(crate) Crypto: String,
+    pub(crate) IsLocal: bool,
+    pub(crate) protocol_Statistics: BTreeMap<String, i64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ConnectionStats {
+    pub(crate) Address: String,
+    pub(crate) Type: String,
+    pub(crate) Crypto: String,
+    pub(crate) IsLocal: bool,
+    pub(crate) Connected: bool,
+    pub(crate) Paused: bool,
+    pub(crate) Primary: bool,
+    pub(crate) Secondary: bool,
+    pub(crate) ClientVersion: String,
+    pub(crate) protocol_Statistics: BTreeMap<String, i64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FolderCompletion {
+    pub(crate) CompletionPct: i32,
+    pub(crate) NeedItems: i32,
+    pub(crate) NeedDeletes: i32,
+    pub(crate) NeedBytes: i64,
+    pub(crate) GlobalItems: i32,
+    pub(crate) GlobalBytes: i64,
+    pub(crate) Sequence: i64,
+    pub(crate) RemoteState: String,
+}
+
+impl FolderCompletion {
+    pub(crate) fn add(&mut self, other: &FolderCompletion) {
+        self.NeedItems += other.NeedItems;
+        self.NeedDeletes += other.NeedDeletes;
+        self.NeedBytes += other.NeedBytes;
+        self.GlobalItems += other.GlobalItems;
+        self.GlobalBytes += other.GlobalBytes;
+        self.Sequence = self.Sequence.max(other.Sequence);
+    }
+
+    pub(crate) fn setCompletionPct(&mut self) {
+        if self.GlobalItems <= 0 {
+            self.CompletionPct = 100;
+            return;
+        }
+        let done = (self.GlobalItems - self.NeedItems - self.NeedDeletes).max(0);
+        self.CompletionPct = (done * 100 / self.GlobalItems).clamp(0, 100);
+    }
+
+    pub(crate) fn Map(&self) -> BTreeMap<&'static str, Value> {
+        BTreeMap::from([
+            ("completionPct", Value::from(self.CompletionPct)),
+            ("needItems", Value::from(self.NeedItems)),
+            ("needDeletes", Value::from(self.NeedDeletes)),
+            ("needBytes", Value::from(self.NeedBytes)),
+            ("globalItems", Value::from(self.GlobalItems)),
+            ("globalBytes", Value::from(self.GlobalBytes)),
+            ("sequence", Value::from(self.Sequence)),
+            ("remoteState", Value::from(self.RemoteState.clone())),
+        ])
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TreeEntry {
+    pub(crate) Name: String,
+    pub(crate) Type: String,
+    pub(crate) Size: i64,
+    pub(crate) ModTime: i64,
+    pub(crate) Children: Vec<TreeEntry>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct clusterConfigDeviceInfo {
+    pub(crate) local: bool,
+    pub(crate) remote: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct deviceIDSet {
+    set: BTreeSet<String>,
+}
+
+impl deviceIDSet {
+    pub(crate) fn add(&mut self, id: &str) {
+        self.set.insert(id.to_string());
+    }
+
+    pub(crate) fn AsSlice(&self) -> Vec<String> {
+        self.set.iter().cloned().collect()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct folderDeviceSet {
+    set: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl folderDeviceSet {
+    pub(crate) fn set(&mut self, folder_id: &str, devices: &[String]) {
+        self.set
+            .insert(folder_id.to_string(), devices.iter().cloned().collect());
+    }
+
+    pub(crate) fn has(&self, folder_id: &str) -> bool {
+        self.set.contains_key(folder_id)
+    }
+
+    pub(crate) fn hasDevice(&self, folder_id: &str, device_id: &str) -> bool {
+        self.set
+            .get(folder_id)
+            .map(|s| s.contains(device_id))
+            .unwrap_or(false)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct folderFactory {
+    pub(crate) mode: FolderMode,
+}
+
+impl Default for folderFactory {
+    fn default() -> Self {
+        Self {
+            mode: FolderMode::SendReceive,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct pager {
+    pub(crate) get: Vec<String>,
+    pub(crate) toSkip: usize,
+}
+
+impl pager {
+    pub(crate) fn skip(&mut self, count: usize) {
+        self.toSkip = self.toSkip.saturating_add(count);
+    }
+
+    pub(crate) fn done(&self) -> bool {
+        self.toSkip >= self.get.len()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct redactedError {
+    pub(crate) error: String,
+    pub(crate) redacted: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct requestResponse {
+    pub(crate) once: bool,
+    pub(crate) closed: bool,
+    pub(crate) data: Vec<u8>,
+}
+
+impl requestResponse {
+    pub(crate) fn Data(&self) -> Vec<u8> {
+        self.data.clone()
+    }
+
+    pub(crate) fn Wait(&mut self) -> Result<Vec<u8>, String> {
+        if self.closed {
+            return Err("request-response closed".to_string());
+        }
+        self.once = true;
+        Ok(self.Data())
+    }
+
+    pub(crate) fn Close(&mut self) {
+        self.closed = true;
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct storedEncryptionToken {
+    pub(crate) FolderID: String,
+    pub(crate) Token: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct syncMutexMap {
+    pub(crate) inner: HashMap<String, Arc<Mutex<()>>>,
+}
+
+impl syncMutexMap {
+    pub(crate) fn Get(&mut self, key: &str) -> Arc<Mutex<()>> {
+        self.inner
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct updatedPendingFolder {
+    pub(crate) FolderID: String,
+    pub(crate) FolderLabel: String,
+    pub(crate) DeviceID: String,
+    pub(crate) ReceiveEncrypted: bool,
+    pub(crate) RemoteEncrypted: bool,
+}
+
+pub(crate) trait Model {
+    fn State(&self, folder: &str) -> String;
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct model {
+    pub(crate) id: String,
+    pub(crate) shortID: String,
+    pub(crate) started: bool,
+    pub(crate) closed: bool,
+    pub(crate) cfg: BTreeMap<String, FolderConfiguration>,
+    pub(crate) foldersRunning: BTreeMap<String, bool>,
+    pub(crate) folderCfgs: BTreeMap<String, FolderConfiguration>,
+    pub(crate) folderRunners: BTreeMap<String, folder_core::folder>,
+    pub(crate) folderIgnores: BTreeMap<String, Vec<String>>,
+    pub(crate) folderEncryptionPasswordTokens: BTreeMap<String, String>,
+    pub(crate) folderEncryptionFailures: BTreeMap<String, String>,
+    pub(crate) folderVersioners: BTreeMap<String, String>,
+    pub(crate) folderRestartMuts: syncMutexMap,
+    pub(crate) folderIOLimiter: BTreeMap<String, usize>,
+    pub(crate) connections: BTreeMap<String, ConnectionStats>,
+    pub(crate) deviceConnIDs: BTreeMap<String, String>,
+    pub(crate) connRequestLimiters: BTreeMap<String, usize>,
+    pub(crate) deviceDownloads: BTreeMap<String, Vec<String>>,
+    pub(crate) deviceStatRefs: BTreeMap<String, BTreeMap<String, i64>>,
+    pub(crate) remoteFolderStates: BTreeMap<String, String>,
+    pub(crate) protectedFiles: BTreeSet<String>,
+    pub(crate) observed: deviceIDSet,
+    pub(crate) helloMessages: BTreeMap<String, String>,
+    pub(crate) progressEmitter: bool,
+    pub(crate) promotedConnID: String,
+    pub(crate) promotionTimer: i64,
+    pub(crate) keyGen: i64,
+    pub(crate) indexHandlers: BTreeMap<String, String>,
+    pub(crate) globalRequestLimiter: usize,
+    pub(crate) mut_count: usize,
+    pub(crate) sdb: Arc<Mutex<db::WalFreeDb>>,
+    pub(crate) evLogger: Vec<String>,
+    pub(crate) fatalChan: Option<String>,
+}
+
+impl Default for model {
+    fn default() -> Self {
+        Self {
+            id: "local-device".to_string(),
+            shortID: "local".to_string(),
+            started: true,
+            closed: false,
+            cfg: BTreeMap::new(),
+            foldersRunning: BTreeMap::new(),
+            folderCfgs: BTreeMap::new(),
+            folderRunners: BTreeMap::new(),
+            folderIgnores: BTreeMap::new(),
+            folderEncryptionPasswordTokens: BTreeMap::new(),
+            folderEncryptionFailures: BTreeMap::new(),
+            folderVersioners: BTreeMap::new(),
+            folderRestartMuts: syncMutexMap::default(),
+            folderIOLimiter: BTreeMap::new(),
+            connections: BTreeMap::new(),
+            deviceConnIDs: BTreeMap::new(),
+            connRequestLimiters: BTreeMap::new(),
+            deviceDownloads: BTreeMap::new(),
+            deviceStatRefs: BTreeMap::new(),
+            remoteFolderStates: BTreeMap::new(),
+            protectedFiles: BTreeSet::new(),
+            observed: deviceIDSet::default(),
+            helloMessages: BTreeMap::new(),
+            progressEmitter: true,
+            promotedConnID: String::new(),
+            promotionTimer: 0,
+            keyGen: 0,
+            indexHandlers: BTreeMap::new(),
+            globalRequestLimiter: 4,
+            mut_count: 0,
+            sdb: Arc::new(Mutex::new(db::WalFreeDb::default())),
+            evLogger: Vec::new(),
+            fatalChan: None,
+        }
+    }
+}
+
+impl Model for model {
+    fn State(&self, folder: &str) -> String {
+        <model>::State(self, folder)
+    }
+}
+
+impl model {
+    pub(crate) fn String(&self) -> String {
+        format!("model:{}", self.id)
+    }
+
+    pub(crate) fn Closed(&self) -> bool { self.closed }
+
+    pub(crate) fn AddConnection(&mut self, device: &str, stats: ConnectionStats) {
+        self.connections.insert(device.to_string(), stats);
+    }
+
+    pub(crate) fn ConnectedTo(&self, device: &str) -> bool {
+        self.connections.get(device).map(|s| s.Connected).unwrap_or(false)
+    }
+
+    pub(crate) fn ConnectionStats(&self, device: &str) -> Option<ConnectionStats> {
+        self.connections.get(device).cloned()
+    }
+
+    pub(crate) fn DeviceStatistics(&self, device: &str) -> BTreeMap<String, i64> {
+        self.deviceStatRefs.get(device).cloned().unwrap_or_default()
+    }
+
+    pub(crate) fn BringToFront(&mut self, folder_id: &str) -> Result<(), String> {
+        self.folderRunners
+            .get_mut(folder_id)
+            .ok_or_else(|| ErrFolderMissing.to_string())?
+            .BringToFront();
+        Ok(())
+    }
+
+    pub(crate) fn DelayScan(&mut self, folder_id: &str) -> Result<(), String> {
+        self.folderRunners
+            .get_mut(folder_id)
+            .ok_or_else(|| ErrFolderMissing.to_string())?
+            .DelayScan();
+        Ok(())
+    }
+
+    pub(crate) fn FolderErrors(&self, folder_id: &str) -> Result<Vec<folder_core::FileError>, String> {
+        Ok(self
+            .folderRunners
+            .get(folder_id)
+            .ok_or_else(|| ErrFolderMissing.to_string())?
+            .Errors())
+    }
+
+    pub(crate) fn FolderProgressBytesCompleted(&self, folder_id: &str) -> i64 {
+        self.folderCompletion(folder_id).GlobalBytes - self.folderCompletion(folder_id).NeedBytes
+    }
+
+    pub(crate) fn FolderStatistics(&self, folder_id: &str) -> BTreeMap<String, Value> {
+        let c = self.folderCompletion(folder_id);
+        BTreeMap::from([
+            ("completionPct".to_string(), Value::from(c.CompletionPct)),
+            ("needItems".to_string(), Value::from(c.NeedItems)),
+            ("needBytes".to_string(), Value::from(c.NeedBytes)),
+        ])
+    }
+
+    pub(crate) fn Completion(&self, folder_id: &str, _device: &str) -> FolderCompletion {
+        self.folderCompletion(folder_id)
+    }
+
+    pub(crate) fn folderCompletion(&self, folder_id: &str) -> FolderCompletion {
+        let global = self.GlobalSize(folder_id);
+        let need = self.NeedSize(folder_id);
+        let mut c = FolderCompletion {
+            GlobalItems: global.0 as i32,
+            GlobalBytes: global.1,
+            NeedItems: need.0 as i32,
+            NeedDeletes: 0,
+            NeedBytes: need.1,
+            Sequence: self.Sequence(folder_id),
+            RemoteState: self.remoteFolderStates.get(folder_id).cloned().unwrap_or_else(|| "idle".to_string()),
+            ..Default::default()
+        };
+        c.setCompletionPct();
+        c
+    }
+
+    pub(crate) fn CurrentFolderFile(&self, folder_id: &str, path: &str) -> Option<db::FileInfo> {
+        self.sdb.lock().ok()?.get_device_file(folder_id, "local", path).ok().flatten()
+    }
+
+    pub(crate) fn CurrentGlobalFile(&self, folder_id: &str, path: &str) -> Option<db::FileInfo> {
+        self.sdb.lock().ok()?.get_global_file(folder_id, path).ok().flatten()
+    }
+
+    pub(crate) fn CurrentIgnores(&self, folder_id: &str) -> Vec<String> {
+        self.folderIgnores.get(folder_id).cloned().unwrap_or_default()
+    }
+
+    pub(crate) fn LoadIgnores(&mut self, folder_id: &str, ignores: Vec<String>) {
+        self.folderIgnores.insert(folder_id.to_string(), ignores);
+    }
+
+    pub(crate) fn SetIgnores(&mut self, folder_id: &str, ignores: Vec<String>) {
+        self.setIgnores(folder_id, ignores);
+    }
+
+    pub(crate) fn setIgnores(&mut self, folder_id: &str, ignores: Vec<String>) {
+        self.folderIgnores.insert(folder_id.to_string(), ignores);
+        if let Some(f) = self.folderRunners.get_mut(folder_id) {
+            f.ignoresUpdated();
+        }
+    }
+
+    pub(crate) fn LocalFiles(&self, folder_id: &str) -> Vec<db::FileInfo> {
+        self.sdb
+            .lock()
+            .ok()
+            .and_then(|db| db.all_local_files(folder_id, "local").ok())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn LocalFilesSequenced(&self, folder_id: &str, from: i64, limit: usize) -> Vec<db::FileInfo> {
+        self.sdb
+            .lock()
+            .ok()
+            .and_then(|db| db.all_local_files_by_sequence(folder_id, "local", from, limit).ok())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn LocalChangedFolderFiles(&self, folder_id: &str) -> Vec<String> {
+        self.LocalFiles(folder_id)
+            .into_iter()
+            .filter(|f| !f.deleted)
+            .map(|f| f.path)
+            .collect()
+    }
+
+    pub(crate) fn AllGlobalFiles(&self, folder_id: &str) -> Vec<db::FileMetadata> {
+        self.sdb
+            .lock()
+            .ok()
+            .and_then(|db| db.all_global_files(folder_id).ok())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn AllForBlocksHash(&self, folder_id: &str, hash: &[u8]) -> Vec<db::FileMetadata> {
+        self.sdb
+            .lock()
+            .ok()
+            .and_then(|db| db.all_local_files_with_blocks_hash(folder_id, hash).ok())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn Availability(&self, folder_id: &str, path: &str) -> Vec<Availability> {
+        self.sdb
+            .lock()
+            .ok()
+            .and_then(|db| db.get_global_availability(folder_id, path).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|id| Availability {
+                ID: id,
+                FromTemporary: false,
+            })
+            .collect()
+    }
+
+    pub(crate) fn GlobalSize(&self, folder_id: &str) -> (usize, i64) {
+        let files = self.AllGlobalFiles(folder_id);
+        let count = files.len();
+        let bytes = files.iter().map(|f| f.size).sum();
+        (count, bytes)
+    }
+
+    pub(crate) fn LocalSize(&self, folder_id: &str) -> (usize, i64) {
+        let files = self.LocalFiles(folder_id);
+        let count = files.len();
+        let bytes = files.iter().map(|f| f.size).sum();
+        (count, bytes)
+    }
+
+    pub(crate) fn NeedFolderFiles(&self, folder_id: &str) -> Vec<db::FileInfo> {
+        self.sdb
+            .lock()
+            .ok()
+            .and_then(|db| {
+                db.all_needed_global_files(folder_id, "local", db::PullOrder::Alphabetic, 10_000, 0)
+                    .ok()
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn NeedSize(&self, folder_id: &str) -> (usize, i64) {
+        let files = self.NeedFolderFiles(folder_id);
+        (files.len(), files.iter().map(|f| f.size).sum())
+    }
+
+    pub(crate) fn ReceiveOnlySize(&self, folder_id: &str) -> (usize, i64) {
+        let mut files = self.LocalFiles(folder_id);
+        files.retain(|f| f.local_flags & db::FLAG_LOCAL_RECEIVE_ONLY != 0);
+        (files.len(), files.iter().map(|f| f.size).sum())
+    }
+
+    pub(crate) fn RemoteNeedFolderFiles(&self, folder_id: &str, _device: &str) -> Vec<db::FileInfo> {
+        self.NeedFolderFiles(folder_id)
+    }
+
+    pub(crate) fn RemoteSequences(&self, folder_id: &str) -> BTreeMap<String, i64> {
+        self.sdb
+            .lock()
+            .ok()
+            .and_then(|db| db.remote_sequences(folder_id).ok())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn RequestGlobal(&self, folder_id: &str, path: &str) -> Option<db::FileInfo> {
+        self.CurrentGlobalFile(folder_id, path)
+    }
+
+    pub(crate) fn Request(&self, folder_id: &str, path: &str) -> Option<db::FileInfo> {
+        self.CurrentFolderFile(folder_id, path)
+    }
+
+    pub(crate) fn State(&self, folder_id: &str) -> String {
+        if self.closed {
+            return "stopped".to_string();
+        }
+        if !self.foldersRunning.get(folder_id).copied().unwrap_or(false) {
+            return "idle".to_string();
+        }
+        "running".to_string()
+    }
+
+    pub(crate) fn Sequence(&self, folder_id: &str) -> i64 {
+        self.sdb
+            .lock()
+            .ok()
+            .and_then(|db| db.get_device_sequence(folder_id, "local").ok())
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn ScanFolder(&mut self, folder_id: &str) -> Result<(), String> {
+        self.folderRunners
+            .get_mut(folder_id)
+            .ok_or_else(|| ErrFolderMissing.to_string())?
+            .ScheduleScan();
+        Ok(())
+    }
+
+    pub(crate) fn ScanFolderSubdirs(&mut self, folder_id: &str, subs: &[String]) -> Result<(), String> {
+        self.folderRunners
+            .get_mut(folder_id)
+            .ok_or_else(|| ErrFolderMissing.to_string())?
+            .ScheduleForceRescan(subs);
+        Ok(())
+    }
+
+    pub(crate) fn ScanFolders(&mut self, ids: &[String]) {
+        for id in ids {
+            let _ = self.ScanFolder(id);
+        }
+    }
+
+    pub(crate) fn Override(&mut self, folder_id: &str) -> Result<(), String> {
+        self.folderRunners
+            .get_mut(folder_id)
+            .ok_or_else(|| ErrFolderMissing.to_string())?
+            .Override();
+        Ok(())
+    }
+
+    pub(crate) fn Revert(&mut self, folder_id: &str) -> Result<(), String> {
+        self.folderRunners
+            .get_mut(folder_id)
+            .ok_or_else(|| ErrFolderMissing.to_string())?
+            .Revert();
+        Ok(())
+    }
+
+    pub(crate) fn ResetFolder(&mut self, folder_id: &str) {
+        self.cleanPending(folder_id);
+        self.folderIgnores.remove(folder_id);
+    }
+
+    pub(crate) fn RestoreFolderVersions(&mut self, folder_id: &str) -> bool {
+        self.folderVersioners.contains_key(folder_id)
+    }
+
+    pub(crate) fn GetFolderVersions(&self, folder_id: &str) -> Vec<String> {
+        self.folderVersioners
+            .get(folder_id)
+            .map(|v| vec![v.clone()])
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn PendingDevices(&self) -> Vec<String> {
+        self.connections
+            .iter()
+            .filter_map(|(id, st)| (!st.Connected).then_some(id.clone()))
+            .collect()
+    }
+
+    pub(crate) fn PendingFolders(&self) -> Vec<String> {
+        self.foldersRunning
+            .iter()
+            .filter_map(|(id, running)| (!running).then_some(id.clone()))
+            .collect()
+    }
+
+    pub(crate) fn DismissPendingDevice(&mut self, device: &str) {
+        self.connections.remove(device);
+    }
+
+    pub(crate) fn DismissPendingFolder(&mut self, folder: &str) {
+        self.foldersRunning.remove(folder);
+    }
+
+    pub(crate) fn UsageReportingStats(&self) -> BTreeMap<String, Value> {
+        BTreeMap::from([
+            ("folders".to_string(), Value::from(self.folderCfgs.len())),
+            ("connections".to_string(), Value::from(self.connections.len())),
+            ("observedDevices".to_string(), Value::from(self.observed.AsSlice().len())),
+        ])
+    }
+
+    pub(crate) fn GlobalDirectoryTree(&self, folder_id: &str) -> TreeEntry {
+        let mut root = TreeEntry {
+            Name: folder_id.to_string(),
+            Type: "dir".to_string(),
+            ..Default::default()
+        };
+        for f in self.AllGlobalFiles(folder_id) {
+            root.Children.push(TreeEntry {
+                Name: f.name,
+                Type: if f.deleted { "deleted".to_string() } else { "file".to_string() },
+                Size: f.size,
+                ModTime: f.mod_nanos,
+                Children: Vec::new(),
+            });
+        }
+        root
+    }
+
+    pub(crate) fn WatchError(&self, folder_id: &str) -> Option<String> {
+        self.folderRunners.get(folder_id).and_then(|f| f.WatchError())
+    }
+
+    pub(crate) fn ClusterConfig(&self, device: &str) -> ClusterConfigReceivedEventData {
+        ClusterConfigReceivedEventData {
+            Device: device.to_string(),
+        }
+    }
+
+    pub(crate) fn CommitConfiguration(&mut self, cfgs: &[FolderConfiguration]) {
+        for cfg in cfgs {
+            self.folderCfgs.insert(cfg.id.clone(), cfg.clone());
+            self.cfg.insert(cfg.id.clone(), cfg.clone());
+        }
+    }
+
+    pub(crate) fn VerifyConfiguration(&self, folder_id: &str) -> Result<(), String> {
+        if !self.folderCfgs.contains_key(folder_id) {
+            return Err(ErrFolderMissing.to_string());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn OnHello(&mut self, device: &str, hello: &str) {
+        self.helloMessages.insert(device.to_string(), hello.to_string());
+    }
+
+    pub(crate) fn DownloadProgress(&self, device: &str) -> Vec<String> {
+        self.deviceDownloads.get(device).cloned().unwrap_or_default()
+    }
+
+    pub(crate) fn Index(&mut self, folder_id: &str, files: &[db::FileInfo]) -> Result<(), String> {
+        let mut db = self.sdb.lock().map_err(|_| "db lock poisoned".to_string())?;
+        db.update(folder_id, "remote", files.to_vec())
+    }
+
+    pub(crate) fn IndexUpdate(&mut self, folder_id: &str, files: &[db::FileInfo]) -> Result<(), String> {
+        self.Index(folder_id, files)
+    }
+
+    pub(crate) fn addAndStartFolderLocked(&mut self, cfg: FolderConfiguration) {
+        self.addAndStartFolderLockedWithIgnores(cfg, Vec::new());
+    }
+
+    pub(crate) fn addAndStartFolderLockedWithIgnores(&mut self, cfg: FolderConfiguration, ignores: Vec<String>) {
+        let id = cfg.id.clone();
+        self.folderCfgs.insert(id.clone(), cfg.clone());
+        self.folderIgnores.insert(id.clone(), ignores);
+        self.folderRunners
+            .insert(id.clone(), folder_core::newFolder(cfg, self.sdb.clone()));
+        self.foldersRunning.insert(id, true);
+    }
+
+    pub(crate) fn blockAvailability(&self, folder_id: &str, path: &str) -> Vec<Availability> {
+        self.blockAvailabilityRLocked(folder_id, path)
+    }
+
+    pub(crate) fn blockAvailabilityFromTemporaryRLocked(&self, folder_id: &str, path: &str) -> Vec<Availability> {
+        self.Availability(folder_id, path)
+            .into_iter()
+            .map(|mut a| {
+                a.FromTemporary = true;
+                a
+            })
+            .collect()
+    }
+
+    pub(crate) fn blockAvailabilityRLocked(&self, folder_id: &str, path: &str) -> Vec<Availability> {
+        self.Availability(folder_id, path)
+    }
+
+    pub(crate) fn ccCheckEncryption(&self, folder_id: &str) -> Result<(), String> {
+        if self
+            .folderEncryptionFailures
+            .get(folder_id)
+            .is_some()
+        {
+            return Err(errEncryptionInvConfigLocal.to_string());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn ccHandleFolders(&mut self, cfgs: &[FolderConfiguration]) {
+        self.CommitConfiguration(cfgs);
+    }
+
+    pub(crate) fn checkFolderRunningRLocked(&self, folder_id: &str) -> Result<(), String> {
+        if !self.foldersRunning.get(folder_id).copied().unwrap_or(false) {
+            return Err(ErrFolderNotRunning.to_string());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cleanPending(&mut self, folder_id: &str) {
+        self.remoteFolderStates.remove(folder_id);
+    }
+
+    pub(crate) fn cleanupFolderLocked(&mut self, folder_id: &str) {
+        self.folderRunners.remove(folder_id);
+        self.foldersRunning.remove(folder_id);
+    }
+
+    pub(crate) fn closeAllConnectionsAndWait(&mut self) {
+        self.connections.clear();
+    }
+
+    pub(crate) fn deviceDidCloseRLocked(&mut self, device: &str) {
+        self.connections.remove(device);
+    }
+
+    pub(crate) fn deviceWasSeen(&mut self, device: &str) {
+        self.observed.add(device);
+    }
+
+    pub(crate) fn ensureIndexHandler(&mut self, folder_id: &str) {
+        self.indexHandlers
+            .entry(folder_id.to_string())
+            .or_insert_with(|| "default-index-handler".to_string());
+    }
+
+    pub(crate) fn getIndexHandlerRLocked(&self, folder_id: &str) -> Option<String> {
+        self.indexHandlers.get(folder_id).cloned()
+    }
+
+    pub(crate) fn fatal(&mut self, err: &str) {
+        self.fatalChan = Some(err.to_string());
+        self.closed = true;
+    }
+
+    pub(crate) fn fileAvailability(&self, folder_id: &str, path: &str) -> Vec<Availability> {
+        self.fileAvailabilityRLocked(folder_id, path)
+    }
+
+    pub(crate) fn fileAvailabilityRLocked(&self, folder_id: &str, path: &str) -> Vec<Availability> {
+        self.Availability(folder_id, path)
+    }
+
+    pub(crate) fn generateClusterConfig(&self) -> BTreeMap<String, FolderConfiguration> {
+        self.generateClusterConfigRLocked()
+    }
+
+    pub(crate) fn generateClusterConfigRLocked(&self) -> BTreeMap<String, FolderConfiguration> {
+        self.folderCfgs.clone()
+    }
+
+    pub(crate) fn handleAutoAccepts(&mut self) {
+        self.progressEmitter = true;
+    }
+
+    pub(crate) fn handleDeintroductions(&mut self, devices: &[String]) {
+        for d in devices {
+            self.connections.remove(d);
+        }
+    }
+
+    pub(crate) fn handleIndex(&mut self, folder_id: &str, files: &[db::FileInfo]) -> Result<(), String> {
+        self.IndexUpdate(folder_id, files)
+    }
+
+    pub(crate) fn handleIntroductions(&mut self, devices: &[String]) {
+        for d in devices {
+            self.observed.add(d);
+        }
+    }
+
+    pub(crate) fn initFolders(&mut self) {
+        for (id, cfg) in self.folderCfgs.clone() {
+            self.folderRunners
+                .entry(id.clone())
+                .or_insert_with(|| folder_core::newFolder(cfg, self.sdb.clone()));
+            self.foldersRunning.entry(id).or_insert(true);
+        }
+    }
+
+    pub(crate) fn introduceDevice(&mut self, device: &str) {
+        self.observed.add(device);
+    }
+
+    pub(crate) fn newFolder(&mut self, cfg: FolderConfiguration) {
+        self.addAndStartFolderLocked(cfg);
+    }
+
+    pub(crate) fn numHashers(&self, folder_id: &str) -> i32 {
+        self.folderCfgs.get(folder_id).map(|c| c.hashers).unwrap_or(0)
+    }
+
+    pub(crate) fn promoteConnections(&mut self, device: &str) {
+        self.promotedConnID = device.to_string();
+    }
+
+    pub(crate) fn recheckFile(&self, folder_id: &str, path: &str) -> bool {
+        self.CurrentGlobalFile(folder_id, path).is_some()
+    }
+
+    pub(crate) fn removeFolder(&mut self, folder_id: &str) {
+        self.cleanupFolderLocked(folder_id);
+    }
+
+    pub(crate) fn requestConnectionForDevice(&self, device: &str) -> Option<ConnectionStats> {
+        self.connections.get(device).cloned()
+    }
+
+    pub(crate) fn restartFolder(&mut self, folder_id: &str) -> Result<(), String> {
+        let cfg = self
+            .folderCfgs
+            .get(folder_id)
+            .cloned()
+            .ok_or_else(|| ErrFolderMissing.to_string())?;
+        self.cleanupFolderLocked(folder_id);
+        self.addAndStartFolderLocked(cfg);
+        Ok(())
+    }
+
+    pub(crate) fn scheduleConnectionPromotion(&mut self, device: &str) {
+        self.promotedConnID = device.to_string();
+        self.promotionTimer += 1;
+    }
+
+    pub(crate) fn sendClusterConfig(&self, device: &str) -> ClusterConfigReceivedEventData {
+        self.ClusterConfig(device)
+    }
+
+    pub(crate) fn serve(&mut self) {
+        self.started = true;
+        let keys = self.folderRunners.keys().cloned().collect::<Vec<_>>();
+        for folder in keys {
+            if let Some(r) = self.folderRunners.get_mut(&folder) {
+                r.Serve();
+            }
+        }
+    }
+
+    pub(crate) fn setConnRequestLimitersLocked(&mut self, device: &str, limit: usize) {
+        self.connRequestLimiters.insert(device.to_string(), limit);
+    }
+
+    pub(crate) fn warnAboutOverwritingProtectedFiles(&self, paths: &[String]) -> Vec<String> {
+        paths
+            .iter()
+            .filter(|p| self.protectedFiles.contains(*p))
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn RequestGlobalFile(&self, folder_id: &str, path: &str) -> Option<db::FileInfo> {
+        self.RequestGlobal(folder_id, path)
+    }
+
+    pub(crate) fn Model(&self) -> String {
+        self.String()
+    }
+
+    pub(crate) fn Service(&self) -> &'static str {
+        "model-service"
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct service {
+    pub(crate) model: Arc<Mutex<model>>,
+}
+
+impl service {
+    pub(crate) fn BringToFront(&self, folder_id: &str) -> Result<(), String> {
+        self.model
+            .lock()
+            .map_err(|_| "service lock poisoned".to_string())?
+            .BringToFront(folder_id)
+    }
+
+    pub(crate) fn DelayScan(&self, folder_id: &str) -> Result<(), String> {
+        self.model
+            .lock()
+            .map_err(|_| "service lock poisoned".to_string())?
+            .DelayScan(folder_id)
+    }
+
+    pub(crate) fn Errors(&self, folder_id: &str) -> Result<Vec<folder_core::FileError>, String> {
+        self.model
+            .lock()
+            .map_err(|_| "service lock poisoned".to_string())?
+            .FolderErrors(folder_id)
+    }
+
+    pub(crate) fn GetStatistics(&self, folder_id: &str) -> BTreeMap<String, Value> {
+        self.model
+            .lock()
+            .map(|m| m.FolderStatistics(folder_id))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn Jobs(&self, folder_id: &str) -> Result<BTreeMap<&'static str, bool>, String> {
+        let guard = self
+            .model
+            .lock()
+            .map_err(|_| "service lock poisoned".to_string())?;
+        let runner = guard
+            .folderRunners
+            .get(folder_id)
+            .ok_or_else(|| ErrFolderMissing.to_string())?;
+        Ok(runner.Jobs())
+    }
+
+    pub(crate) fn Override(&self, folder_id: &str) -> Result<(), String> {
+        self.model
+            .lock()
+            .map_err(|_| "service lock poisoned".to_string())?
+            .Override(folder_id)
+    }
+
+    pub(crate) fn Revert(&self, folder_id: &str) -> Result<(), String> {
+        self.model
+            .lock()
+            .map_err(|_| "service lock poisoned".to_string())?
+            .Revert(folder_id)
+    }
+
+    pub(crate) fn Scan(&self, folder_id: &str, subs: &[String]) -> Result<(), String> {
+        self.model
+            .lock()
+            .map_err(|_| "service lock poisoned".to_string())?
+            .ScanFolderSubdirs(folder_id, subs)
+    }
+
+    pub(crate) fn ScheduleForceRescan(&self, folder_id: &str, subs: &[String]) -> Result<(), String> {
+        self.Scan(folder_id, subs)
+    }
+
+    pub(crate) fn SchedulePull(&self, folder_id: &str) -> Result<(), String> {
+        let mut m = self
+            .model
+            .lock()
+            .map_err(|_| "service lock poisoned".to_string())?;
+        m.folderRunners
+            .get_mut(folder_id)
+            .ok_or_else(|| ErrFolderMissing.to_string())?
+            .SchedulePull();
+        Ok(())
+    }
+
+    pub(crate) fn ScheduleScan(&self, folder_id: &str) -> Result<(), String> {
+        self.model
+            .lock()
+            .map_err(|_| "service lock poisoned".to_string())?
+            .ScanFolder(folder_id)
+    }
+
+    pub(crate) fn WatchError(&self, folder_id: &str) -> Option<String> {
+        self.model
+            .lock()
+            .ok()
+            .and_then(|m| m.WatchError(folder_id))
+    }
+
+    pub(crate) fn getState(&self, folder_id: &str) -> String {
+        self.model
+            .lock()
+            .map(|m| m.State(folder_id))
+            .unwrap_or_else(|_| "error".to_string())
+    }
+
+    pub(crate) fn Service(&self) -> &'static str { "service" }
+}
+
+pub(crate) fn NewModel() -> model {
+    model::default()
+}
+
+pub(crate) fn newFolderCompletion() -> FolderCompletion {
+    FolderCompletion::default()
+}
+
+pub(crate) fn newFolderConfiguration(id: &str, path: &str) -> FolderConfiguration {
+    FolderConfiguration {
+        id: id.to_string(),
+        path: path.to_string(),
+        ..Default::default()
+    }
+}
+
+pub(crate) fn newRequestResponse() -> requestResponse {
+    requestResponse::default()
+}
+
+pub(crate) fn newLimitedRequestResponse(limit: usize) -> requestResponse {
+    let mut rr = requestResponse::default();
+    rr.data = vec![0; limit.min(1024)];
+    rr
+}
+
+pub(crate) fn newPager(keys: Vec<String>) -> pager {
+    pager { get: keys, toSkip: 0 }
+}
+
+pub(crate) fn observedDeviceSet(devices: &[String]) -> deviceIDSet {
+    let mut out = deviceIDSet::default();
+    for d in devices {
+        out.add(d);
+    }
+    out
+}
+
+pub(crate) fn findByName(entries: &[TreeEntry], name: &str) -> Option<TreeEntry> {
+    entries.iter().find(|e| e.Name == name).cloned()
+}
+
+pub(crate) fn mapDevices(devices: &[String]) -> BTreeMap<String, clusterConfigDeviceInfo> {
+    devices
+        .iter()
+        .map(|d| {
+            (
+                d.clone(),
+                clusterConfigDeviceInfo {
+                    local: d == "local-device",
+                    remote: d != "local-device",
+                },
+            )
+        })
+        .collect()
+}
+
+pub(crate) fn mapFolders(cfgs: &[FolderConfiguration]) -> BTreeMap<String, FolderConfiguration> {
+    cfgs.iter().map(|c| (c.id.clone(), c.clone())).collect()
+}
+
+pub(crate) fn encryptionTokenPath(folder_id: &str) -> PathBuf {
+    PathBuf::from(format!("/tmp/syncthing-rs-{folder_id}.token"))
+}
+
+pub(crate) fn writeEncryptionToken(folder_id: &str, token: &str) -> Result<(), String> {
+    let path = encryptionTokenPath(folder_id);
+    fs::write(path, token).map_err(|e| format!("{errEncryptionTokenWrite}: {e}"))
+}
+
+pub(crate) fn readEncryptionToken(folder_id: &str) -> Result<String, String> {
+    let path = encryptionTokenPath(folder_id);
+    fs::read_to_string(path).map_err(|e| format!("{errEncryptionTokenRead}: {e}"))
+}
+
+pub(crate) fn readOffsetIntoBuf(path: &PathBuf, offset: u64, len: usize) -> Result<Vec<u8>, String> {
+    let mut f = fs::File::open(path).map_err(|e| format!("open: {e}"))?;
+    f.seek(SeekFrom::Start(offset))
+        .map_err(|e| format!("seek: {e}"))?;
+    let mut buf = vec![0_u8; len];
+    let n = f.read(&mut buf).map_err(|e| format!("read: {e}"))?;
+    buf.truncate(n);
+    Ok(buf)
+}
+
+pub(crate) fn redactPathError(path: &str, err: &str) -> redactedError {
+    redactedError {
+        error: err.to_string(),
+        redacted: path.replace(path, "<redacted>"),
+    }
+}
+
+pub(crate) fn without(items: &[String], remove: &[String]) -> Vec<String> {
+    let rm: BTreeSet<_> = remove.iter().collect();
+    items
+        .iter()
+        .filter(|i| !rm.contains(i))
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completion_map_sets_percentage() {
+        let mut c = FolderCompletion {
+            NeedItems: 2,
+            GlobalItems: 10,
+            ..Default::default()
+        };
+        c.setCompletionPct();
+        assert_eq!(c.CompletionPct, 80);
+    }
+
+    #[test]
+    fn model_tracks_folder_lifecycle() {
+        let mut m = NewModel();
+        let cfg = newFolderConfiguration("default", "/tmp/default");
+        m.newFolder(cfg);
+        assert_eq!(m.State("default"), "running");
+        m.removeFolder("default");
+        assert_eq!(m.State("default"), "idle");
+    }
+
+    #[test]
+    fn token_round_trip() {
+        writeEncryptionToken("x", "tok").expect("write token");
+        let got = readEncryptionToken("x").expect("read token");
+        assert_eq!(got, "tok");
+    }
+}

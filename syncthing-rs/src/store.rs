@@ -1,6 +1,6 @@
 use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, ErrorKind, Read, Write};
 use std::ops::Bound;
@@ -66,6 +66,7 @@ pub(crate) struct Store {
     journal_path: PathBuf,
     files: BTreeMap<String, FileMetadata>,
     deleted_tombstones: VecDeque<String>,
+    tombstone_set: HashSet<String>,
     approx_memory_bytes: usize,
 }
 
@@ -97,12 +98,14 @@ impl Store {
 
         let (files, deleted_tombstones, approx_memory_bytes) =
             Self::load_from_journal(&journal_path, config.max_deleted_tombstones)?;
+        let tombstone_set = deleted_tombstones.iter().cloned().collect();
 
         Ok(Self {
             config,
             journal_path,
             files,
             deleted_tombstones,
+            tombstone_set,
             approx_memory_bytes,
         })
     }
@@ -168,7 +171,7 @@ impl Store {
 
     pub(crate) fn has_tombstone(&self, folder: &str, path: &str) -> bool {
         let key = composite_key(folder, path);
-        self.deleted_tombstones.iter().any(|k| *k == key)
+        self.tombstone_set.contains(&key)
     }
 
     pub(crate) fn all_files_ordered_page(
@@ -293,6 +296,8 @@ impl Store {
         let mut reader = BufReader::new(file);
         let mut files: BTreeMap<String, FileMetadata> = BTreeMap::new();
         let mut deleted_tombstones = VecDeque::new();
+        let mut tombstone_set = HashSet::new();
+        let mut payload_buf: Vec<u8> = Vec::new();
 
         loop {
             let mut hdr = [0_u8; 8];
@@ -309,22 +314,28 @@ impl Store {
                 break;
             }
 
-            let mut payload = vec![0_u8; len as usize];
-            match reader.read_exact(&mut payload) {
+            payload_buf.resize(len as usize, 0);
+            match reader.read_exact(&mut payload_buf) {
                 Ok(()) => {}
                 Err(err) if err.kind() == ErrorKind::UnexpectedEof => break,
                 Err(err) => return Err(err),
             }
 
-            if checksum(&payload) != expected_checksum {
+            if checksum(&payload_buf) != expected_checksum {
                 break;
             }
 
-            let op = match decode_op(&payload) {
+            let op = match decode_op(&payload_buf) {
                 Some(op) => op,
                 None => break,
             };
-            apply_op(&mut files, &mut deleted_tombstones, max_tombstones, op);
+            apply_op(
+                &mut files,
+                &mut deleted_tombstones,
+                &mut tombstone_set,
+                max_tombstones,
+                op,
+            );
         }
 
         let approx_bytes = files.values().map(estimate_file_bytes).sum();
@@ -369,17 +380,25 @@ impl Store {
         self.approx_memory_bytes = self
             .approx_memory_bytes
             .saturating_add(estimate_file_bytes(&file));
-        self.deleted_tombstones.retain(|k| *k != key);
+        if self.tombstone_set.remove(&key) {
+            self.deleted_tombstones.retain(|k| *k != key);
+        }
     }
 
     fn record_tombstone(&mut self, key: &str) {
         if self.config.max_deleted_tombstones == 0 {
             return;
         }
-        self.deleted_tombstones.retain(|k| k != key);
+        if self.tombstone_set.contains(key) {
+            self.deleted_tombstones.retain(|k| k != key);
+        } else {
+            self.tombstone_set.insert(key.to_string());
+        }
         self.deleted_tombstones.push_back(key.to_string());
         while self.deleted_tombstones.len() > self.config.max_deleted_tombstones {
-            let _ = self.deleted_tombstones.pop_front();
+            if let Some(removed) = self.deleted_tombstones.pop_front() {
+                self.tombstone_set.remove(&removed);
+            }
         }
     }
 }
@@ -387,6 +406,7 @@ impl Store {
 fn apply_op(
     files: &mut BTreeMap<String, FileMetadata>,
     deleted_tombstones: &mut VecDeque<String>,
+    tombstone_set: &mut HashSet<String>,
     max_tombstones: usize,
     op: JournalOp,
 ) {
@@ -394,16 +414,24 @@ fn apply_op(
         JournalOp::Upsert(file) => {
             let key = composite_key(&file.folder, &file.path);
             files.insert(key.clone(), file);
-            deleted_tombstones.retain(|k| *k != key);
+            if tombstone_set.remove(&key) {
+                deleted_tombstones.retain(|k| *k != key);
+            }
         }
         JournalOp::Delete { folder, path } => {
             let key = composite_key(&folder, &path);
             files.remove(&key);
             if max_tombstones > 0 {
-                deleted_tombstones.retain(|k| *k != key);
+                if tombstone_set.contains(&key) {
+                    deleted_tombstones.retain(|k| *k != key);
+                } else {
+                    tombstone_set.insert(key.clone());
+                }
                 deleted_tombstones.push_back(key);
                 while deleted_tombstones.len() > max_tombstones {
-                    let _ = deleted_tombstones.pop_front();
+                    if let Some(removed) = deleted_tombstones.pop_front() {
+                        tombstone_set.remove(&removed);
+                    }
                 }
             }
         }

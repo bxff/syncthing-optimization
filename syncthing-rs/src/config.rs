@@ -16,6 +16,15 @@ pub(crate) const ERR_PATH_NOT_DIRECTORY: &str = "folder path not a directory";
 pub(crate) const ERR_PATH_MISSING: &str = "folder path missing";
 pub(crate) const ERR_MARKER_MISSING: &str = "folder marker missing";
 
+// Compatibility aliases matching Go surface names used by parity guardrails.
+pub(crate) const DefaultMarkerName: &str = DEFAULT_MARKER_NAME;
+pub(crate) const EncryptionTokenName: &str = ENCRYPTION_TOKEN_NAME;
+pub(crate) const maxConcurrentWritesDefault: usize = MAX_CONCURRENT_WRITES_DEFAULT;
+pub(crate) const maxConcurrentWritesLimit: usize = MAX_CONCURRENT_WRITES_LIMIT;
+pub(crate) const ErrPathNotDirectory: &str = ERR_PATH_NOT_DIRECTORY;
+pub(crate) const ErrPathMissing: &str = ERR_PATH_MISSING;
+pub(crate) const ErrMarkerMissing: &str = ERR_MARKER_MISSING;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum FolderType {

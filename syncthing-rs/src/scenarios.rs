@@ -1,3 +1,4 @@
+use crate::bep::{decode_frame, default_exchange, encode_frame, message_name};
 use crate::folder_modes::all_mode_actions;
 use crate::index_engine::{FolderUpdate, IndexEngine};
 use crate::planner::{classify_paths, compute_need, VersionedFile};
@@ -212,11 +213,22 @@ fn scenario_folder_type_behavior() -> Result<Value, String> {
 
 fn scenario_protocol_state_transition() -> Result<Value, String> {
     let trace = run_events(&default_sequence())?;
+    let exchange = default_exchange();
+    let mut frame_sizes = Vec::new();
+    let mut message_types = Vec::new();
+    for message in &exchange {
+        let frame = encode_frame(message)?;
+        frame_sizes.push(frame.len());
+        let decoded = decode_frame(&frame)?;
+        message_types.push(message_name(&decoded));
+    }
     Ok(json!({
         "scenario": "protocol-state-transition",
         "source": "rust",
         "status": "prototype",
-        "transitions": trace
+        "transitions": trace,
+        "message_types": message_types,
+        "frame_sizes": frame_sizes
     }))
 }
 

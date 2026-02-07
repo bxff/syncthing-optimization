@@ -1,3 +1,4 @@
+mod bep;
 mod folder_modes;
 mod index_engine;
 mod planner;

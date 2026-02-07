@@ -393,10 +393,19 @@ func scenarioProtocolStateTransition() (map[string]any, error) {
 	}
 
 	return baseScenario("protocol-state-transition", map[string]any{
-		"transitions":       transitions,
-		"message_types":     msgTypes,
-		"frame_sizes":       frameSizes,
-		"request_data_hex":  "776f726c64",
+		"transitions": transitions,
+		"message_types": msgTypes,
+		"frame_sizes": frameSizes,
+		"generated_responses": []any{
+			map[string]any{
+				"id":       1,
+				"code":     0,
+				"data_len": 11,
+			},
+		},
+		"device_downloads": []string{"default:a.txt:2"},
+		"remote_sequence":  2,
+		"request_data_hex": "776f726c64",
 	}), nil
 }
 

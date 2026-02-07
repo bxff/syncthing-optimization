@@ -4,7 +4,6 @@ use crate::folder_modes::all_mode_actions;
 use crate::index_engine::{FolderUpdate, IndexEngine};
 use crate::model_core::{newFolderConfiguration, NewModel};
 use crate::planner::{classify_paths, compute_need, VersionedFile};
-use crate::protocol::{default_sequence, run_events};
 use crate::store::{FileMetadata, PageCursor, Store, StoreConfig, JOURNAL_FILE_NAME};
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
@@ -234,7 +233,6 @@ fn scenario_folder_type_behavior() -> Result<Value, String> {
 }
 
 fn scenario_protocol_state_transition() -> Result<Value, String> {
-    let trace = run_events(&default_sequence())?;
     let exchange = default_exchange();
     let mut frame_sizes = Vec::new();
     let mut message_types = Vec::new();
@@ -252,17 +250,39 @@ fn scenario_protocol_state_transition() -> Result<Value, String> {
         "default",
         &req_root.to_string_lossy(),
     ));
+    let exchange_result = model.RunBepExchange("peer-a", &exchange)?;
+    let generated_responses = exchange_result
+        .outbound_messages
+        .iter()
+        .filter_map(|message| match message {
+            crate::bep::BepMessage::Response { id, code, data_len } => Some(json!({
+                "id": id,
+                "code": code,
+                "data_len": data_len,
+            })),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     let request_data = model.RequestData("default", "a.txt", 6, 5)?;
     let request_data_hex = bytes_to_hex(&request_data);
+    let device_downloads = model.DownloadProgress("peer-a");
+    let remote_sequence = model
+        .RemoteSequences("default")
+        .get("remote")
+        .copied()
+        .unwrap_or_default();
     cleanup(req_root);
 
     Ok(json!({
         "scenario": "protocol-state-transition",
         "source": "rust",
         "status": "validated",
-        "transitions": trace,
+        "transitions": exchange_result.transitions,
         "message_types": message_types,
         "frame_sizes": frame_sizes,
+        "generated_responses": generated_responses,
+        "device_downloads": device_downloads,
+        "remote_sequence": remote_sequence,
         "request_data_hex": request_data_hex
     }))
 }

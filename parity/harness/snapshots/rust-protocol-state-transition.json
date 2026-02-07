@@ -1,4 +1,7 @@
 {
+  "device_downloads": [
+    "default:a.txt:2"
+  ],
   "frame_sizes": [
     81,
     55,
@@ -9,6 +12,13 @@
     159,
     52,
     51
+  ],
+  "generated_responses": [
+    {
+      "code": 0,
+      "data_len": 11,
+      "id": 1
+    }
   ],
   "message_types": [
     "hello",
@@ -21,6 +31,7 @@
     "ping",
     "close"
   ],
+  "remote_sequence": 2,
   "request_data_hex": "776f726c64",
   "scenario": "protocol-state-transition",
   "source": "rust",

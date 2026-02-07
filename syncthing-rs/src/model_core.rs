@@ -2,10 +2,12 @@
 #![allow(non_camel_case_types)]
 #![allow(dead_code)]
 
+use crate::bep::{BepMessage, IndexEntry};
 use crate::config::FolderConfiguration;
 use crate::db::{self, Db};
 use crate::folder_core;
 use crate::folder_modes::FolderMode;
+use crate::protocol::run_message_exchange;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -294,6 +296,12 @@ pub(crate) struct model {
     pub(crate) sdb: Arc<Mutex<db::WalFreeDb>>,
     pub(crate) evLogger: Vec<String>,
     pub(crate) fatalChan: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BepExchangeResult {
+    pub(crate) transitions: Vec<String>,
+    pub(crate) outbound_messages: Vec<BepMessage>,
 }
 
 impl Default for model {
@@ -643,6 +651,123 @@ impl model {
         size: usize,
     ) -> Result<Vec<u8>, String> {
         self.RequestData(folder_id, path, offset, size)
+    }
+
+    pub(crate) fn ApplyBepMessage(
+        &mut self,
+        device: &str,
+        message: &BepMessage,
+    ) -> Result<Option<BepMessage>, String> {
+        match message {
+            BepMessage::Hello {
+                device_name: _,
+                client_name,
+            } => {
+                self.deviceWasSeen(device);
+                self.OnHello(device, client_name);
+                self.connections
+                    .entry(device.to_string())
+                    .or_insert_with(|| ConnectionStats {
+                        Connected: true,
+                        ClientVersion: client_name.clone(),
+                        ..ConnectionStats::default()
+                    });
+                Ok(None)
+            }
+            BepMessage::ClusterConfig { folders } => {
+                for folder_id in folders {
+                    self.remoteFolderStates
+                        .insert(folder_id.clone(), "cluster_configured".to_string());
+                }
+                Ok(None)
+            }
+            BepMessage::Index { folder, files } => {
+                let converted = files
+                    .iter()
+                    .map(|file| fileInfoFromIndexEntry(folder, file))
+                    .collect::<Vec<_>>();
+                self.Index(folder, &converted)?;
+                Ok(None)
+            }
+            BepMessage::IndexUpdate { folder, files } => {
+                let converted = files
+                    .iter()
+                    .map(|file| fileInfoFromIndexEntry(folder, file))
+                    .collect::<Vec<_>>();
+                self.IndexUpdate(folder, &converted)?;
+                Ok(None)
+            }
+            BepMessage::Request {
+                id,
+                folder,
+                name,
+                offset,
+                size,
+                hash: _,
+            } => match self.RequestData(folder, name, *offset, *size as usize) {
+                Ok(data) => Ok(Some(BepMessage::Response {
+                    id: *id,
+                    code: 0,
+                    data_len: data.len() as u32,
+                })),
+                Err(_) => Ok(Some(BepMessage::Response {
+                    id: *id,
+                    code: 1,
+                    data_len: 0,
+                })),
+            },
+            BepMessage::Response {
+                id: _,
+                code,
+                data_len,
+            } => {
+                let stats = self.deviceStatRefs.entry(device.to_string()).or_default();
+                *stats.entry("responses".to_string()).or_insert(0) += 1;
+                *stats.entry("response_bytes".to_string()).or_insert(0) += i64::from(*data_len);
+                *stats.entry("response_errors".to_string()).or_insert(0) += if *code == 0 { 0 } else { 1 };
+                Ok(None)
+            }
+            BepMessage::DownloadProgress { folder, updates } => {
+                let entries = updates
+                    .iter()
+                    .map(|update| format!("{folder}:{}:{}", update.name, update.version))
+                    .collect::<Vec<_>>();
+                self.deviceDownloads.insert(device.to_string(), entries);
+                Ok(None)
+            }
+            BepMessage::Ping { timestamp_ms } => {
+                let stats = self.deviceStatRefs.entry(device.to_string()).or_default();
+                stats.insert("last_ping_timestamp_ms".to_string(), *timestamp_ms as i64);
+                Ok(None)
+            }
+            BepMessage::Close { reason: _ } => {
+                self.deviceDidCloseRLocked(device);
+                Ok(None)
+            }
+        }
+    }
+
+    pub(crate) fn RunBepExchange(
+        &mut self,
+        device: &str,
+        messages: &[BepMessage],
+    ) -> Result<BepExchangeResult, String> {
+        let transitions = run_message_exchange(messages)?
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+
+        let mut outbound_messages = Vec::new();
+        for message in messages {
+            if let Some(outbound) = self.ApplyBepMessage(device, message)? {
+                outbound_messages.push(outbound);
+            }
+        }
+
+        Ok(BepExchangeResult {
+            transitions,
+            outbound_messages,
+        })
     }
 
     pub(crate) fn State(&self, folder_id: &str) -> String {
@@ -1215,6 +1340,21 @@ pub(crate) fn readOffsetIntoBuf(path: &PathBuf, offset: u64, len: usize) -> Resu
     Ok(buf)
 }
 
+fn fileInfoFromIndexEntry(folder: &str, file: &IndexEntry) -> db::FileInfo {
+    db::FileInfo {
+        folder: folder.to_string(),
+        path: file.path.clone(),
+        sequence: file.sequence as i64,
+        modified_ns: file.sequence as i64,
+        size: file.size as i64,
+        deleted: file.deleted,
+        ignored: false,
+        local_flags: 0,
+        file_type: db::FileInfoType::File,
+        block_hashes: file.block_hashes.clone(),
+    }
+}
+
 fn safe_join_folder_relative(root: &Path, relative: &str) -> Result<PathBuf, String> {
     let mut clean = PathBuf::new();
     for component in Path::new(relative).components() {
@@ -1313,5 +1453,83 @@ mod tests {
         assert!(err.contains("invalid relative path"));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bep_exchange_applies_remote_index_and_request_flow() {
+        let root = std::env::temp_dir().join(format!(
+            "syncthing-rs-bep-flow-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("mkdir");
+        fs::write(root.join("a.txt"), b"hello-world").expect("write");
+
+        let mut m = NewModel();
+        m.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+        let exchange = crate::bep::default_exchange();
+
+        let result = m
+            .RunBepExchange("peer-a", &exchange)
+            .expect("run exchange");
+
+        assert_eq!(
+            result.transitions,
+            vec![
+                "dial",
+                "hello",
+                "cluster_config",
+                "index",
+                "index_update",
+                "request",
+                "response",
+                "download_progress",
+                "ping",
+                "close",
+            ]
+        );
+        assert_eq!(result.outbound_messages.len(), 1);
+        assert_eq!(
+            result.outbound_messages[0],
+            BepMessage::Response {
+                id: 1,
+                code: 0,
+                data_len: 11,
+            }
+        );
+        assert_eq!(m.DownloadProgress("peer-a"), vec!["default:a.txt:2"]);
+        assert_eq!(m.RemoteSequences("default").get("remote").copied(), Some(2));
+        assert_eq!(m.State("default"), "running");
+        assert_eq!(m.PendingDevices(), Vec::<String>::new());
+        assert_eq!(m.ConnectedTo("peer-a"), false);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apply_bep_request_returns_error_response_for_invalid_path() {
+        let mut m = NewModel();
+        let response = m
+            .ApplyBepMessage(
+                "peer-a",
+                &BepMessage::Request {
+                    id: 7,
+                    folder: "missing".to_string(),
+                    name: "../etc/passwd".to_string(),
+                    offset: 0,
+                    size: 64,
+                    hash: "h".to_string(),
+                },
+            )
+            .expect("response generated");
+
+        assert_eq!(
+            response,
+            Some(BepMessage::Response {
+                id: 7,
+                code: 1,
+                data_len: 0,
+            })
+        );
     }
 }

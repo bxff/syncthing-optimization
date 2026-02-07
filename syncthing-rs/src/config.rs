@@ -167,6 +167,8 @@ pub(crate) struct FolderConfiguration {
     pub(crate) memory_soft_percent: i32,
     #[serde(default = "default_memory_telemetry_interval_s")]
     pub(crate) memory_telemetry_interval_s: i32,
+    #[serde(default = "default_memory_pull_page_items")]
+    pub(crate) memory_pull_page_items: i32,
     pub(crate) max_conflicts: i32,
     pub(crate) disable_sparse_files: bool,
     pub(crate) paused: bool,
@@ -218,6 +220,7 @@ impl Default for FolderConfiguration {
             memory_policy: default_memory_policy(),
             memory_soft_percent: default_memory_soft_percent(),
             memory_telemetry_interval_s: default_memory_telemetry_interval_s(),
+            memory_pull_page_items: default_memory_pull_page_items(),
             max_conflicts: 10,
             disable_sparse_files: false,
             paused: false,
@@ -297,6 +300,12 @@ impl FolderConfiguration {
             return Err(format!(
                 "folder {} memory_telemetry_interval_s must be > 0 (got {})",
                 self.id, self.memory_telemetry_interval_s
+            ));
+        }
+        if self.memory_pull_page_items <= 0 {
+            return Err(format!(
+                "folder {} memory_pull_page_items must be > 0 (got {})",
+                self.id, self.memory_pull_page_items
             ));
         }
         if self.folder_type == FolderType::ReceiveEncrypted && !self.ignore_perms {
@@ -408,7 +417,8 @@ impl FolderConfiguration {
                     "max_mb": self.memory_max_mb,
                     "policy": format!("{:?}", self.memory_policy).to_lowercase(),
                     "soft_percent": self.memory_soft_percent,
-                    "telemetry_interval_s": self.memory_telemetry_interval_s
+                    "telemetry_interval_s": self.memory_telemetry_interval_s,
+                    "pull_page_items": self.memory_pull_page_items
                 }
             }
         })
@@ -467,6 +477,9 @@ impl FolderConfiguration {
         }
         if self.memory_telemetry_interval_s <= 0 {
             self.memory_telemetry_interval_s = default_memory_telemetry_interval_s();
+        }
+        if self.memory_pull_page_items <= 0 {
+            self.memory_pull_page_items = default_memory_pull_page_items();
         }
         if self.folder_type == FolderType::ReceiveEncrypted {
             self.ignore_perms = true;
@@ -610,6 +623,10 @@ fn default_memory_soft_percent() -> i32 {
 
 fn default_memory_telemetry_interval_s() -> i32 {
     5
+}
+
+fn default_memory_pull_page_items() -> i32 {
+    1024
 }
 
 #[cfg(test)]
@@ -764,6 +781,7 @@ mod tests {
         cfg.memory_max_mb = -10;
         cfg.memory_soft_percent = 0;
         cfg.memory_telemetry_interval_s = -1;
+        cfg.memory_pull_page_items = 0;
         cfg.max_conflicts = 1;
 
         cfg.prepare("local-device", &[]);
@@ -772,6 +790,7 @@ mod tests {
         assert_eq!(cfg.memory_policy, MemoryPolicy::Throttle);
         assert_eq!(cfg.memory_soft_percent, 85);
         assert_eq!(cfg.memory_telemetry_interval_s, 5);
+        assert_eq!(cfg.memory_pull_page_items, 1024);
         assert!(cfg.validate().is_ok());
     }
 }

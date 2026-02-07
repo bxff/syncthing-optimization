@@ -10,8 +10,8 @@ use crate::store::compare_path_order;
 use crate::walker::{walk_deterministic, WalkConfig};
 use crc32fast::Hasher;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fs::{self, File};
-use std::io::{BufWriter, Read, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
@@ -493,37 +493,11 @@ impl folder {
         self.pullBasePause();
         self.pullScheduled = false;
 
-        let (needed, estimated, budget, total_blocks, reused_same_path_blocks) = {
+        let (estimated, budget) = {
             let db = self.db.lock().map_err(|_| "db lock poisoned".to_string())?;
             let estimated = db.estimated_memory_bytes();
             let budget = db.memory_budget_bytes();
-            let needed = db
-                .all_needed_global_files(
-                    &self.config.id,
-                    "local",
-                    db::PullOrder::Alphabetic,
-                    10_000,
-                    0,
-                )
-                .map_err(|e| format!("pull query: {e}"))?;
-            let mut total_blocks = 0_usize;
-            let mut reused_same_path_blocks = 0_usize;
-            for global in &needed {
-                total_blocks = total_blocks.saturating_add(global.block_hashes.len());
-                if let Ok(Some(local_prev)) =
-                    db.get_device_file(&self.config.id, LOCAL_DEVICE_ID, &global.path)
-                {
-                    reused_same_path_blocks = reused_same_path_blocks
-                        .saturating_add(count_same_path_reuse_blocks(&local_prev, global));
-                }
-            }
-            (
-                needed,
-                estimated,
-                budget,
-                total_blocks,
-                reused_same_path_blocks,
-            )
+            (estimated, budget)
         };
 
         let soft_limit = if budget == 0 {
@@ -535,7 +509,7 @@ impl folder {
         };
 
         let mut throttled = false;
-        let mut query_limit = 10_000;
+        let mut query_limit = self.config.memory_pull_page_items.max(1) as usize;
         self.lastCapViolation = None;
         match self.config.memory_policy {
             MemoryPolicy::Throttle => {
@@ -543,7 +517,7 @@ impl folder {
                     throttled = true;
                     self.memoryThrottleEvents = self.memoryThrottleEvents.saturating_add(1);
                     // Apply backpressure by shrinking this pull iteration's batch.
-                    query_limit = 256;
+                    query_limit = query_limit.min(256);
                 }
             }
             MemoryPolicy::Fail => {
@@ -563,47 +537,85 @@ impl folder {
             MemoryPolicy::BestEffort => {}
         }
 
-        let needed = if query_limit >= needed.len() {
-            needed
-        } else {
-            needed.into_iter().take(query_limit).collect::<Vec<_>>()
-        };
-
-        let mut local_updates = Vec::with_capacity(needed.len());
+        let mut pulled_count = 0_usize;
+        let mut total_blocks = 0_usize;
+        let mut reused_same_path_blocks = 0_usize;
+        let mut cursor: Option<String> = None;
         let folder_root = PathBuf::from(&self.config.path);
-        for global in &needed {
-            if let Err(err) = apply_remote_file_to_disk(&folder_root, global) {
-                self.errorsMut.push(FileError {
-                    Path: global.path.clone(),
-                    Err: err.clone(),
-                });
-                return Err(format!("pull apply {}: {err}", global.path));
+        loop {
+            let (needed_batch, next_cursor, batch_total_blocks, batch_reused_blocks) = {
+                let db = self.db.lock().map_err(|_| "db lock poisoned".to_string())?;
+                let page = db
+                    .all_needed_global_files_ordered_page(
+                        &self.config.id,
+                        LOCAL_DEVICE_ID,
+                        cursor.as_deref(),
+                        query_limit,
+                    )
+                    .map_err(|e| format!("pull query: {e}"))?;
+                let mut batch_total = 0_usize;
+                let mut batch_reused = 0_usize;
+                for global in &page.items {
+                    batch_total = batch_total.saturating_add(global.block_hashes.len());
+                    if let Ok(Some(local_prev)) =
+                        db.get_device_file(&self.config.id, LOCAL_DEVICE_ID, &global.path)
+                    {
+                        batch_reused = batch_reused
+                            .saturating_add(count_same_path_reuse_blocks(&local_prev, global));
+                    }
+                }
+                (page.items, page.next_cursor, batch_total, batch_reused)
+            };
+
+            if needed_batch.is_empty() {
+                break;
             }
-            let mut applied = global.clone();
-            applied.folder = self.config.id.clone();
-            applied.local_flags = 0;
-            if applied.deleted {
-                applied.block_hashes.clear();
+
+            total_blocks = total_blocks.saturating_add(batch_total_blocks);
+            reused_same_path_blocks = reused_same_path_blocks.saturating_add(batch_reused_blocks);
+
+            let mut local_updates = Vec::with_capacity(needed_batch.len());
+            for global in &needed_batch {
+                if let Err(err) = apply_remote_file_to_disk(&folder_root, global) {
+                    self.errorsMut.push(FileError {
+                        Path: global.path.clone(),
+                        Err: err.clone(),
+                    });
+                    return Err(format!("pull apply {}: {err}", global.path));
+                }
+                let mut applied = global.clone();
+                applied.folder = self.config.id.clone();
+                applied.local_flags = 0;
+                if applied.deleted {
+                    applied.block_hashes.clear();
+                }
+                local_updates.push(applied);
             }
-            local_updates.push(applied);
+
+            if !local_updates.is_empty() {
+                pulled_count = pulled_count.saturating_add(local_updates.len());
+                let mut db = self.db.lock().map_err(|_| "db lock poisoned".to_string())?;
+                db.update(&self.config.id, LOCAL_DEVICE_ID, local_updates)
+                    .map_err(|e| format!("pull apply update: {e}"))?;
+            }
+
+            cursor = next_cursor;
+            if cursor.is_none() {
+                break;
+            }
         }
 
-        if !local_updates.is_empty() {
-            let mut db = self.db.lock().map_err(|_| "db lock poisoned".to_string())?;
-            db.update(&self.config.id, "local", local_updates)
-                .map_err(|e| format!("pull apply update: {e}"))?;
-        }
         let fetched_blocks = total_blocks.saturating_sub(reused_same_path_blocks);
 
         self.pullStats = PullStats {
-            needed_files: needed.len(),
+            needed_files: pulled_count,
             total_blocks,
             reused_same_path_blocks,
             fetched_blocks,
             throttled,
             hard_blocked: false,
         };
-        Ok(needed.len())
+        Ok(pulled_count)
     }
 
     pub(crate) fn PullStats(&self) -> PullStats {
@@ -1085,9 +1097,7 @@ fn apply_remote_file_to_disk(root: &Path, file: &db::FileInfo) -> Result<(), Str
 
     match file.file_type {
         db::FileInfoType::Directory => ensure_directory_path(&abs),
-        db::FileInfoType::File | db::FileInfoType::Symlink => {
-            write_placeholder_file(&abs, file.size, &file.block_hashes)
-        }
+        db::FileInfoType::File | db::FileInfoType::Symlink => write_sparse_file(&abs, file.size),
     }
 }
 
@@ -1130,7 +1140,7 @@ fn ensure_directory_path(path: &Path) -> Result<(), String> {
     fs::create_dir_all(path).map_err(|e| format!("create dir {}: {e}", path.display()))
 }
 
-fn write_placeholder_file(path: &Path, size: i64, block_hashes: &[String]) -> Result<(), String> {
+fn write_sparse_file(path: &Path, size: i64) -> Result<(), String> {
     let size = usize::try_from(size).map_err(|_| format!("invalid file size: {size}"))?;
     if path.exists() && path.is_dir() {
         fs::remove_dir_all(path).map_err(|e| format!("remove dir {}: {e}", path.display()))?;
@@ -1138,44 +1148,14 @@ fn write_placeholder_file(path: &Path, size: i64, block_hashes: &[String]) -> Re
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
-    let file = File::create(path).map_err(|e| format!("create file {}: {e}", path.display()))?;
-    let mut writer = BufWriter::new(file);
-    if size == 0 {
-        writer
-            .flush()
-            .map_err(|e| format!("flush file {}: {e}", path.display()))?;
-        return Ok(());
-    }
-
-    let seed = placeholder_seed(block_hashes);
-    let mut seed_pos = 0_usize;
-    let mut remaining = size;
-    let mut chunk = vec![0_u8; BLOCK_CHUNK_SIZE.min(remaining.max(1))];
-
-    while remaining > 0 {
-        let n = chunk.len().min(remaining);
-        for b in &mut chunk[..n] {
-            *b = seed[seed_pos];
-            seed_pos = (seed_pos + 1) % seed.len();
-        }
-        writer
-            .write_all(&chunk[..n])
-            .map_err(|e| format!("write file {}: {e}", path.display()))?;
-        remaining -= n;
-    }
-
-    writer
-        .flush()
-        .map_err(|e| format!("flush file {}: {e}", path.display()))?;
-    Ok(())
-}
-
-fn placeholder_seed(block_hashes: &[String]) -> Vec<u8> {
-    let mut out = block_hashes.join("|").into_bytes();
-    if out.is_empty() {
-        out.push(0_u8);
-    }
-    out
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|e| format!("create file {}: {e}", path.display()))?;
+    file.set_len(size as u64)
+        .map_err(|e| format!("set file size {}: {e}", path.display()))
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1680,6 +1660,40 @@ mod tests {
         let disk_file = root.join("same.txt");
         assert!(disk_file.exists());
         assert_eq!(fs::metadata(&disk_file).expect("meta same.txt").len(), 1);
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(db_root);
+    }
+
+    #[test]
+    fn pull_uses_configured_page_size_without_materializing_all_needs() {
+        let root = temp_root("pull-page-size");
+        let db_root = temp_root("pull-page-size-db");
+        let mut dbv = db::WalFreeDb::open_runtime(&db_root, 50).expect("open runtime db");
+        dbv.update(
+            "default",
+            "remote",
+            vec![
+                file("a.txt", 1, &["h1"]),
+                file("b.txt", 2, &["h2"]),
+                file("c.txt", 3, &["h3"]),
+            ],
+        )
+        .expect("update remote");
+
+        let db = Arc::new(Mutex::new(dbv));
+        let mut cfg = FolderConfiguration::default();
+        cfg.id = "default".to_string();
+        cfg.path = root.to_string_lossy().to_string();
+        cfg.memory_pull_page_items = 1;
+        let mut f = newFolder(cfg, db);
+
+        let pulled = f.pull().expect("pull");
+        assert_eq!(pulled, 3);
+        assert_eq!(f.PullStats().needed_files, 3);
+        assert!(root.join("a.txt").exists());
+        assert!(root.join("b.txt").exists());
+        assert!(root.join("c.txt").exists());
 
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(db_root);

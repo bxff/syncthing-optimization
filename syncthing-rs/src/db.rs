@@ -77,7 +77,7 @@ impl FileMetadata {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Counts {
     pub(crate) files: usize,
     pub(crate) directories: usize,
@@ -103,6 +103,12 @@ pub(crate) struct KeyValue {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LocalFilePage {
+    pub(crate) items: Vec<FileInfo>,
+    pub(crate) next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NeededFilePage {
     pub(crate) items: Vec<FileInfo>,
     pub(crate) next_cursor: Option<String>,
 }
@@ -304,6 +310,58 @@ impl WalFreeDb {
         })
     }
 
+    pub(crate) fn all_needed_global_files_ordered_page(
+        &self,
+        folder: &str,
+        device: &str,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> Result<NeededFilePage, String> {
+        self.ensure_open()?;
+        if limit == 0 {
+            return Ok(NeededFilePage {
+                items: Vec::new(),
+                next_cursor: None,
+            });
+        }
+
+        let globals = self.global_file_map(folder);
+        let mut items = Vec::new();
+        let mut has_more = false;
+
+        for (path, global) in globals.iter() {
+            if let Some(cursor) = start_after {
+                if path.as_str() <= cursor {
+                    continue;
+                }
+            }
+            let local = self.get_device_file(folder, device, path)?;
+            let requires_update = match local {
+                Some(current) => {
+                    global.sequence > current.sequence
+                        || (global.deleted != current.deleted
+                            && global.sequence >= current.sequence)
+                }
+                None => true,
+            };
+            if !requires_update {
+                continue;
+            }
+            if items.len() >= limit {
+                has_more = true;
+                break;
+            }
+            items.push(global.clone());
+        }
+
+        let next_cursor = if has_more {
+            items.last().map(|f| f.path.clone())
+        } else {
+            None
+        };
+        Ok(NeededFilePage { items, next_cursor })
+    }
+
     fn open_default_runtime() -> Result<Self, String> {
         let mut root = std::env::temp_dir();
         let nanos = SystemTime::now()
@@ -361,61 +419,46 @@ impl WalFreeDb {
         Ok(())
     }
 
-    fn all_records(&self) -> Vec<StoredRecord> {
-        self.store
-            .all_files_lexicographic()
-            .into_iter()
-            .map(store_to_record)
-            .collect()
-    }
-
-    fn all_files(&self) -> Vec<FileInfo> {
-        self.all_records().into_iter().map(|r| r.file).collect()
-    }
-
     fn all_files_for_folder_device(&self, folder: &str, device: &str) -> Vec<FileInfo> {
-        self.all_records()
-            .into_iter()
-            .filter(|r| r.file.folder == folder && r.device == device)
-            .map(|r| r.file)
-            .collect()
+        let mut out = Vec::new();
+        self.store
+            .for_each_file_in_folder_device(folder, device, |meta| {
+                out.push(store_to_file_info(meta));
+                true
+            });
+        out
     }
 
     fn global_file_map(&self, folder: &str) -> BTreeMap<String, FileInfo> {
         let mut out: BTreeMap<String, FileInfo> = BTreeMap::new();
-        for candidate in self
-            .all_files()
-            .into_iter()
-            .filter(|f| f.folder == folder && !f.ignored)
-        {
-            let path = candidate.path.clone();
-            if candidate.folder != folder {
-                continue;
+        self.store.for_each_file_in_folder(folder, |meta| {
+            if meta.ignored {
+                return true;
             }
+            let candidate = store_to_file_info(meta);
+            let path = candidate.path.clone();
             match out.get(&path) {
                 Some(current) if !prefer_global(&candidate, current) => {}
                 _ => {
                     out.insert(path, candidate);
                 }
             }
-        }
+            true
+        });
         out
     }
 
     fn global_availability_map(&self, folder: &str) -> BTreeMap<String, BTreeSet<DeviceId>> {
         let mut out: BTreeMap<String, BTreeSet<DeviceId>> = BTreeMap::new();
-        for record in self
-            .all_records()
-            .into_iter()
-            .filter(|r| r.file.folder == folder && !r.file.deleted)
-        {
-            if record.file.folder != folder || record.file.deleted {
-                continue;
+        self.store.for_each_file_in_folder(folder, |meta| {
+            if meta.deleted {
+                return true;
             }
-            out.entry(record.file.path.clone())
+            out.entry(meta.path.clone())
                 .or_default()
-                .insert(record.device);
-        }
+                .insert(meta.device.clone());
+            true
+        });
         out
     }
 }
@@ -561,12 +604,13 @@ impl Db for WalFreeDb {
     ) -> Result<Vec<FileMetadata>, String> {
         self.ensure_open()?;
         let target = String::from_utf8_lossy(hash).to_string();
-        let mut out = self
-            .all_files()
-            .into_iter()
-            .filter(|f| f.folder == folder && f.block_hashes.iter().any(|h| h == &target))
-            .map(file_metadata_from_info)
-            .collect::<Vec<_>>();
+        let mut out = Vec::new();
+        self.store.for_each_file_in_folder(folder, |meta| {
+            if meta.block_hashes.iter().any(|h| h == &target) {
+                out.push(file_metadata_from_info(store_to_file_info(meta)));
+            }
+            true
+        });
         out.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(out)
     }
@@ -580,6 +624,39 @@ impl Db for WalFreeDb {
         offset: usize,
     ) -> Result<Vec<FileInfo>, String> {
         self.ensure_open()?;
+        if order == PullOrder::Alphabetic {
+            let mut out = Vec::new();
+            let mut cursor: Option<String> = None;
+            let mut skipped = 0_usize;
+            let target = if limit == 0 { usize::MAX } else { limit };
+            loop {
+                let page = self.all_needed_global_files_ordered_page(
+                    folder,
+                    device,
+                    cursor.as_deref(),
+                    2048,
+                )?;
+                if page.items.is_empty() {
+                    break;
+                }
+                for file in page.items {
+                    if skipped < offset {
+                        skipped += 1;
+                        continue;
+                    }
+                    if out.len() >= target {
+                        return Ok(out);
+                    }
+                    out.push(file);
+                }
+                cursor = page.next_cursor;
+                if cursor.is_none() {
+                    break;
+                }
+            }
+            return Ok(out);
+        }
+
         let globals = self.global_file_map(folder);
         let mut need = Vec::new();
 
@@ -616,11 +693,8 @@ impl Db for WalFreeDb {
         let target = String::from_utf8_lossy(hash).to_string();
         let mut out = Vec::new();
 
-        for file in self.all_files().into_iter() {
-            if file.folder != folder {
-                continue;
-            }
-            for (idx, block_hash) in file.block_hashes.iter().enumerate() {
+        self.store.for_each_file_in_folder(folder, |meta| {
+            for (idx, block_hash) in meta.block_hashes.iter().enumerate() {
                 if block_hash != &target {
                     continue;
                 }
@@ -629,10 +703,11 @@ impl Db for WalFreeDb {
                     offset: idx as i64 * 128 * 1024,
                     block_index: idx as i32,
                     size: 128 * 1024,
-                    file_name: file.path.clone(),
+                    file_name: meta.path.clone(),
                 });
             }
-        }
+            true
+        });
         out.sort_by(|a, b| a.file_name.cmp(&b.file_name));
         Ok(out)
     }
@@ -654,12 +729,13 @@ impl Db for WalFreeDb {
 
     fn drop_device(&mut self, device: &str) -> Result<(), String> {
         self.ensure_open()?;
-        let doomed = self
-            .all_records()
-            .into_iter()
-            .filter(|r| r.device == device)
-            .map(|r| (r.file.folder, r.file.path))
-            .collect::<Vec<_>>();
+        let mut doomed = Vec::new();
+        self.store.for_each_file(|meta| {
+            if meta.device == device {
+                doomed.push((meta.folder.clone(), meta.path.clone()));
+            }
+            true
+        });
         for (folder, path) in doomed {
             self.store
                 .delete_file(&folder, device, &path)
@@ -688,12 +764,11 @@ impl Db for WalFreeDb {
 
     fn drop_folder(&mut self, folder: &str) -> Result<(), String> {
         self.ensure_open()?;
-        let doomed = self
-            .all_records()
-            .into_iter()
-            .filter(|r| r.file.folder == folder)
-            .map(|r| (r.device, r.file.path))
-            .collect::<Vec<_>>();
+        let mut doomed = Vec::new();
+        self.store.for_each_file_in_folder(folder, |meta| {
+            doomed.push((meta.device.clone(), meta.path.clone()));
+            true
+        });
         for (device, path) in doomed {
             self.store
                 .delete_file(folder, &device, &path)
@@ -719,36 +794,31 @@ impl Db for WalFreeDb {
     fn list_folders(&self) -> Result<Vec<String>, String> {
         self.ensure_open()?;
         let mut folders = BTreeSet::new();
-        for file in self.all_files() {
-            folders.insert(file.folder);
-        }
+        self.store.for_each_file(|meta| {
+            folders.insert(meta.folder.clone());
+            true
+        });
         Ok(folders.into_iter().collect())
     }
 
     fn list_devices_for_folder(&self, folder: &str) -> Result<Vec<DeviceId>, String> {
         self.ensure_open()?;
         let mut devices = BTreeSet::new();
-        for record in self
-            .all_records()
-            .into_iter()
-            .filter(|r| r.file.folder == folder)
-        {
-            devices.insert(record.device);
-        }
+        self.store.for_each_file_in_folder(folder, |meta| {
+            devices.insert(meta.device.clone());
+            true
+        });
         Ok(devices.into_iter().collect())
     }
 
     fn remote_sequences(&self, folder: &str) -> Result<BTreeMap<DeviceId, i64>, String> {
         self.ensure_open()?;
         let mut out = BTreeMap::new();
-        for record in self
-            .all_records()
-            .into_iter()
-            .filter(|r| r.file.folder == folder)
-        {
-            let entry = out.entry(record.device).or_insert(0);
-            *entry = (*entry).max(record.file.sequence);
-        }
+        self.store.for_each_file_in_folder(folder, |meta| {
+            let entry = out.entry(meta.device.clone()).or_insert(0);
+            *entry = (*entry).max(u64_to_i64(meta.sequence));
+            true
+        });
         Ok(out)
     }
 
@@ -759,17 +829,39 @@ impl Db for WalFreeDb {
 
     fn count_local(&self, folder: &str, device: &str) -> Result<Counts, String> {
         self.ensure_open()?;
-        Ok(count_files(
-            self.all_local_files(folder, device)?.into_iter(),
-        ))
+        let mut counts = Counts::default();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = self.all_local_files_ordered_page(folder, device, cursor.as_deref(), 2048)?;
+            if page.items.is_empty() {
+                break;
+            }
+            accumulate_counts(&mut counts, count_files(page.items.into_iter()));
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        Ok(counts)
     }
 
     fn count_need(&self, folder: &str, device: &str) -> Result<Counts, String> {
         self.ensure_open()?;
-        Ok(count_files(
-            self.all_needed_global_files(folder, device, PullOrder::Alphabetic, 0, 0)?
-                .into_iter(),
-        ))
+        let mut counts = Counts::default();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page =
+                self.all_needed_global_files_ordered_page(folder, device, cursor.as_deref(), 2048)?;
+            if page.items.is_empty() {
+                break;
+            }
+            accumulate_counts(&mut counts, count_files(page.items.into_iter()));
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        Ok(counts)
     }
 
     fn count_receive_only_changed(&self, folder: &str) -> Result<Counts, String> {
@@ -898,18 +990,6 @@ fn store_to_file_info(meta: &StoreFileMetadata) -> FileInfo {
         file_type: store_to_file_type(&meta.file_type),
         block_hashes: meta.block_hashes.clone(),
     }
-}
-
-#[derive(Clone, Debug)]
-struct StoredRecord {
-    device: String,
-    file: FileInfo,
-}
-
-fn store_to_record(meta: StoreFileMetadata) -> StoredRecord {
-    let device = meta.device.clone();
-    let file = store_to_file_info(&meta);
-    StoredRecord { device, file }
 }
 
 fn file_type_to_store(file_type: FileInfoType) -> String {
@@ -1056,6 +1136,14 @@ fn count_files(iter: impl Iterator<Item = FileInfo>) -> Counts {
     }
 
     counts
+}
+
+fn accumulate_counts(target: &mut Counts, delta: Counts) {
+    target.files += delta.files;
+    target.directories += delta.directories;
+    target.deleted += delta.deleted;
+    target.bytes += delta.bytes;
+    target.receive_only_changed += delta.receive_only_changed;
 }
 
 #[cfg(test)]

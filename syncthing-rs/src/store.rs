@@ -201,6 +201,47 @@ impl Store {
         out
     }
 
+    pub(crate) fn for_each_file<F>(&self, mut visit: F)
+    where
+        F: FnMut(&FileMetadata) -> bool,
+    {
+        for value in self.files.values() {
+            if !visit(value) {
+                break;
+            }
+        }
+    }
+
+    pub(crate) fn for_each_file_in_folder<F>(&self, folder: &str, mut visit: F)
+    where
+        F: FnMut(&FileMetadata) -> bool,
+    {
+        let prefix = folder_prefix(folder);
+        for (key, value) in self.files.range(prefix.clone()..) {
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            if !visit(value) {
+                break;
+            }
+        }
+    }
+
+    pub(crate) fn for_each_file_in_folder_device<F>(&self, folder: &str, device: &str, mut visit: F)
+    where
+        F: FnMut(&FileMetadata) -> bool,
+    {
+        let prefix = folder_device_prefix(folder, device);
+        for (key, value) in self.files.range(prefix.clone()..) {
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            if !visit(value) {
+                break;
+            }
+        }
+    }
+
     pub(crate) fn file_count(&self) -> usize {
         self.files.len()
     }

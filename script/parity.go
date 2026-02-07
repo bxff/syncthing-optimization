@@ -130,6 +130,7 @@ type differentialReport struct {
 	ProducedBy    string         `json:"produced_by,omitempty"`
 	Match         bool           `json:"match"`
 	Mismatches    []diffMismatch `json:"mismatches"`
+	Scenarios     []diffScenario `json:"scenarios"`
 }
 
 type diffMismatch struct {
@@ -137,6 +138,13 @@ type diffMismatch struct {
 	Severity string `json:"severity"`
 	Open     bool   `json:"open"`
 	Message  string `json:"message"`
+}
+
+type diffScenario struct {
+	ID       string `json:"id"`
+	Severity string `json:"severity"`
+	Required bool   `json:"required"`
+	Status   string `json:"status"`
 }
 
 type testStatusReport struct {
@@ -162,6 +170,20 @@ type durabilityReport struct {
 	GeneratedAt   string `json:"generated_at"`
 	Durability    string `json:"durability"`
 	CrashRecovery string `json:"crash_recovery"`
+}
+
+type harnessScenarioFile struct {
+	SchemaVersion int               `json:"schema_version"`
+	Scenarios     []harnessScenario `json:"scenarios"`
+}
+
+type harnessScenario struct {
+	ID string `json:"id"`
+}
+
+type requiredTestEvidence struct {
+	ScenarioIDs     map[string]struct{}
+	ScenarioOutcome map[string]string
 }
 
 type dashboardJSON struct {
@@ -349,12 +371,17 @@ func runCheck(args []string) {
 	for _, it := range mapping.Items {
 		mappingByID[it.ID] = it
 	}
+	manifestByID := make(map[string]featureItem, len(manifest.Items))
+	for _, feat := range manifest.Items {
+		manifestByID[feat.ID] = feat
+	}
 
 	report := guardrailReport{
 		SchemaVersion: schemaVersion,
 		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
 		Mode:          *mode,
 	}
+	testEvidence := loadRequiredTestEvidence(&report)
 
 	validateExceptions(&report, exceptions, *mode)
 
@@ -392,14 +419,33 @@ func runCheck(args []string) {
 			}
 		case "implemented":
 			report.Summary.Implemented++
-			validateImplementedLike(&report, mi)
+			validateImplementedLike(&report, feat, mi, testEvidence)
 		case "parity-verified":
 			report.Summary.ParityVerified++
-			validateImplementedLike(&report, mi)
+			validateImplementedLike(&report, feat, mi, testEvidence)
 		}
 	}
 
 	report.Summary.TotalFeatures = len(manifest.Items)
+
+	for _, mi := range mapping.Items {
+		feat, ok := manifestByID[mi.ID]
+		if !ok {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "mapping-stale",
+				ID:      mi.ID,
+				Message: "mapping item does not exist in feature-manifest.json",
+			})
+			continue
+		}
+		if mi.Source != feat.Source || mi.Subsystem != feat.Subsystem || mi.Kind != feat.Kind || mi.Symbol != feat.Symbol {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "mapping-drift",
+				ID:      mi.ID,
+				Message: "mapping source metadata differs from manifest entry",
+			})
+		}
+	}
 
 	rustSymbols := scanRustSurfaceSymbols()
 	if len(rustSymbols) > 0 {
@@ -792,7 +838,63 @@ func loadOrInitExceptions(path string) exceptionsFile {
 	return ex
 }
 
-func validateImplementedLike(report *guardrailReport, mi mappingItem) {
+func loadRequiredTestEvidence(report *guardrailReport) requiredTestEvidence {
+	ev := requiredTestEvidence{
+		ScenarioIDs:     make(map[string]struct{}),
+		ScenarioOutcome: make(map[string]string),
+	}
+
+	cfg := harnessScenarioFile{}
+	if err := readJSON("parity/harness/scenarios.json", &cfg); err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "required-tests",
+			Path:    "parity/harness/scenarios.json",
+			Message: "missing or invalid harness scenarios file",
+		})
+		return ev
+	}
+
+	for _, sc := range cfg.Scenarios {
+		id := strings.TrimSpace(sc.ID)
+		if id == "" {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "required-tests",
+				Path:    "parity/harness/scenarios.json",
+				Message: "scenario entry with empty id",
+			})
+			continue
+		}
+		if _, exists := ev.ScenarioIDs[id]; exists {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "required-tests",
+				Path:    "parity/harness/scenarios.json",
+				Message: fmt.Sprintf("duplicate scenario id %q", id),
+			})
+			continue
+		}
+		ev.ScenarioIDs[id] = struct{}{}
+	}
+
+	latest := differentialReport{}
+	if err := readJSON("parity/diff-reports/latest.json", &latest); err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "required-tests",
+			Path:    "parity/diff-reports/latest.json",
+			Message: "missing or invalid latest differential report for scenario outcomes",
+		})
+		return ev
+	}
+	for _, sc := range latest.Scenarios {
+		id := strings.TrimSpace(sc.ID)
+		if id == "" {
+			continue
+		}
+		ev.ScenarioOutcome[id] = strings.TrimSpace(sc.Status)
+	}
+	return ev
+}
+
+func validateImplementedLike(report *guardrailReport, feat featureItem, mi mappingItem, ev requiredTestEvidence) {
 	if strings.TrimSpace(mi.RustComponent) == "" {
 		report.Failures = append(report.Failures, reportFailure{
 			Rule:    "mapping-rust-component",
@@ -812,6 +914,53 @@ func validateImplementedLike(report *guardrailReport, mi mappingItem) {
 			Rule:    "mapping-required-tests",
 			ID:      mi.ID,
 			Message: "implemented feature has no required_tests",
+		})
+		return
+	}
+
+	scenarioRefs := 0
+	for _, testRef := range mi.RequiredTests {
+		testRef = strings.TrimSpace(testRef)
+		if testRef == "" {
+			continue
+		}
+		if !strings.HasPrefix(testRef, "scenario/") {
+			continue
+		}
+		scenarioRefs++
+		scenarioID := strings.TrimSpace(strings.TrimPrefix(testRef, "scenario/"))
+		if scenarioID == "" {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "mapping-required-tests",
+				ID:      mi.ID,
+				Message: "scenario/ required_test has empty scenario id",
+			})
+			continue
+		}
+		if _, ok := ev.ScenarioIDs[scenarioID]; !ok {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "mapping-required-tests",
+				ID:      mi.ID,
+				Message: fmt.Sprintf("required_test %q does not map to parity/harness/scenarios.json", testRef),
+			})
+			continue
+		}
+		if mi.Status == "parity-verified" {
+			status := strings.ToLower(strings.TrimSpace(ev.ScenarioOutcome[scenarioID]))
+			if status != "pass" {
+				report.Failures = append(report.Failures, reportFailure{
+					Rule:    "mapping-required-tests",
+					ID:      mi.ID,
+					Message: fmt.Sprintf("parity-verified feature requires passing %q (current status=%q)", testRef, status),
+				})
+			}
+		}
+	}
+	if scenarioRefs == 0 {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "mapping-required-tests",
+			ID:      mi.ID,
+			Message: fmt.Sprintf("feature %s (%s) must include at least one scenario/<id> required_test", feat.Symbol, feat.Source),
 		})
 	}
 }

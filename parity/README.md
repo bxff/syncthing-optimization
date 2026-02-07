@@ -62,6 +62,9 @@ GOCACHE=/tmp/go-cache go run ./script/parity_pr_guard.go --base origin/main --he
 - `implemented`: implemented in Rust, but not parity-verified.
 - `parity-verified`: implemented and verified against parity requirements.
 
+For `implemented` and `parity-verified` features, `required_tests` must include at least one `scenario/<id>` entry where `<id>` exists in `parity/harness/scenarios.json`.
+For `parity-verified`, each mapped `scenario/<id>` must have `status=pass` in `parity/diff-reports/latest.json`.
+
 ## Exception policy
 
 No implicit exceptions are allowed. Any exception must be entered in `exceptions.json` with:

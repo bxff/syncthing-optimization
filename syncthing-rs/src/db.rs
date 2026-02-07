@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) type DeviceId = String;
@@ -412,14 +413,16 @@ impl WalFreeDb {
     }
 
     fn open_default_runtime() -> Result<Self, String> {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let suffix = COUNTER.fetch_add(1, Ordering::Relaxed);
         let mut root = std::env::temp_dir();
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| format!("clock error: {e}"))?
             .as_nanos();
         root.push(format!(
-            "syncthing-rs-runtime-db-{}-{nanos}",
-            std::process::id()
+            "syncthing-rs-runtime-db-{}-{nanos}-{suffix}",
+            std::process::id(),
         ));
         let config = StoreConfig::new(&root).with_memory_cap_mb(50);
         Self::open(config)

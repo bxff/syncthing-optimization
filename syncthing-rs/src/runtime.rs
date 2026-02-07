@@ -1,4 +1,5 @@
 use crate::bep::{decode_frame, encode_frame, BepMessage};
+use crate::db::Db;
 use crate::model_core::{model, newFolderConfiguration, NewModel, NewModelWithRuntime};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -498,6 +499,24 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 }
             }
         }
+        "/rest/db/ignores" => {
+            if method != &Method::Get {
+                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+            }
+            let params = parse_query(query);
+            let Some(folder) = params.get("folder") else {
+                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+            };
+            match folder_ignores(runtime, folder) {
+                Ok(payload) => ApiReply::json(200, payload),
+                Err(ApiFolderStatusError::MissingFolder) => {
+                    ApiReply::json(404, json!({ "error": "folder not found", "folder": folder }))
+                }
+                Err(ApiFolderStatusError::Internal(err)) => {
+                    ApiReply::json(500, json!({ "error": err }))
+                }
+            }
+        }
         "/rest/db/browse" => {
             if method != &Method::Get {
                 return ApiReply::json(405, json!({ "error": "method not allowed" }));
@@ -620,6 +639,24 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
             };
             match revert_folder(runtime, folder) {
+                Ok(payload) => ApiReply::json(200, payload),
+                Err(ApiFolderStatusError::MissingFolder) => {
+                    ApiReply::json(404, json!({ "error": "folder not found", "folder": folder }))
+                }
+                Err(ApiFolderStatusError::Internal(err)) => {
+                    ApiReply::json(500, json!({ "error": err }))
+                }
+            }
+        }
+        "/rest/db/reset" => {
+            if method != &Method::Post {
+                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+            }
+            let params = parse_query(query);
+            let Some(folder) = params.get("folder") else {
+                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+            };
+            match reset_folder(runtime, folder) {
                 Ok(payload) => ApiReply::json(200, payload),
                 Err(ApiFolderStatusError::MissingFolder) => {
                     ApiReply::json(404, json!({ "error": "folder not found", "folder": folder }))
@@ -876,6 +913,22 @@ fn folder_jobs(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiFol
     }))
 }
 
+fn folder_ignores(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiFolderStatusError> {
+    let guard = runtime
+        .model
+        .lock()
+        .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
+    if !guard.folderCfgs.contains_key(folder) {
+        return Err(ApiFolderStatusError::MissingFolder);
+    }
+    let ignores = guard.CurrentIgnores(folder);
+    Ok(json!({
+        "folder": folder,
+        "count": ignores.len(),
+        "patterns": ignores,
+    }))
+}
+
 fn scan_folder(
     runtime: &DaemonApiRuntime,
     folder: &str,
@@ -989,6 +1042,28 @@ fn revert_folder(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiF
     Ok(json!({
         "folder": folder,
         "action": "revert",
+        "ok": true,
+    }))
+}
+
+fn reset_folder(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiFolderStatusError> {
+    let mut guard = runtime
+        .model
+        .lock()
+        .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
+    if !guard.folderCfgs.contains_key(folder) {
+        return Err(ApiFolderStatusError::MissingFolder);
+    }
+    guard.ResetFolder(folder);
+    let mut db = guard
+        .sdb
+        .lock()
+        .map_err(|_| ApiFolderStatusError::Internal("database lock poisoned".to_string()))?;
+    db.drop_folder(folder)
+        .map_err(ApiFolderStatusError::Internal)?;
+    Ok(json!({
+        "folder": folder,
+        "action": "reset",
         "ok": true,
     }))
 }
@@ -1822,6 +1897,60 @@ mod tests {
     }
 
     #[test]
+    fn api_db_ignores_and_reset_endpoints_work() {
+        let root = temp_root("api-db-ignores-reset");
+        let model = Arc::new(Mutex::new(NewModelWithRuntime(Some(root.clone()), Some(50))));
+        {
+            let mut guard = model.lock().expect("lock");
+            guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+            guard.SetIgnores(
+                "default",
+                vec!["*.tmp".to_string(), ".DS_Store".to_string()],
+            );
+            {
+                let mut db = guard.sdb.lock().expect("db lock");
+                db.update("default", "local", vec![file_info("a.txt", 1, 10)])
+                    .expect("update local");
+            }
+        }
+        let runtime = test_api_runtime(
+            model,
+            vec![FolderSpec {
+                id: "default".to_string(),
+                path: root.to_string_lossy().to_string(),
+            }],
+            0,
+        );
+
+        let ignores = build_api_response(&Method::Get, "/rest/db/ignores?folder=default", &runtime);
+        assert_eq!(ignores.status_code, StatusCode(200));
+        let ignores_payload: Value = serde_json::from_slice(&ignores.body).expect("decode json");
+        assert_eq!(ignores_payload["count"], 2);
+
+        let reset = build_api_response(&Method::Post, "/rest/db/reset?folder=default", &runtime);
+        assert_eq!(reset.status_code, StatusCode(200));
+        let reset_payload: Value = serde_json::from_slice(&reset.body).expect("decode json");
+        assert_eq!(reset_payload["action"], "reset");
+        assert_eq!(reset_payload["ok"], true);
+
+        let ignores_after =
+            build_api_response(&Method::Get, "/rest/db/ignores?folder=default", &runtime);
+        assert_eq!(ignores_after.status_code, StatusCode(200));
+        let ignores_after_payload: Value =
+            serde_json::from_slice(&ignores_after.body).expect("decode json");
+        assert_eq!(ignores_after_payload["count"], 0);
+
+        let file_after =
+            build_api_response(&Method::Get, "/rest/db/file?folder=default&file=a.txt", &runtime);
+        assert_eq!(file_after.status_code, StatusCode(200));
+        let file_after_payload: Value =
+            serde_json::from_slice(&file_after.body).expect("decode json");
+        assert_eq!(file_after_payload["exists"], false);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn api_db_need_returns_needed_page() {
         let root = temp_root("api-db-need");
         let model = Arc::new(Mutex::new(NewModelWithRuntime(Some(root.clone()), Some(50))));
@@ -1887,6 +2016,12 @@ mod tests {
         let revert_get =
             build_api_response(&Method::Get, "/rest/db/revert?folder=default", &runtime);
         assert_eq!(revert_get.status_code, StatusCode(405));
+        let reset_get =
+            build_api_response(&Method::Get, "/rest/db/reset?folder=default", &runtime);
+        assert_eq!(reset_get.status_code, StatusCode(405));
+        let ignores_post =
+            build_api_response(&Method::Post, "/rest/db/ignores?folder=default", &runtime);
+        assert_eq!(ignores_post.status_code, StatusCode(405));
     }
 
     #[test]

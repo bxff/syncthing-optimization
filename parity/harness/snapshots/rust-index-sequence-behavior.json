@@ -16,6 +16,11 @@
       "sequence": 3
     }
   ],
+  "paged_paths": [
+    "a.txt",
+    "b.txt",
+    "c.txt"
+  ],
   "prefix_a_count": 1,
   "scenario": "index-sequence-behavior",
   "source": "rust",

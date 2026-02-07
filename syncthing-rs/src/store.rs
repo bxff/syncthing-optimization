@@ -1,8 +1,9 @@
 use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, ErrorKind, Read, Write};
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 
 const LOG_RECORD_MAX_BYTES: u32 = 32 * 1024 * 1024;
@@ -13,6 +14,7 @@ const KEY_SEP: char = '\u{001f}';
 pub(crate) struct StoreConfig {
     pub(crate) root: PathBuf,
     pub(crate) max_runtime_memory_mb: usize,
+    pub(crate) max_deleted_tombstones: usize,
 }
 
 impl StoreConfig {
@@ -20,11 +22,17 @@ impl StoreConfig {
         Self {
             root: root.into(),
             max_runtime_memory_mb: 50,
+            max_deleted_tombstones: 1000,
         }
     }
 
     pub(crate) fn with_memory_cap_mb(mut self, cap_mb: usize) -> Self {
         self.max_runtime_memory_mb = cap_mb;
+        self
+    }
+
+    pub(crate) fn with_deleted_tombstone_cap(mut self, cap: usize) -> Self {
+        self.max_deleted_tombstones = cap;
         self
     }
 
@@ -47,6 +55,7 @@ pub(crate) struct FileMetadata {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StoreStats {
     pub(crate) file_count: usize,
+    pub(crate) deleted_tombstone_count: usize,
     pub(crate) estimated_memory_bytes: usize,
     pub(crate) memory_budget_bytes: usize,
 }
@@ -56,7 +65,20 @@ pub(crate) struct Store {
     config: StoreConfig,
     journal_path: PathBuf,
     files: BTreeMap<String, FileMetadata>,
+    deleted_tombstones: VecDeque<String>,
     approx_memory_bytes: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PageCursor {
+    pub(crate) folder: String,
+    pub(crate) path: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FilePage {
+    pub(crate) items: Vec<FileMetadata>,
+    pub(crate) next_cursor: Option<PageCursor>,
 }
 
 #[derive(Clone, Debug)]
@@ -73,12 +95,14 @@ impl Store {
             File::create(&journal_path)?;
         }
 
-        let (files, approx_memory_bytes) = Self::load_from_journal(&journal_path)?;
+        let (files, deleted_tombstones, approx_memory_bytes) =
+            Self::load_from_journal(&journal_path, config.max_deleted_tombstones)?;
 
         Ok(Self {
             config,
             journal_path,
             files,
+            deleted_tombstones,
             approx_memory_bytes,
         })
     }
@@ -101,6 +125,7 @@ impl Store {
                 .approx_memory_bytes
                 .saturating_sub(estimate_file_bytes(&prev));
         }
+        self.record_tombstone(&key);
 
         Ok(())
     }
@@ -137,12 +162,104 @@ impl Store {
         self.files.len()
     }
 
+    pub(crate) fn tombstone_count(&self) -> usize {
+        self.deleted_tombstones.len()
+    }
+
+    pub(crate) fn has_tombstone(&self, folder: &str, path: &str) -> bool {
+        let key = composite_key(folder, path);
+        self.deleted_tombstones.iter().any(|k| *k == key)
+    }
+
+    pub(crate) fn all_files_ordered_page(
+        &self,
+        start_after: Option<&PageCursor>,
+        limit: usize,
+    ) -> FilePage {
+        if limit == 0 {
+            return FilePage {
+                items: Vec::new(),
+                next_cursor: None,
+            };
+        }
+
+        let mut items = Vec::with_capacity(limit.saturating_add(1));
+        match start_after {
+            Some(cursor) => {
+                let start_key = composite_key(&cursor.folder, &cursor.path);
+                for (_, value) in self
+                    .files
+                    .range((Bound::Excluded(start_key), Bound::Unbounded))
+                    .take(limit.saturating_add(1))
+                {
+                    items.push(value.clone());
+                }
+            }
+            None => {
+                for value in self.files.values().take(limit.saturating_add(1)) {
+                    items.push(value.clone());
+                }
+            }
+        }
+
+        finalize_page(items, limit)
+    }
+
+    pub(crate) fn files_in_folder_ordered_page(
+        &self,
+        folder: &str,
+        start_after_path: Option<&str>,
+        limit: usize,
+    ) -> FilePage {
+        if limit == 0 {
+            return FilePage {
+                items: Vec::new(),
+                next_cursor: None,
+            };
+        }
+
+        let mut items = Vec::with_capacity(limit.saturating_add(1));
+        let folder_start = folder_prefix(folder);
+        let range_start = match start_after_path {
+            Some(path) => composite_key(folder, path),
+            None => folder_start.clone(),
+        };
+        let lower = if start_after_path.is_some() {
+            Bound::Excluded(range_start)
+        } else {
+            Bound::Included(range_start)
+        };
+
+        for (key, value) in self.files.range((lower, Bound::Unbounded)) {
+            if !key.starts_with(&folder_start) {
+                break;
+            }
+            items.push(value.clone());
+            if items.len() > limit {
+                break;
+            }
+        }
+
+        finalize_page(items, limit)
+    }
+
     pub(crate) fn compact(&mut self) -> io::Result<()> {
         let tmp = self.config.root.join("events.log.compact.tmp");
         let mut file = File::create(&tmp)?;
 
         for record in self.files.values() {
             Self::write_record(&mut file, &JournalOp::Upsert(record.clone()))?;
+        }
+        for tombstone in &self.deleted_tombstones {
+            if let Some((folder, path)) = split_composite_key(tombstone) {
+                Self::write_record(
+                    &mut file,
+                    &JournalOp::Delete {
+                        folder: folder.to_string(),
+                        path: path.to_string(),
+                    },
+                )?;
+            }
         }
 
         file.sync_all()?;
@@ -158,6 +275,7 @@ impl Store {
     pub(crate) fn stats(&self) -> StoreStats {
         StoreStats {
             file_count: self.files.len(),
+            deleted_tombstone_count: self.deleted_tombstones.len(),
             estimated_memory_bytes: self.approx_memory_bytes,
             memory_budget_bytes: self.config.memory_budget_bytes(),
         }
@@ -167,10 +285,14 @@ impl Store {
         &self.journal_path
     }
 
-    fn load_from_journal(path: &Path) -> io::Result<(BTreeMap<String, FileMetadata>, usize)> {
+    fn load_from_journal(
+        path: &Path,
+        max_tombstones: usize,
+    ) -> io::Result<(BTreeMap<String, FileMetadata>, VecDeque<String>, usize)> {
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
         let mut files: BTreeMap<String, FileMetadata> = BTreeMap::new();
+        let mut deleted_tombstones = VecDeque::new();
 
         loop {
             let mut hdr = [0_u8; 8];
@@ -202,11 +324,11 @@ impl Store {
                 Some(op) => op,
                 None => break,
             };
-            apply_op(&mut files, op);
+            apply_op(&mut files, &mut deleted_tombstones, max_tombstones, op);
         }
 
         let approx_bytes = files.values().map(estimate_file_bytes).sum();
-        Ok((files, approx_bytes))
+        Ok((files, deleted_tombstones, approx_bytes))
     }
 
     fn append_op(&self, op: &JournalOp) -> io::Result<()> {
@@ -239,7 +361,7 @@ impl Store {
 
     fn apply_upsert(&mut self, file: FileMetadata) {
         let key = composite_key(&file.folder, &file.path);
-        if let Some(prev) = self.files.insert(key, file.clone()) {
+        if let Some(prev) = self.files.insert(key.clone(), file.clone()) {
             self.approx_memory_bytes = self
                 .approx_memory_bytes
                 .saturating_sub(estimate_file_bytes(&prev));
@@ -247,16 +369,43 @@ impl Store {
         self.approx_memory_bytes = self
             .approx_memory_bytes
             .saturating_add(estimate_file_bytes(&file));
+        self.deleted_tombstones.retain(|k| *k != key);
+    }
+
+    fn record_tombstone(&mut self, key: &str) {
+        if self.config.max_deleted_tombstones == 0 {
+            return;
+        }
+        self.deleted_tombstones.retain(|k| k != key);
+        self.deleted_tombstones.push_back(key.to_string());
+        while self.deleted_tombstones.len() > self.config.max_deleted_tombstones {
+            let _ = self.deleted_tombstones.pop_front();
+        }
     }
 }
 
-fn apply_op(files: &mut BTreeMap<String, FileMetadata>, op: JournalOp) {
+fn apply_op(
+    files: &mut BTreeMap<String, FileMetadata>,
+    deleted_tombstones: &mut VecDeque<String>,
+    max_tombstones: usize,
+    op: JournalOp,
+) {
     match op {
         JournalOp::Upsert(file) => {
-            files.insert(composite_key(&file.folder, &file.path), file);
+            let key = composite_key(&file.folder, &file.path);
+            files.insert(key.clone(), file);
+            deleted_tombstones.retain(|k| *k != key);
         }
         JournalOp::Delete { folder, path } => {
-            files.remove(&composite_key(&folder, &path));
+            let key = composite_key(&folder, &path);
+            files.remove(&key);
+            if max_tombstones > 0 {
+                deleted_tombstones.retain(|k| *k != key);
+                deleted_tombstones.push_back(key);
+                while deleted_tombstones.len() > max_tombstones {
+                    let _ = deleted_tombstones.pop_front();
+                }
+            }
         }
     }
 }
@@ -413,8 +562,29 @@ fn composite_key(folder: &str, path: &str) -> String {
     format!("{folder}{KEY_SEP}{path}")
 }
 
+fn split_composite_key(key: &str) -> Option<(&str, &str)> {
+    key.split_once(KEY_SEP)
+}
+
 fn folder_prefix(folder: &str) -> String {
     format!("{folder}{KEY_SEP}")
+}
+
+fn finalize_page(mut items: Vec<FileMetadata>, limit: usize) -> FilePage {
+    let has_more = items.len() > limit;
+    if has_more {
+        items.truncate(limit);
+    }
+    let next_cursor = if has_more {
+        items.last().map(|last| PageCursor {
+            folder: last.folder.clone(),
+            path: last.path.clone(),
+        })
+    } else {
+        None
+    };
+
+    FilePage { items, next_cursor }
 }
 
 fn estimate_file_bytes(file: &FileMetadata) -> usize {
@@ -566,7 +736,64 @@ mod tests {
 
         let stats = store.stats();
         assert_eq!(stats.memory_budget_bytes, 50 * 1024 * 1024);
+        assert_eq!(stats.deleted_tombstone_count, 0);
         assert!(stats.estimated_memory_bytes < stats.memory_budget_bytes);
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn keyset_pagination_returns_stable_order() {
+        let root = temp_root("paging");
+        let cfg = StoreConfig::new(&root);
+        let mut store = Store::open(cfg).expect("open");
+        for i in 0_u64..25 {
+            store
+                .upsert_file(meta("alpha", &format!("{i:04}.dat"), i + 1))
+                .expect("upsert");
+        }
+
+        let mut cursor: Option<PageCursor> = None;
+        let mut out = Vec::new();
+        loop {
+            let page = store.all_files_ordered_page(cursor.as_ref(), 10);
+            for item in &page.items {
+                out.push(item.path.clone());
+            }
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+
+        let expected = (0_u64..25)
+            .map(|i| format!("{i:04}.dat"))
+            .collect::<Vec<_>>();
+        assert_eq!(out, expected);
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn bounded_tombstones_keep_latest_deletes_only() {
+        let root = temp_root("tombstones");
+        let cfg = StoreConfig::new(&root).with_deleted_tombstone_cap(3);
+        let mut store = Store::open(cfg).expect("open");
+
+        for i in 0_u64..5 {
+            let path = format!("{i:04}.dat");
+            store
+                .upsert_file(meta("alpha", &path, i + 1))
+                .expect("upsert");
+            store.delete_file("alpha", &path).expect("delete");
+        }
+
+        assert_eq!(store.tombstone_count(), 3);
+        assert!(!store.has_tombstone("alpha", "0000.dat"));
+        assert!(!store.has_tombstone("alpha", "0001.dat"));
+        assert!(store.has_tombstone("alpha", "0002.dat"));
+        assert!(store.has_tombstone("alpha", "0003.dat"));
+        assert!(store.has_tombstone("alpha", "0004.dat"));
 
         fs::remove_dir_all(root).expect("cleanup");
     }

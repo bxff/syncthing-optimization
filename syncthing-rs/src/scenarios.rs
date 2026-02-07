@@ -1,7 +1,7 @@
 use crate::folder_modes::all_mode_actions;
 use crate::planner::{classify_paths, compute_need, VersionedFile};
 use crate::protocol::{default_sequence, run_events};
-use crate::store::{FileMetadata, Store, StoreConfig, JOURNAL_FILE_NAME};
+use crate::store::{FileMetadata, PageCursor, Store, StoreConfig, JOURNAL_FILE_NAME};
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -55,13 +55,26 @@ fn scenario_index_sequence_behavior() -> Result<Value, String> {
         .into_iter()
         .map(|f| json!({"folder": f.folder, "path": f.path, "sequence": f.sequence}))
         .collect();
+    let mut cursor_path: Option<String> = None;
+    let mut paged_paths = Vec::new();
+    loop {
+        let page = store.files_in_folder_ordered_page("default", cursor_path.as_deref(), 2);
+        for f in &page.items {
+            paged_paths.push(f.path.clone());
+        }
+        match page.next_cursor {
+            Some(next) => cursor_path = Some(next.path),
+            None => break,
+        }
+    }
 
     let out = json!({
         "scenario": "index-sequence-behavior",
         "source": "rust",
         "status": "prototype",
         "prefix_a_count": prefix_hits.len(),
-        "ordered_files": ordered
+        "ordered_files": ordered,
+        "paged_paths": paged_paths
     });
 
     cleanup(root);
@@ -175,6 +188,19 @@ fn scenario_memory_cap_50mb() -> Result<Value, String> {
             .map_err(err_to_string)?;
     }
 
+    let mut page_cursor: Option<PageCursor> = None;
+    let mut scanned_entries = 0_usize;
+    let mut page_count = 0_usize;
+    loop {
+        let page = store.all_files_ordered_page(page_cursor.as_ref(), 1000);
+        scanned_entries += page.items.len();
+        page_count += 1;
+        match page.next_cursor {
+            Some(next) => page_cursor = Some(next),
+            None => break,
+        }
+    }
+
     let stats = store.stats();
     let out = json!({
         "scenario": "memory-cap-50mb",
@@ -182,6 +208,9 @@ fn scenario_memory_cap_50mb() -> Result<Value, String> {
         "status": "prototype",
         "estimated_memory_bytes": stats.estimated_memory_bytes,
         "memory_budget_bytes": stats.memory_budget_bytes,
+        "file_count": stats.file_count,
+        "scanned_entries": scanned_entries,
+        "page_count": page_count,
         "under_budget": stats.estimated_memory_bytes <= stats.memory_budget_bytes
     });
 
@@ -210,11 +239,13 @@ fn scenario_wal_free_durability() -> Result<Value, String> {
     }
 
     let store = Store::open(StoreConfig::new(&root)).map_err(err_to_string)?;
+    let stats = store.stats();
     let out = json!({
         "scenario": "wal-free-durability",
         "source": "rust",
         "status": "prototype",
         "file_count": store.file_count(),
+        "deleted_tombstone_count": stats.deleted_tombstone_count,
         "journal_file": JOURNAL_FILE_NAME,
         "paths": store
             .all_files_lexicographic()

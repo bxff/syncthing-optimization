@@ -1679,6 +1679,209 @@ pub(crate) fn run_parity_probe(with_peer_interop: bool) -> Result<(), String> {
     result
 }
 
+pub(crate) fn run_api_surface_probe() -> Result<Vec<String>, String> {
+    let mut root = std::env::temp_dir();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| err.to_string())?
+        .as_nanos();
+    root.push(format!(
+        "syncthing-rs-api-surface-probe-{}-{nanos}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&root).map_err(|err| format!("create api probe root: {err}"))?;
+    let folder_path = root.join("folder");
+    fs::create_dir_all(&folder_path).map_err(|err| format!("create api probe folder: {err}"))?;
+    fs::write(folder_path.join("a.txt"), b"hello-world")
+        .map_err(|err| format!("seed api probe file: {err}"))?;
+    let docs_path = root.join("docs");
+
+    let result = (|| {
+        let model = Arc::new(Mutex::new(NewModelWithRuntime(
+            Some(root.join("db")),
+            Some(64),
+        )));
+        {
+            let mut guard = model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            guard.newFolder(newFolderConfiguration(
+                DEFAULT_FOLDER_ID,
+                &folder_path.to_string_lossy(),
+            ));
+        }
+        let runtime = DaemonApiRuntime {
+            model,
+            active_peers: Arc::new(AtomicUsize::new(0)),
+            max_peers: DEFAULT_MAX_PEERS,
+            start_time: SystemTime::now(),
+            bep_listen_addr: DEFAULT_LISTEN_ADDR.to_string(),
+        };
+
+        let cases: Vec<(&str, Method, String, u16)> = vec![
+            (
+                "GET /rest/system/ping",
+                Method::Get,
+                "/rest/system/ping".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/system/version",
+                Method::Get,
+                "/rest/system/version".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/system/status",
+                Method::Get,
+                "/rest/system/status".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/system/connections",
+                Method::Get,
+                "/rest/system/connections".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/system/config/folders",
+                Method::Get,
+                "/rest/system/config/folders".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/system/config/folders",
+                Method::Post,
+                format!(
+                    "/rest/system/config/folders?id=docs&path={}",
+                    docs_path.to_string_lossy()
+                ),
+                200,
+            ),
+            (
+                "POST /rest/system/config/restart",
+                Method::Post,
+                "/rest/system/config/restart?folder=docs".to_string(),
+                200,
+            ),
+            (
+                "DELETE /rest/system/config/folders",
+                Method::Delete,
+                "/rest/system/config/folders?id=docs".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/db/scan",
+                Method::Post,
+                "/rest/db/scan?folder=default".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/db/status",
+                Method::Get,
+                "/rest/db/status?folder=default".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/db/completion",
+                Method::Get,
+                "/rest/db/completion?folder=default&device=peer-a".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/db/file",
+                Method::Get,
+                "/rest/db/file?folder=default&file=a.txt".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/db/localchanged",
+                Method::Get,
+                "/rest/db/localchanged?folder=default".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/db/remoteneed",
+                Method::Get,
+                "/rest/db/remoteneed?folder=default&device=peer-a".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/db/ignores",
+                Method::Get,
+                "/rest/db/ignores?folder=default".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/db/browse",
+                Method::Get,
+                "/rest/db/browse?folder=default&limit=10".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/db/need",
+                Method::Get,
+                "/rest/db/need?folder=default&limit=10".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/db/jobs",
+                Method::Get,
+                "/rest/db/jobs?folder=default".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/db/pull",
+                Method::Post,
+                "/rest/db/pull?folder=default".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/db/override",
+                Method::Post,
+                "/rest/db/override?folder=default".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/db/revert",
+                Method::Post,
+                "/rest/db/revert?folder=default".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/db/bringtofront",
+                Method::Post,
+                "/rest/db/bringtofront?folder=default".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/db/reset",
+                Method::Post,
+                "/rest/db/reset?folder=default".to_string(),
+                200,
+            ),
+        ];
+
+        let mut covered = Vec::with_capacity(cases.len());
+        for (key, method, url, expected_status) in cases {
+            let reply = build_api_response(&method, &url, &runtime);
+            if reply.status_code != StatusCode(expected_status) {
+                let body = String::from_utf8_lossy(&reply.body);
+                return Err(format!(
+                    "api probe {key} expected status {expected_status} got {} body={body}",
+                    reply.status_code.0
+                ));
+            }
+            covered.push(key.to_string());
+        }
+        covered.sort();
+        Ok(covered)
+    })();
+
+    let _ = fs::remove_dir_all(&root);
+    result
+}
+
 fn ensure_api_ok(reply: &ApiReply) -> Result<Value, String> {
     if reply.status_code != StatusCode(200) {
         return Err(format!(
@@ -2895,5 +3098,14 @@ mod tests {
         assert!(try_acquire_peer_slot(&active, 2));
         assert!(try_acquire_peer_slot(&active, 2));
         assert!(!try_acquire_peer_slot(&active, 2));
+    }
+
+    #[test]
+    fn api_surface_probe_reports_required_endpoints() {
+        let covered = run_api_surface_probe().expect("run api surface probe");
+        assert!(covered.contains(&"GET /rest/system/ping".to_string()));
+        assert!(covered.contains(&"GET /rest/db/status".to_string()));
+        assert!(covered.contains(&"POST /rest/db/bringtofront".to_string()));
+        assert!(covered.contains(&"DELETE /rest/system/config/folders".to_string()));
     }
 }

@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "required_api_endpoints": [
+    "DELETE /rest/system/config/folders",
+    "GET /rest/db/browse",
+    "GET /rest/db/completion",
+    "GET /rest/db/file",
+    "GET /rest/db/ignores",
+    "GET /rest/db/jobs",
+    "GET /rest/db/localchanged",
+    "GET /rest/db/need",
+    "GET /rest/db/remoteneed",
+    "GET /rest/db/status",
+    "GET /rest/system/config/folders",
+    "GET /rest/system/connections",
+    "GET /rest/system/ping",
+    "GET /rest/system/status",
+    "GET /rest/system/version",
+    "POST /rest/db/bringtofront",
+    "POST /rest/db/override",
+    "POST /rest/db/pull",
+    "POST /rest/db/reset",
+    "POST /rest/db/revert",
+    "POST /rest/db/scan",
+    "POST /rest/system/config/folders",
+    "POST /rest/system/config/restart"
+  ],
+  "required_bep_message_types": [
+    "hello",
+    "cluster_config",
+    "index",
+    "index_update",
+    "request",
+    "response",
+    "download_progress",
+    "ping",
+    "close"
+  ],
+  "required_folder_modes": [
+    "sendrecv",
+    "sendonly",
+    "recvonly",
+    "recvenc"
+  ],
+  "required_memory_diagnostic_fields": [
+    "folder",
+    "subsystem",
+    "policy",
+    "budget_bytes",
+    "queue_items",
+    "query_limit"
+  ],
+  "required_durability_fields": [
+    "manifest_file",
+    "active_segment",
+    "file_count",
+    "deleted_tombstone_count"
+  ]
+}

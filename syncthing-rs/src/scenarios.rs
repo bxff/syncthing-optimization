@@ -5,7 +5,7 @@ use crate::folder_modes::all_mode_actions;
 use crate::index_engine::{FolderUpdate, IndexEngine};
 use crate::model_core::{newFolderConfiguration, NewModel, NewModelWithRuntime};
 use crate::planner::{classify_paths, compute_need, VersionedFile};
-use crate::runtime::run_parity_probe;
+use crate::runtime::{run_api_surface_probe, run_parity_probe};
 use crate::store::{FileMetadata, PageCursor, Store, StoreConfig, MANIFEST_FILE_NAME};
 use crate::walker::{walk_deterministic, WalkConfig};
 use serde_json::{json, Value};
@@ -21,6 +21,7 @@ pub(crate) fn run_scenario_snapshot(id: &str) -> Result<Value, String> {
         "conflict-and-ignore-semantics" => scenario_conflict_and_ignore_semantics(),
         "folder-type-behavior" => scenario_folder_type_behavior(),
         "protocol-state-transition" => scenario_protocol_state_transition(),
+        "daemon-api-surface" => scenario_daemon_api_surface(),
         "path-order-invariant" => scenario_path_order_invariant(),
         "memory-cap-50mb" => scenario_memory_cap_50mb(),
         "memory-cap-diagnostics" => scenario_memory_cap_diagnostics(),
@@ -37,6 +38,7 @@ pub(crate) fn scenario_ids() -> &'static [&'static str] {
         "conflict-and-ignore-semantics",
         "folder-type-behavior",
         "protocol-state-transition",
+        "daemon-api-surface",
         "path-order-invariant",
         "memory-cap-50mb",
         "memory-cap-diagnostics",
@@ -303,6 +305,17 @@ fn scenario_protocol_state_transition() -> Result<Value, String> {
         "device_downloads": device_downloads,
         "remote_sequence": remote_sequence,
         "request_data_hex": request_data_hex
+    }))
+}
+
+fn scenario_daemon_api_surface() -> Result<Value, String> {
+    let covered = run_api_surface_probe()?;
+    Ok(json!({
+        "scenario": "daemon-api-surface",
+        "source": "rust",
+        "status": "validated",
+        "covered_endpoints": covered,
+        "covered_endpoint_count": covered.len()
     }))
 }
 
@@ -646,6 +659,7 @@ mod tests {
             "conflict-and-ignore-semantics",
             "folder-type-behavior",
             "protocol-state-transition",
+            "daemon-api-surface",
         ]
     }
 

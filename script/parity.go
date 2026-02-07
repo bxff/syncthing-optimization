@@ -183,6 +183,15 @@ type durabilityReport struct {
 	CrashRecovery string `json:"crash_recovery"`
 }
 
+type replacementGates struct {
+	SchemaVersion                  int      `json:"schema_version"`
+	RequiredAPIEndpoints           []string `json:"required_api_endpoints"`
+	RequiredBEPMessageTypes        []string `json:"required_bep_message_types"`
+	RequiredFolderModes            []string `json:"required_folder_modes"`
+	RequiredMemoryDiagnosticFields []string `json:"required_memory_diagnostic_fields"`
+	RequiredDurabilityFields       []string `json:"required_durability_fields"`
+}
+
 type harnessScenarioFile struct {
 	SchemaVersion int               `json:"schema_version"`
 	Scenarios     []harnessScenario `json:"scenarios"`
@@ -456,6 +465,7 @@ func runCheck(args []string) {
 	validateRequiredScenarioCoverage(&report, testEvidence)
 	if *mode == "replacement" {
 		validateReplacementScenarioEvidence(&report, testEvidence)
+		validateReplacementCapabilityCoverage(&report)
 	}
 
 	report.Summary.TotalFeatures = len(manifest.Items)
@@ -1156,6 +1166,291 @@ func scenarioHasTag(ev requiredTestEvidence, scenarioID, tag string) bool {
 	}
 	_, ok := tags[strings.ToLower(strings.TrimSpace(tag))]
 	return ok
+}
+
+func validateReplacementCapabilityCoverage(report *guardrailReport) {
+	gates := replacementGates{}
+	if err := readJSON("parity/replacement-gates.json", &gates); err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-capability-gates",
+			Path:    "parity/replacement-gates.json",
+			Message: "missing or invalid replacement gates configuration",
+		})
+		return
+	}
+
+	validateReplacementAPIEndpointCoverage(report, gates.RequiredAPIEndpoints)
+	validateReplacementProtocolCoverage(report, gates.RequiredBEPMessageTypes)
+	validateReplacementFolderModeCoverage(report, gates.RequiredFolderModes)
+	validateReplacementMemoryDiagnosticsCoverage(report, gates.RequiredMemoryDiagnosticFields)
+	validateReplacementDurabilityCoverage(report, gates.RequiredDurabilityFields)
+}
+
+func validateReplacementAPIEndpointCoverage(report *guardrailReport, required []string) {
+	if len(required) == 0 {
+		return
+	}
+	outcome, found, err := readScenarioOutcome("daemon-api-surface")
+	if err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-api-coverage",
+			Path:    "parity/diff-reports/latest.json",
+			Message: "failed to read latest differential report for daemon-api-surface",
+		})
+		return
+	}
+	if !found {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-api-coverage",
+			Path:    "parity/diff-reports/latest.json",
+			Message: "daemon-api-surface scenario result missing from latest differential report",
+		})
+		return
+	}
+	if strings.ToLower(strings.TrimSpace(outcome.Status)) != "pass" {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-api-coverage",
+			Path:    "parity/diff-reports/latest.json",
+			Message: fmt.Sprintf("daemon-api-surface must pass for replacement readiness (status=%q)", outcome.Status),
+		})
+		return
+	}
+	if scenarioEvidenceRank(normalizeScenarioEvidence(outcome.RustEvidence)) < scenarioEvidenceRank("daemon") {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-api-coverage",
+			Path:    "parity/diff-reports/latest.json",
+			Message: fmt.Sprintf("daemon-api-surface rust evidence must be at least daemon (got %q)", normalizeScenarioEvidence(outcome.RustEvidence)),
+		})
+		return
+	}
+
+	snapshot := map[string]any{}
+	const path = "parity/harness/snapshots/rust-daemon-api-surface.json"
+	if err := readJSON(path, &snapshot); err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-api-coverage",
+			Path:    path,
+			Message: "missing or invalid rust daemon api surface snapshot",
+		})
+		return
+	}
+	covered := toStringSet(snapshot["covered_endpoints"])
+	missing := missingRequiredStrings(required, covered)
+	if len(missing) > 0 {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-api-coverage",
+			Path:    path,
+			Message: fmt.Sprintf("rust daemon api surface missing %d required endpoints: %s", len(missing), strings.Join(missing, ", ")),
+		})
+	}
+}
+
+func readScenarioOutcome(id string) (diffScenario, bool, error) {
+	latest := differentialReport{}
+	if err := readJSON("parity/diff-reports/latest.json", &latest); err != nil {
+		return diffScenario{}, false, err
+	}
+	target := strings.TrimSpace(id)
+	for _, sc := range latest.Scenarios {
+		if strings.TrimSpace(sc.ID) != target {
+			continue
+		}
+		return sc, true, nil
+	}
+	return diffScenario{}, false, nil
+}
+
+func validateReplacementProtocolCoverage(report *guardrailReport, required []string) {
+	if len(required) == 0 {
+		return
+	}
+	snapshot := map[string]any{}
+	const path = "parity/harness/snapshots/rust-protocol-state-transition.json"
+	if err := readJSON(path, &snapshot); err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-protocol-coverage",
+			Path:    path,
+			Message: "missing or invalid rust protocol state transition snapshot",
+		})
+		return
+	}
+	covered := toStringSet(snapshot["message_types"])
+	missing := missingRequiredStrings(required, covered)
+	if len(missing) > 0 {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-protocol-coverage",
+			Path:    path,
+			Message: fmt.Sprintf("rust protocol scenario missing %d required message types: %s", len(missing), strings.Join(missing, ", ")),
+		})
+	}
+}
+
+func validateReplacementFolderModeCoverage(report *guardrailReport, required []string) {
+	if len(required) == 0 {
+		return
+	}
+	snapshot := map[string]any{}
+	const path = "parity/harness/snapshots/rust-folder-type-behavior.json"
+	if err := readJSON(path, &snapshot); err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-folder-mode-coverage",
+			Path:    path,
+			Message: "missing or invalid rust folder type snapshot",
+		})
+		return
+	}
+	folderModes, ok := snapshot["folder_modes"].(map[string]any)
+	if !ok {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-folder-mode-coverage",
+			Path:    path,
+			Message: "folder_modes payload missing or invalid",
+		})
+		return
+	}
+	covered := make(map[string]struct{}, len(folderModes))
+	for key := range folderModes {
+		covered[strings.TrimSpace(key)] = struct{}{}
+	}
+	missing := missingRequiredStrings(required, covered)
+	if len(missing) > 0 {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-folder-mode-coverage",
+			Path:    path,
+			Message: fmt.Sprintf("rust folder mode scenario missing %d required modes: %s", len(missing), strings.Join(missing, ", ")),
+		})
+	}
+}
+
+func validateReplacementMemoryDiagnosticsCoverage(report *guardrailReport, required []string) {
+	if len(required) == 0 {
+		return
+	}
+	snapshot := map[string]any{}
+	const path = "parity/harness/snapshots/rust-memory-cap-diagnostics.json"
+	if err := readJSON(path, &snapshot); err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-memory-diagnostics-coverage",
+			Path:    path,
+			Message: "missing or invalid rust memory diagnostics snapshot",
+		})
+		return
+	}
+
+	rawReport, ok := snapshot["report"].(map[string]any)
+	if !ok {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-memory-diagnostics-coverage",
+			Path:    path,
+			Message: "memory diagnostics report payload missing or invalid",
+		})
+		return
+	}
+	covered := make(map[string]struct{}, len(rawReport))
+	for key, value := range rawReport {
+		if strings.TrimSpace(key) == "" || value == nil {
+			continue
+		}
+		if str, ok := value.(string); ok && strings.TrimSpace(str) == "" {
+			continue
+		}
+		covered[strings.TrimSpace(key)] = struct{}{}
+	}
+	missing := missingRequiredStrings(required, covered)
+	if len(missing) > 0 {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-memory-diagnostics-coverage",
+			Path:    path,
+			Message: fmt.Sprintf("rust memory diagnostics missing %d required fields: %s", len(missing), strings.Join(missing, ", ")),
+		})
+	}
+}
+
+func validateReplacementDurabilityCoverage(report *guardrailReport, required []string) {
+	if len(required) == 0 {
+		return
+	}
+	snapshot := map[string]any{}
+	const path = "parity/harness/snapshots/rust-wal-free-durability.json"
+	if err := readJSON(path, &snapshot); err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-durability-coverage",
+			Path:    path,
+			Message: "missing or invalid rust wal-free durability snapshot",
+		})
+		return
+	}
+	covered := make(map[string]struct{}, len(snapshot))
+	for key, value := range snapshot {
+		if strings.TrimSpace(key) == "" || value == nil {
+			continue
+		}
+		if str, ok := value.(string); ok && strings.TrimSpace(str) == "" {
+			continue
+		}
+		covered[strings.TrimSpace(key)] = struct{}{}
+	}
+	missing := missingRequiredStrings(required, covered)
+	if len(missing) > 0 {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-durability-coverage",
+			Path:    path,
+			Message: fmt.Sprintf("rust durability snapshot missing %d required fields: %s", len(missing), strings.Join(missing, ", ")),
+		})
+		return
+	}
+
+	active, _ := snapshot["active_segment"].(string)
+	if active != "" && !strings.HasPrefix(active, "CSEG-") {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-durability-coverage",
+			Path:    path,
+			Message: fmt.Sprintf("active_segment must use CSEG-* commit segment naming, got %q", active),
+		})
+	}
+}
+
+func toStringSet(value any) map[string]struct{} {
+	out := make(map[string]struct{})
+	switch typed := value.(type) {
+	case []string:
+		for _, entry := range typed {
+			entry = strings.TrimSpace(entry)
+			if entry == "" {
+				continue
+			}
+			out[entry] = struct{}{}
+		}
+	case []any:
+		for _, raw := range typed {
+			entry, ok := raw.(string)
+			if !ok {
+				continue
+			}
+			entry = strings.TrimSpace(entry)
+			if entry == "" {
+				continue
+			}
+			out[entry] = struct{}{}
+		}
+	}
+	return out
+}
+
+func missingRequiredStrings(required []string, covered map[string]struct{}) []string {
+	missing := make([]string, 0)
+	for _, entry := range required {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if _, ok := covered[entry]; ok {
+			continue
+		}
+		missing = append(missing, entry)
+	}
+	sort.Strings(missing)
+	return missing
 }
 
 func validateExceptions(report *guardrailReport, ex exceptionsFile, mode string) {

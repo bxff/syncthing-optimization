@@ -299,3 +299,34 @@ func TestValidateReplacementScenarioEvidenceAllowsStrongEvidence(t *testing.T) {
 		t.Fatalf("expected no failures, got %#v", report.Failures)
 	}
 }
+
+func TestToStringSetHandlesStringSlicesAndAnySlices(t *testing.T) {
+	fromStrings := toStringSet([]string{"a", " ", "b"})
+	if _, ok := fromStrings["a"]; !ok {
+		t.Fatalf("expected key a in set: %#v", fromStrings)
+	}
+	if _, ok := fromStrings["b"]; !ok {
+		t.Fatalf("expected key b in set: %#v", fromStrings)
+	}
+	if len(fromStrings) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(fromStrings))
+	}
+
+	fromAny := toStringSet([]any{"x", 7, "y"})
+	if len(fromAny) != 2 {
+		t.Fatalf("expected 2 entries from []any, got %d", len(fromAny))
+	}
+}
+
+func TestMissingRequiredStringsReturnsSortedMissingEntries(t *testing.T) {
+	covered := map[string]struct{}{
+		"beta": {},
+	}
+	missing := missingRequiredStrings([]string{"gamma", "beta", "alpha"}, covered)
+	if len(missing) != 2 {
+		t.Fatalf("expected 2 missing entries, got %#v", missing)
+	}
+	if missing[0] != "alpha" || missing[1] != "gamma" {
+		t.Fatalf("expected sorted missing entries, got %#v", missing)
+	}
+}

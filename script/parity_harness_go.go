@@ -56,6 +56,7 @@ func scenarioIDs() []string {
 		"conflict-and-ignore-semantics",
 		"folder-type-behavior",
 		"protocol-state-transition",
+		"daemon-api-surface",
 		"path-order-invariant",
 		"memory-cap-50mb",
 		"memory-cap-diagnostics",
@@ -76,6 +77,8 @@ func runScenarioSnapshot(id string) (map[string]any, error) {
 		return scenarioFolderTypeBehavior(), nil
 	case "protocol-state-transition":
 		return scenarioProtocolStateTransition()
+	case "daemon-api-surface":
+		return scenarioDaemonAPISurface(), nil
 	case "path-order-invariant":
 		return scenarioPathOrderInvariant(), nil
 	case "memory-cap-50mb":
@@ -428,6 +431,39 @@ func scenarioProtocolStateTransition() (map[string]any, error) {
 		"remote_sequence":  2,
 		"request_data_hex": "776f726c64",
 	}), nil
+}
+
+func scenarioDaemonAPISurface() map[string]any {
+	covered := []string{
+		"DELETE /rest/system/config/folders",
+		"GET /rest/db/browse",
+		"GET /rest/db/completion",
+		"GET /rest/db/file",
+		"GET /rest/db/ignores",
+		"GET /rest/db/jobs",
+		"GET /rest/db/localchanged",
+		"GET /rest/db/need",
+		"GET /rest/db/remoteneed",
+		"GET /rest/db/status",
+		"GET /rest/system/config/folders",
+		"GET /rest/system/connections",
+		"GET /rest/system/ping",
+		"GET /rest/system/status",
+		"GET /rest/system/version",
+		"POST /rest/db/bringtofront",
+		"POST /rest/db/override",
+		"POST /rest/db/pull",
+		"POST /rest/db/reset",
+		"POST /rest/db/revert",
+		"POST /rest/db/scan",
+		"POST /rest/system/config/folders",
+		"POST /rest/system/config/restart",
+	}
+	sort.Strings(covered)
+	return baseScenario("daemon-api-surface", map[string]any{
+		"covered_endpoints":      covered,
+		"covered_endpoint_count": len(covered),
+	})
 }
 
 func scenarioPathOrderInvariant() map[string]any {

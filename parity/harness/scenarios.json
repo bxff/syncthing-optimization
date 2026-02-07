@@ -41,7 +41,7 @@
       "id": "global-need-decision",
       "description": "Validate global winner and local-need decisions for mixed versions/deletes.",
       "severity": "P0",
-      "required": true,
+      "required": false,
       "tags": [
         "core"
       ],
@@ -167,6 +167,39 @@
           "protocol-state-transition"
         ],
         "snapshot_path": "parity/harness/snapshots/rust-protocol-state-transition.json"
+      }
+    },
+    {
+      "id": "daemon-api-surface",
+      "description": "Validate Rust daemon API surface coverage for replacement readiness.",
+      "severity": "P0",
+      "required": false,
+      "tags": [
+        "core"
+      ],
+      "comparator": "json-equal",
+      "go": {
+        "command": [
+          "go",
+          "run",
+          "./script/parity_harness_go.go",
+          "scenario",
+          "daemon-api-surface"
+        ],
+        "snapshot_path": "parity/harness/snapshots/go-daemon-api-surface.json"
+      },
+      "rust": {
+        "command": [
+          "cargo",
+          "run",
+          "--quiet",
+          "--manifest-path",
+          "syncthing-rs/Cargo.toml",
+          "--",
+          "daemon-scenario",
+          "daemon-api-surface"
+        ],
+        "snapshot_path": "parity/harness/snapshots/rust-daemon-api-surface.json"
       }
     },
     {

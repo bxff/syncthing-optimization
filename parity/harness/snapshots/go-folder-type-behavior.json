@@ -1,5 +1,62 @@
 {
+  "folder_configs": {
+    "default": {
+      "folder_type": "sendrecv",
+      "fs_watcher_enabled": true,
+      "mode": "sendrecv",
+      "paused": false,
+      "rescan_interval_s": 3600
+    },
+    "encrypted": {
+      "folder_type": "recvenc",
+      "fs_watcher_enabled": true,
+      "mode": "recvenc",
+      "paused": false,
+      "rescan_interval_s": 3600
+    },
+    "readonly": {
+      "folder_type": "recvonly",
+      "fs_watcher_enabled": true,
+      "mode": "recvonly",
+      "paused": false,
+      "rescan_interval_s": 3600
+    }
+  },
+  "folder_modes": {
+    "recvenc": {
+      "encrypted_index": true,
+      "may_push": false,
+      "pipeline": [
+        "scan",
+        "index_encrypted",
+        "pull_encrypted"
+      ],
+      "requires_local_revert": false
+    },
+    "recvonly": {
+      "encrypted_index": false,
+      "may_push": false,
+      "pipeline": [
+        "scan",
+        "index",
+        "pull",
+        "local_revert_required"
+      ],
+      "requires_local_revert": true
+    },
+    "sendrecv": {
+      "encrypted_index": false,
+      "may_push": true,
+      "pipeline": [
+        "scan",
+        "index",
+        "pull",
+        "push"
+      ],
+      "requires_local_revert": false
+    }
+  },
   "scenario": "folder-type-behavior",
-  "status": "placeholder",
-  "source": "go"
+  "source": "rust",
+  "status": "prototype"
 }

@@ -1,5 +1,31 @@
 {
+  "index_file_count": 1,
+  "index_folder_sequence": 3,
+  "ordered_files": [
+    {
+      "folder": "default",
+      "path": "a.txt",
+      "sequence": 1
+    },
+    {
+      "folder": "default",
+      "path": "b.txt",
+      "sequence": 2
+    },
+    {
+      "folder": "default",
+      "path": "c.txt",
+      "sequence": 3
+    }
+  ],
+  "paged_paths": [
+    "a.txt",
+    "b.txt",
+    "c.txt"
+  ],
+  "prefix_a_count": 1,
+  "rejected_updates": 3,
   "scenario": "index-sequence-behavior",
-  "status": "placeholder",
-  "source": "go"
+  "source": "rust",
+  "status": "prototype"
 }

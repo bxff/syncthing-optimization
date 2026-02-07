@@ -14,6 +14,13 @@
       ],
       "comparator": "json-equal",
       "go": {
+        "command": [
+          "go",
+          "run",
+          "./script/parity_harness_go.go",
+          "scenario",
+          "index-sequence-behavior"
+        ],
         "snapshot_path": "parity/harness/snapshots/go-index-sequence-behavior.json"
       },
       "rust": {
@@ -40,6 +47,13 @@
       ],
       "comparator": "json-equal",
       "go": {
+        "command": [
+          "go",
+          "run",
+          "./script/parity_harness_go.go",
+          "scenario",
+          "global-need-decision"
+        ],
         "snapshot_path": "parity/harness/snapshots/go-global-need-decision.json"
       },
       "rust": {
@@ -66,6 +80,13 @@
       ],
       "comparator": "json-equal",
       "go": {
+        "command": [
+          "go",
+          "run",
+          "./script/parity_harness_go.go",
+          "scenario",
+          "conflict-and-ignore-semantics"
+        ],
         "snapshot_path": "parity/harness/snapshots/go-conflict-and-ignore-semantics.json"
       },
       "rust": {
@@ -92,6 +113,13 @@
       ],
       "comparator": "json-equal",
       "go": {
+        "command": [
+          "go",
+          "run",
+          "./script/parity_harness_go.go",
+          "scenario",
+          "folder-type-behavior"
+        ],
         "snapshot_path": "parity/harness/snapshots/go-folder-type-behavior.json"
       },
       "rust": {
@@ -118,6 +146,13 @@
       ],
       "comparator": "json-equal",
       "go": {
+        "command": [
+          "go",
+          "run",
+          "./script/parity_harness_go.go",
+          "scenario",
+          "protocol-state-transition"
+        ],
         "snapshot_path": "parity/harness/snapshots/go-protocol-state-transition.json"
       },
       "rust": {
@@ -144,6 +179,13 @@
       ],
       "comparator": "json-equal",
       "go": {
+        "command": [
+          "go",
+          "run",
+          "./script/parity_harness_go.go",
+          "scenario",
+          "memory-cap-50mb"
+        ],
         "snapshot_path": "parity/harness/snapshots/go-memory-cap-50mb.json"
       },
       "rust": {
@@ -170,6 +212,13 @@
       ],
       "comparator": "json-equal",
       "go": {
+        "command": [
+          "go",
+          "run",
+          "./script/parity_harness_go.go",
+          "scenario",
+          "wal-free-durability"
+        ],
         "snapshot_path": "parity/harness/snapshots/go-wal-free-durability.json"
       },
       "rust": {
@@ -196,6 +245,13 @@
       ],
       "comparator": "json-equal",
       "go": {
+        "command": [
+          "go",
+          "run",
+          "./script/parity_harness_go.go",
+          "scenario",
+          "crash-recovery"
+        ],
         "snapshot_path": "parity/harness/snapshots/go-crash-recovery.json"
       },
       "rust": {

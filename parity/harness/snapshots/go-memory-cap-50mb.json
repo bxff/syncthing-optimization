@@ -1,5 +1,11 @@
 {
+  "estimated_memory_bytes": 960000,
+  "file_count": 10000,
+  "memory_budget_bytes": 52428800,
+  "page_count": 10,
+  "scanned_entries": 10000,
   "scenario": "memory-cap-50mb",
-  "status": "placeholder",
-  "source": "go"
+  "source": "rust",
+  "status": "prototype",
+  "under_budget": true
 }

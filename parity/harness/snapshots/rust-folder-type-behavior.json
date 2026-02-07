@@ -1,4 +1,27 @@
 {
+  "folder_configs": {
+    "default": {
+      "folder_type": "sendrecv",
+      "fs_watcher_enabled": true,
+      "mode": "sendrecv",
+      "paused": false,
+      "rescan_interval_s": 3600
+    },
+    "encrypted": {
+      "folder_type": "recvenc",
+      "fs_watcher_enabled": true,
+      "mode": "recvenc",
+      "paused": false,
+      "rescan_interval_s": 3600
+    },
+    "readonly": {
+      "folder_type": "recvonly",
+      "fs_watcher_enabled": true,
+      "mode": "recvonly",
+      "paused": false,
+      "rescan_interval_s": 3600
+    }
+  },
   "folder_modes": {
     "recvenc": {
       "encrypted_index": true,

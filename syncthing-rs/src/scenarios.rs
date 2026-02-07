@@ -1,4 +1,5 @@
 use crate::bep::{decode_frame, default_exchange, encode_frame, message_name};
+use crate::config::demo_configs;
 use crate::folder_modes::all_mode_actions;
 use crate::index_engine::{FolderUpdate, IndexEngine};
 use crate::planner::{classify_paths, compute_need, VersionedFile};
@@ -189,6 +190,10 @@ fn scenario_conflict_and_ignore_semantics() -> Result<Value, String> {
 }
 
 fn scenario_folder_type_behavior() -> Result<Value, String> {
+    let configs = demo_configs();
+    for cfg in &configs {
+        cfg.validate()?;
+    }
     let actions = all_mode_actions();
     let mut mode_json = serde_json::Map::new();
     for action in actions {
@@ -202,12 +207,28 @@ fn scenario_folder_type_behavior() -> Result<Value, String> {
             }),
         );
     }
+    let config_modes = configs
+        .iter()
+        .map(|cfg| {
+            (
+                cfg.id.clone(),
+                json!({
+                    "folder_type": cfg.folder_type.as_str(),
+                    "mode": cfg.folder_type.to_mode().as_str(),
+                    "fs_watcher_enabled": cfg.fs_watcher_enabled,
+                    "rescan_interval_s": cfg.rescan_interval_s,
+                    "paused": cfg.paused
+                }),
+            )
+        })
+        .collect::<serde_json::Map<String, serde_json::Value>>();
 
     Ok(json!({
         "scenario": "folder-type-behavior",
         "source": "rust",
         "status": "prototype",
-        "folder_modes": mode_json
+        "folder_modes": mode_json,
+        "folder_configs": config_modes
     }))
 }
 

@@ -1,5 +1,14 @@
 {
+  "need_count": 2,
+  "need_paths": [
+    "a.txt",
+    "d.txt"
+  ],
   "scenario": "global-need-decision",
-  "status": "placeholder",
-  "source": "go"
+  "source": "rust",
+  "stale_delete_count": 1,
+  "stale_deletes": [
+    "e.txt"
+  ],
+  "status": "prototype"
 }

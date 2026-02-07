@@ -1,4 +1,6 @@
 mod bep;
+mod config;
+mod db;
 mod folder_modes;
 mod index_engine;
 mod planner;

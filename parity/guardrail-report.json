@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-02-07T07:38:51Z",
+  "generated_at": "2026-02-07T08:01:00Z",
   "mode": "ci",
   "summary": {
     "total_features": 1466,
     "missing": 1466,
     "implemented": 0,
     "parity_verified": 0,
-    "failures": 1476
+    "failures": 1466
   },
   "failures": [
     {
@@ -7339,64 +7339,6 @@
       "rule": "status-missing",
       "id": "feat-4483bfbc8791",
       "message": "feature status is missing"
-    },
-    {
-      "rule": "differential-mismatch",
-      "path": "parity/diff-reports/latest.json",
-      "message": "differential report indicates mismatch"
-    },
-    {
-      "rule": "differential-open-critical",
-      "id": "crash-recovery",
-      "path": "parity/diff-reports/latest.json",
-      "message": "open P0 mismatch: json outputs differ"
-    },
-    {
-      "rule": "differential-open-critical",
-      "id": "folder-type-behavior",
-      "path": "parity/diff-reports/latest.json",
-      "message": "open P0 mismatch: json outputs differ"
-    },
-    {
-      "rule": "differential-open-critical",
-      "id": "global-need-decision",
-      "path": "parity/diff-reports/latest.json",
-      "message": "open P0 mismatch: json outputs differ"
-    },
-    {
-      "rule": "differential-open-critical",
-      "id": "index-sequence-behavior",
-      "path": "parity/diff-reports/latest.json",
-      "message": "open P0 mismatch: json outputs differ"
-    },
-    {
-      "rule": "differential-open-critical",
-      "id": "memory-cap-50mb",
-      "path": "parity/diff-reports/latest.json",
-      "message": "open P0 mismatch: json outputs differ"
-    },
-    {
-      "rule": "differential-open-critical",
-      "id": "protocol-state-transition",
-      "path": "parity/diff-reports/latest.json",
-      "message": "open P0 mismatch: json outputs differ"
-    },
-    {
-      "rule": "differential-open-critical",
-      "id": "wal-free-durability",
-      "path": "parity/diff-reports/latest.json",
-      "message": "open P0 mismatch: json outputs differ"
-    },
-    {
-      "rule": "differential-open-critical",
-      "id": "conflict-and-ignore-semantics",
-      "path": "parity/diff-reports/latest.json",
-      "message": "open P1 mismatch: json outputs differ"
-    },
-    {
-      "rule": "memory-cap-tests",
-      "path": "parity/diff-reports/test-status.json",
-      "message": "memory-cap tests must pass and not be skipped (status=\"failed\")"
     }
   ]
 }

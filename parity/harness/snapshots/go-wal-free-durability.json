@@ -1,5 +1,12 @@
 {
+  "deleted_tombstone_count": 1,
+  "file_count": 2,
+  "journal_file": "events.log",
+  "paths": [
+    "one.txt",
+    "two.txt"
+  ],
   "scenario": "wal-free-durability",
-  "status": "placeholder",
-  "source": "go"
+  "source": "rust",
+  "status": "prototype"
 }

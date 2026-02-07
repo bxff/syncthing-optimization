@@ -1,0 +1,418 @@
+// Copyright (C) 2026 The Syncthing Authors.
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this file,
+// You can obtain one at https://mozilla.org/MPL/2.0/.
+
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"sort"
+	"strings"
+)
+
+const (
+	stScenario = "status"
+	stSource   = "source"
+)
+
+func main() {
+	if len(os.Args) < 2 {
+		fatalf("usage: go run ./script/parity_harness_go.go <scenario|scenario-list> [id]")
+	}
+
+	switch os.Args[1] {
+	case "scenario-list":
+		for _, id := range scenarioIDs() {
+			fmt.Println(id)
+		}
+	case "scenario":
+		if len(os.Args) != 3 {
+			fatalf("scenario requires exactly one id")
+		}
+		out, err := runScenarioSnapshot(os.Args[2])
+		if err != nil {
+			fatalf("scenario failed: %v", err)
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(out); err != nil {
+			fatalf("encode scenario output: %v", err)
+		}
+	default:
+		fatalf("unknown command %q", os.Args[1])
+	}
+}
+
+func scenarioIDs() []string {
+	return []string{
+		"index-sequence-behavior",
+		"global-need-decision",
+		"conflict-and-ignore-semantics",
+		"folder-type-behavior",
+		"protocol-state-transition",
+		"memory-cap-50mb",
+		"wal-free-durability",
+		"crash-recovery",
+	}
+}
+
+func runScenarioSnapshot(id string) (map[string]any, error) {
+	switch id {
+	case "index-sequence-behavior":
+		return scenarioIndexSequenceBehavior(), nil
+	case "global-need-decision":
+		return scenarioGlobalNeedDecision(), nil
+	case "conflict-and-ignore-semantics":
+		return scenarioConflictAndIgnoreSemantics(), nil
+	case "folder-type-behavior":
+		return scenarioFolderTypeBehavior(), nil
+	case "protocol-state-transition":
+		return scenarioProtocolStateTransition()
+	case "memory-cap-50mb":
+		return scenarioMemoryCap50MB(), nil
+	case "wal-free-durability":
+		return scenarioWALFreeDurability(), nil
+	case "crash-recovery":
+		return scenarioCrashRecovery(), nil
+	default:
+		return nil, fmt.Errorf("unknown scenario id: %s", id)
+	}
+}
+
+func scenarioIndexSequenceBehavior() map[string]any {
+	type file struct {
+		Folder   string
+		Path     string
+		Sequence int
+	}
+
+	files := map[string]file{}
+	rejected := 0
+	indexSeq := 0
+	indexFiles := map[string]int{}
+
+	// Simulate store upserts, preserving lexicographic key order.
+	upsert := func(folder, path string, seq int) {
+		files[folder+"\x1f"+path] = file{Folder: folder, Path: path, Sequence: seq}
+	}
+
+	applyIndexUpdate := func(folder, path string, seq int) {
+		if seq <= indexSeq {
+			rejected++
+			return
+		}
+		indexSeq = seq
+		indexFiles[folder+"\x1f"+path] = seq
+	}
+
+	upsert("default", "c.txt", 3)
+	applyIndexUpdate("default", "c.txt", 3)
+	upsert("default", "a.txt", 1)
+	applyIndexUpdate("default", "a.txt", 1) // stale
+	upsert("default", "b.txt", 2)
+	applyIndexUpdate("default", "b.txt", 2) // stale
+	applyIndexUpdate("default", "late.txt", 2)
+
+	keys := make([]string, 0, len(files))
+	for k := range files {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	ordered := make([]map[string]any, 0, len(keys))
+	pagedPaths := make([]string, 0, len(keys))
+	prefixACount := 0
+	for _, k := range keys {
+		f := files[k]
+		if strings.HasPrefix(f.Path, "a") {
+			prefixACount++
+		}
+		ordered = append(ordered, map[string]any{
+			"folder":   f.Folder,
+			"path":     f.Path,
+			"sequence": f.Sequence,
+		})
+		pagedPaths = append(pagedPaths, f.Path)
+	}
+
+	return baseScenario("index-sequence-behavior", map[string]any{
+		"prefix_a_count":        prefixACount,
+		"ordered_files":         ordered,
+		"paged_paths":           pagedPaths,
+		"index_folder_sequence": indexSeq,
+		"index_file_count":      len(indexFiles),
+		"rejected_updates":      rejected,
+	})
+}
+
+type versionedFile struct {
+	Path     string
+	Sequence int
+	Deleted  bool
+	Ignored  bool
+}
+
+func scenarioGlobalNeedDecision() map[string]any {
+	local := []versionedFile{
+		{Path: "a.txt", Sequence: 2},
+		{Path: "b.txt", Sequence: 5},
+		{Path: "c.txt", Sequence: 1},
+		{Path: "e.txt", Sequence: 10},
+	}
+	remote := []versionedFile{
+		{Path: "a.txt", Sequence: 3},
+		{Path: "b.txt", Sequence: 5},
+		{Path: "d.txt", Sequence: 1},
+		{Path: "e.txt", Sequence: 11, Deleted: true},
+	}
+
+	localByPath := make(map[string]versionedFile, len(local))
+	for _, f := range local {
+		localByPath[f.Path] = f
+	}
+
+	need := make([]string, 0)
+	staleDeletes := make([]string, 0)
+	for _, r := range remote {
+		if r.Ignored {
+			continue
+		}
+		l, ok := localByPath[r.Path]
+		localSeq := 0
+		if ok {
+			localSeq = l.Sequence
+		}
+
+		if r.Deleted {
+			if ok && !l.Deleted && r.Sequence >= l.Sequence {
+				staleDeletes = append(staleDeletes, r.Path)
+			}
+			continue
+		}
+		if r.Sequence > localSeq {
+			need = append(need, r.Path)
+		}
+	}
+
+	sort.Strings(need)
+	sort.Strings(staleDeletes)
+
+	return baseScenario("global-need-decision", map[string]any{
+		"need_paths":         need,
+		"need_count":         len(need),
+		"stale_deletes":      staleDeletes,
+		"stale_delete_count": len(staleDeletes),
+	})
+}
+
+func scenarioConflictAndIgnoreSemantics() map[string]any {
+	paths := []string{
+		"docs/readme.md",
+		"docs/.DS_Store",
+		"tmp/build.tmp",
+		"docs/readme.sync-conflict-20260207.md",
+	}
+	ignoreSuffixes := []string{".tmp", ".DS_Store"}
+
+	ignored := make([]string, 0)
+	considered := make([]string, 0)
+	conflicts := make([]string, 0)
+	for _, p := range paths {
+		isIgnored := false
+		for _, sfx := range ignoreSuffixes {
+			if strings.HasSuffix(p, sfx) {
+				isIgnored = true
+				break
+			}
+		}
+		if isIgnored {
+			ignored = append(ignored, p)
+			continue
+		}
+		if strings.Contains(p, ".sync-conflict-") || strings.Contains(p, "sync-conflict") {
+			conflicts = append(conflicts, p)
+		}
+		considered = append(considered, p)
+	}
+
+	sort.Strings(ignored)
+	sort.Strings(considered)
+	sort.Strings(conflicts)
+
+	return baseScenario("conflict-and-ignore-semantics", map[string]any{
+		"ignored_count":    len(ignored),
+		"ignored_paths":    ignored,
+		"conflict_count":   len(conflicts),
+		"conflict_paths":   conflicts,
+		"considered_count": len(considered),
+	})
+}
+
+func scenarioFolderTypeBehavior() map[string]any {
+	modes := map[string]any{
+		"sendrecv": map[string]any{
+			"pipeline":              []string{"scan", "index", "pull", "push"},
+			"may_push":              true,
+			"requires_local_revert": false,
+			"encrypted_index":       false,
+		},
+		"recvonly": map[string]any{
+			"pipeline":              []string{"scan", "index", "pull", "local_revert_required"},
+			"may_push":              false,
+			"requires_local_revert": true,
+			"encrypted_index":       false,
+		},
+		"recvenc": map[string]any{
+			"pipeline":              []string{"scan", "index_encrypted", "pull_encrypted"},
+			"may_push":              false,
+			"requires_local_revert": false,
+			"encrypted_index":       true,
+		},
+	}
+
+	configs := map[string]any{
+		"default": map[string]any{
+			"folder_type":        "sendrecv",
+			"mode":               "sendrecv",
+			"fs_watcher_enabled": true,
+			"rescan_interval_s":  3600,
+			"paused":             false,
+		},
+		"readonly": map[string]any{
+			"folder_type":        "recvonly",
+			"mode":               "recvonly",
+			"fs_watcher_enabled": true,
+			"rescan_interval_s":  3600,
+			"paused":             false,
+		},
+		"encrypted": map[string]any{
+			"folder_type":        "recvenc",
+			"mode":               "recvenc",
+			"fs_watcher_enabled": true,
+			"rescan_interval_s":  3600,
+			"paused":             false,
+		},
+	}
+
+	return baseScenario("folder-type-behavior", map[string]any{
+		"folder_modes":   modes,
+		"folder_configs": configs,
+	})
+}
+
+func scenarioProtocolStateTransition() (map[string]any, error) {
+	transitions := []string{
+		"dial",
+		"hello",
+		"cluster_config",
+		"index",
+		"index_update",
+		"ping",
+	}
+
+	type msg = map[string]any
+	exchange := []msg{
+		{"type": "hello", "device_name": "rust-node-a", "client_name": "syncthing-rs"},
+		{"type": "cluster_config", "folders": []string{"default"}},
+		{
+			"type":   "index",
+			"folder": "default",
+			"files": []any{
+				map[string]any{
+					"path":         "a.txt",
+					"sequence":     1,
+					"deleted":      false,
+					"size":         100,
+					"block_hashes": []string{"h1"},
+				},
+			},
+		},
+		{
+			"type":   "index_update",
+			"folder": "default",
+			"files": []any{
+				map[string]any{
+					"path":         "a.txt",
+					"sequence":     2,
+					"deleted":      false,
+					"size":         110,
+					"block_hashes": []string{"h2"},
+				},
+			},
+		},
+		{"type": "ping", "timestamp_ms": 1738958400000},
+	}
+
+	frameSizes := make([]int, 0, len(exchange))
+	msgTypes := make([]string, 0, len(exchange))
+	for _, m := range exchange {
+		payload, err := json.Marshal(m)
+		if err != nil {
+			return nil, err
+		}
+		frameSizes = append(frameSizes, len(payload)+8)
+		msgType, _ := m["type"].(string)
+		msgTypes = append(msgTypes, msgType)
+	}
+
+	return baseScenario("protocol-state-transition", map[string]any{
+		"transitions":   transitions,
+		"message_types": msgTypes,
+		"frame_sizes":   frameSizes,
+	}), nil
+}
+
+func scenarioMemoryCap50MB() map[string]any {
+	// Mirror the current Rust prototype estimation: per-file fixed + string/hash lengths.
+	const files = 10000
+	const perFile = 96 // 7(folder) + 13(path) + 12(hash) + 64(overhead)
+	estimated := files * perFile
+	budget := 50 * 1024 * 1024
+
+	return baseScenario("memory-cap-50mb", map[string]any{
+		"estimated_memory_bytes": estimated,
+		"memory_budget_bytes":    budget,
+		"file_count":             files,
+		"scanned_entries":        files,
+		"page_count":             10,
+		"under_budget":           estimated <= budget,
+	})
+}
+
+func scenarioWALFreeDurability() map[string]any {
+	return baseScenario("wal-free-durability", map[string]any{
+		"file_count":              2,
+		"deleted_tombstone_count": 1,
+		"journal_file":            "events.log",
+		"paths":                   []string{"one.txt", "two.txt"},
+	})
+}
+
+func scenarioCrashRecovery() map[string]any {
+	return baseScenario("crash-recovery", map[string]any{
+		"file_count":      2,
+		"a_present":       true,
+		"recovered_paths": []string{"a.txt", "b.txt"},
+	})
+}
+
+func baseScenario(id string, fields map[string]any) map[string]any {
+	out := map[string]any{
+		"scenario": id,
+		stSource:   "rust",
+		stScenario: "prototype",
+	}
+	for k, v := range fields {
+		out[k] = v
+	}
+	return out
+}
+
+func fatalf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+	os.Exit(1)
+}

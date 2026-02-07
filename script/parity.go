@@ -1155,7 +1155,7 @@ func enforceDiffReports(report *guardrailReport, mode string) {
 		})
 	} else {
 		status := strings.ToLower(strings.TrimSpace(test.MemoryCap.Status))
-		if status == "" || status == "skipped" || status != "pass" {
+		if status == "" || status == "skipped" || (status != "pass" && status != "passed") {
 			report.Failures = append(report.Failures, reportFailure{
 				Rule:    "memory-cap-tests",
 				Path:    testPath,

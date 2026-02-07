@@ -20,3 +20,4 @@ deb
 /compat.json
 benchmark-results
 /syncthing-rs/target
+/.gocache

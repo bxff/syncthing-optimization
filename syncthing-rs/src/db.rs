@@ -448,6 +448,25 @@ impl WalFreeDb {
         out
     }
 
+    fn global_file_map_light(&self, folder: &str) -> BTreeMap<String, FileInfo> {
+        let mut out: BTreeMap<String, FileInfo> = BTreeMap::new();
+        self.store.for_each_file_in_folder(folder, |meta| {
+            if meta.ignored {
+                return true;
+            }
+            let candidate = store_to_file_info_without_blocks(meta);
+            let path = candidate.path.clone();
+            match out.get(&path) {
+                Some(current) if !prefer_global(&candidate, current) => {}
+                _ => {
+                    out.insert(path, candidate);
+                }
+            }
+            true
+        });
+        out
+    }
+
     fn global_availability_map(&self, folder: &str) -> BTreeMap<String, BTreeSet<DeviceId>> {
         let mut out: BTreeMap<String, BTreeSet<DeviceId>> = BTreeMap::new();
         self.store.for_each_file_in_folder(folder, |meta| {
@@ -519,7 +538,7 @@ impl Db for WalFreeDb {
     fn all_global_files(&self, folder: &str) -> Result<Vec<FileMetadata>, String> {
         self.ensure_open()?;
         Ok(self
-            .global_file_map(folder)
+            .global_file_map_light(folder)
             .into_values()
             .map(file_metadata_from_info)
             .collect())
@@ -532,7 +551,7 @@ impl Db for WalFreeDb {
     ) -> Result<Vec<FileMetadata>, String> {
         self.ensure_open()?;
         Ok(self
-            .global_file_map(folder)
+            .global_file_map_light(folder)
             .into_values()
             .filter(|f| f.path.starts_with(prefix))
             .map(file_metadata_from_info)
@@ -839,7 +858,7 @@ impl Db for WalFreeDb {
 
     fn count_global(&self, folder: &str) -> Result<Counts, String> {
         self.ensure_open()?;
-        Ok(count_files(self.global_file_map(folder).into_values()))
+        Ok(count_files(self.global_file_map_light(folder).into_values()))
     }
 
     fn count_local(&self, folder: &str, device: &str) -> Result<Counts, String> {
@@ -863,17 +882,18 @@ impl Db for WalFreeDb {
     fn count_need(&self, folder: &str, device: &str) -> Result<Counts, String> {
         self.ensure_open()?;
         let mut counts = Counts::default();
-        let mut cursor: Option<String> = None;
-        loop {
-            let page =
-                self.all_needed_global_files_ordered_page(folder, device, cursor.as_deref(), 2048)?;
-            if page.items.is_empty() {
-                break;
-            }
-            accumulate_counts(&mut counts, count_files(page.items.into_iter()));
-            cursor = page.next_cursor;
-            if cursor.is_none() {
-                break;
+        for (path, global) in self.global_file_map_light(folder) {
+            let local = self.get_device_file(folder, device, &path)?;
+            let requires_update = match local {
+                Some(current) => {
+                    global.sequence > current.sequence
+                        || (global.deleted != current.deleted
+                            && global.sequence >= current.sequence)
+                }
+                None => true,
+            };
+            if requires_update {
+                add_file_to_counts(&mut counts, &global);
             }
         }
         Ok(counts)
@@ -882,7 +902,7 @@ impl Db for WalFreeDb {
     fn count_receive_only_changed(&self, folder: &str) -> Result<Counts, String> {
         self.ensure_open()?;
         let changed = self
-            .global_file_map(folder)
+            .global_file_map_light(folder)
             .into_values()
             .filter(|f| f.local_flags & FLAG_LOCAL_RECEIVE_ONLY != 0);
         Ok(count_files(changed))
@@ -1007,6 +1027,21 @@ fn store_to_file_info(meta: &StoreFileMetadata) -> FileInfo {
     }
 }
 
+fn store_to_file_info_without_blocks(meta: &StoreFileMetadata) -> FileInfo {
+    FileInfo {
+        folder: meta.folder.clone(),
+        path: meta.path.clone(),
+        sequence: u64_to_i64(meta.sequence),
+        modified_ns: u64_to_i64(meta.modified_ns),
+        size: u64_to_i64(meta.size),
+        deleted: meta.deleted,
+        ignored: meta.ignored,
+        local_flags: meta.local_flags,
+        file_type: store_to_file_type(&meta.file_type),
+        block_hashes: Vec::new(),
+    }
+}
+
 fn file_type_to_store(file_type: FileInfoType) -> String {
     match file_type {
         FileInfoType::File => "file".to_string(),
@@ -1127,30 +1162,28 @@ fn sort_pull_order(files: &mut [FileInfo], order: PullOrder) {
 }
 
 fn count_files(iter: impl Iterator<Item = FileInfo>) -> Counts {
-    let mut counts = Counts {
-        files: 0,
-        directories: 0,
-        deleted: 0,
-        bytes: 0,
-        receive_only_changed: 0,
-    };
+    let mut counts = Counts::default();
 
     for file in iter {
-        if file.deleted {
-            counts.deleted += 1;
-        }
-        if file.file_type == FileInfoType::Directory {
-            counts.directories += 1;
-        } else {
-            counts.files += 1;
-        }
-        counts.bytes += file.size;
-        if file.local_flags & FLAG_LOCAL_RECEIVE_ONLY != 0 {
-            counts.receive_only_changed += 1;
-        }
+        add_file_to_counts(&mut counts, &file);
     }
 
     counts
+}
+
+fn add_file_to_counts(counts: &mut Counts, file: &FileInfo) {
+    if file.deleted {
+        counts.deleted += 1;
+    }
+    if file.file_type == FileInfoType::Directory {
+        counts.directories += 1;
+    } else {
+        counts.files += 1;
+    }
+    counts.bytes += file.size;
+    if file.local_flags & FLAG_LOCAL_RECEIVE_ONLY != 0 {
+        counts.receive_only_changed += 1;
+    }
 }
 
 fn accumulate_counts(target: &mut Counts, delta: Counts) {

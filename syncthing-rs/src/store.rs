@@ -711,6 +711,13 @@ impl Store {
 }
 
 fn load_or_init_manifest(root: &Path, manifest_path: &Path) -> io::Result<StoreManifest> {
+    let manifest_tmp_path = root.join(MANIFEST_TMP_FILE_NAME);
+    if !manifest_path.exists() && manifest_tmp_path.exists() {
+        // Recovery path for interrupted manifest swap.
+        fs::rename(&manifest_tmp_path, manifest_path)?;
+        sync_dir(root)?;
+    }
+
     if manifest_path.exists() {
         let raw = fs::read_to_string(manifest_path)?;
         let mut manifest: StoreManifest = serde_json::from_str(&raw).map_err(|err| {
@@ -719,23 +726,41 @@ fn load_or_init_manifest(root: &Path, manifest_path: &Path) -> io::Result<StoreM
                 format!("decode manifest {}: {err}", manifest_path.display()),
             )
         })?;
-        normalize_manifest(root, &mut manifest);
+        normalize_manifest(root, &mut manifest, false);
         persist_manifest(root, manifest_path, &manifest)?;
         return Ok(manifest);
     }
 
-    let mut manifest = StoreManifest {
-        schema_version: MANIFEST_SCHEMA_VERSION,
-        segments: vec![JOURNAL_FILE_NAME.to_string()],
-        active_segment: JOURNAL_FILE_NAME.to_string(),
-        next_segment_id: 1,
+    let existing_segments = discover_commit_segments(root);
+    let mut manifest = if existing_segments.is_empty() {
+        StoreManifest {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            segments: vec![JOURNAL_FILE_NAME.to_string()],
+            active_segment: JOURNAL_FILE_NAME.to_string(),
+            next_segment_id: 1,
+        }
+    } else {
+        let max_segment_id = existing_segments
+            .iter()
+            .filter_map(|name| parse_segment_id(name))
+            .max()
+            .unwrap_or(0);
+        StoreManifest {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            active_segment: existing_segments
+                .last()
+                .cloned()
+                .unwrap_or_else(|| JOURNAL_FILE_NAME.to_string()),
+            segments: existing_segments,
+            next_segment_id: max_segment_id.saturating_add(1),
+        }
     };
-    normalize_manifest(root, &mut manifest);
+    normalize_manifest(root, &mut manifest, true);
     persist_manifest(root, manifest_path, &manifest)?;
     Ok(manifest)
 }
 
-fn normalize_manifest(root: &Path, manifest: &mut StoreManifest) {
+fn normalize_manifest(root: &Path, manifest: &mut StoreManifest, include_discovered: bool) {
     manifest.schema_version = MANIFEST_SCHEMA_VERSION;
 
     if manifest.segments.is_empty() {
@@ -757,7 +782,9 @@ fn normalize_manifest(root: &Path, manifest: &mut StoreManifest) {
     }
 
     let mut seen = HashSet::new();
-    manifest.segments.retain(|segment| seen.insert(segment.clone()));
+    manifest
+        .segments
+        .retain(|segment| seen.insert(segment.clone()));
 
     let mut max_segment_id = 0_u64;
     for segment in &manifest.segments {
@@ -772,24 +799,13 @@ fn normalize_manifest(root: &Path, manifest: &mut StoreManifest) {
         manifest.next_segment_id = 1;
     }
 
-    // Manifest recovery path: if manifest was lost but segmented commits exist, include them.
-    let mut discovered = fs::read_dir(root)
-        .ok()
-        .into_iter()
-        .flat_map(|it| it.flatten())
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if parse_segment_id(&name).is_some() {
-                Some(name)
-            } else {
-                None
+    if include_discovered {
+        // Manifest recovery path: if manifest was absent, include extant segment files.
+        let discovered = discover_commit_segments(root);
+        for segment in discovered {
+            if !manifest.segments.iter().any(|v| v == &segment) {
+                manifest.segments.push(segment);
             }
-        })
-        .collect::<Vec<_>>();
-    discovered.sort();
-    for segment in discovered {
-        if !manifest.segments.iter().any(|v| v == &segment) {
-            manifest.segments.push(segment);
         }
     }
     if parse_segment_id(&manifest.active_segment).is_none() {
@@ -806,6 +822,24 @@ fn normalize_manifest(root: &Path, manifest: &mut StoreManifest) {
             }
         }
     }
+}
+
+fn discover_commit_segments(root: &Path) -> Vec<String> {
+    let mut discovered = fs::read_dir(root)
+        .ok()
+        .into_iter()
+        .flat_map(|it| it.flatten())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if parse_segment_id(&name).is_some() {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    discovered.sort();
+    discovered
 }
 
 fn parse_segment_id(name: &str) -> Option<u64> {
@@ -1489,6 +1523,62 @@ mod tests {
         let manifest = read_manifest(&root);
         assert!(manifest.segments.len() >= 2);
         assert!(manifest.active_segment.starts_with(COMMIT_SEGMENT_PREFIX));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn manifest_is_authoritative_over_orphan_segments() {
+        let root = temp_root("manifest-authoritative");
+        let cfg = StoreConfig::new(&root);
+        {
+            let mut store = Store::open(cfg.clone()).expect("open");
+            store
+                .upsert_file(meta("alpha", "kept.txt", 1))
+                .expect("upsert kept");
+        }
+
+        // This segment is not referenced by MANIFEST and must not be replayed.
+        let orphan_path = root.join("CSEG-99999999.log");
+        let mut orphan = File::create(&orphan_path).expect("create orphan segment");
+        Store::write_record(
+            &mut orphan,
+            &JournalOp::Upsert(meta("alpha", "orphan.txt", 2)),
+        )
+        .expect("write orphan");
+        orphan.sync_all().expect("sync orphan");
+
+        let store = Store::open(cfg).expect("reopen");
+        assert!(store.get_file("alpha", "local", "kept.txt").is_some());
+        assert!(store.get_file("alpha", "local", "orphan.txt").is_none());
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn recovers_from_manifest_tmp_when_manifest_missing() {
+        let root = temp_root("manifest-tmp-recovery");
+        let cfg = StoreConfig::new(&root);
+        {
+            let mut store = Store::open(cfg.clone()).expect("open");
+            store
+                .upsert_file(meta("alpha", "a.txt", 1))
+                .expect("upsert");
+        }
+
+        let manifest_path = root.join(MANIFEST_FILE_NAME);
+        let manifest_tmp_path = root.join(MANIFEST_TMP_FILE_NAME);
+        let raw = fs::read_to_string(&manifest_path).expect("read manifest");
+        fs::write(&manifest_tmp_path, raw).expect("write tmp manifest");
+        fs::remove_file(&manifest_path).expect("remove manifest");
+
+        let store = Store::open(cfg).expect("reopen via manifest tmp");
+        assert!(
+            manifest_path.exists(),
+            "manifest should be restored from tmp"
+        );
+        assert_eq!(store.file_count(), 1);
+        assert!(store.get_file("alpha", "local", "a.txt").is_some());
 
         fs::remove_dir_all(root).expect("cleanup");
     }

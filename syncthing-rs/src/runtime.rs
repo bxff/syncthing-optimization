@@ -1,5 +1,7 @@
 use crate::bep::{decode_frame, encode_frame, BepMessage};
 use crate::model_core::{model, newFolderConfiguration, NewModel, NewModelWithRuntime};
+use serde::Deserialize;
+use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -12,10 +14,20 @@ const DEFAULT_FOLDER_ID: &str = "default";
 const MAX_FRAME_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_MAX_PEERS: usize = 32;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct FolderSpec {
     pub(crate) id: String,
     pub(crate) path: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+struct RuntimeConfigFile {
+    pub(crate) listen_addr: Option<String>,
+    pub(crate) db_root: Option<String>,
+    pub(crate) memory_max_mb: Option<usize>,
+    pub(crate) max_peers: Option<usize>,
+    #[serde(default)]
+    pub(crate) folders: Vec<FolderSpec>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,14 +42,17 @@ pub(crate) struct DaemonConfig {
 
 pub(crate) fn parse_daemon_args(args: &[String]) -> Result<DaemonConfig, String> {
     let mut listen_addr = DEFAULT_LISTEN_ADDR.to_string();
+    let mut listen_set = false;
     let mut folder_id = DEFAULT_FOLDER_ID.to_string();
     let mut folder_id_set = false;
     let mut folder_path: Option<String> = None;
     let mut folder_path_set = false;
     let mut folders: Vec<FolderSpec> = Vec::new();
+    let mut config_file_path: Option<String> = None;
     let mut db_root: Option<String> = None;
     let mut memory_max_mb: Option<usize> = None;
     let mut max_peers = DEFAULT_MAX_PEERS;
+    let mut max_peers_set = false;
     let mut once = false;
 
     let mut i = 0_usize;
@@ -49,6 +64,7 @@ pub(crate) fn parse_daemon_args(args: &[String]) -> Result<DaemonConfig, String>
                     .get(i)
                     .ok_or_else(|| "--listen requires a value".to_string())?;
                 listen_addr = value.clone();
+                listen_set = true;
             }
             "--folder-id" => {
                 i += 1;
@@ -117,6 +133,14 @@ pub(crate) fn parse_daemon_args(args: &[String]) -> Result<DaemonConfig, String>
                     return Err("--max-peers must be greater than zero".to_string());
                 }
                 max_peers = parsed;
+                max_peers_set = true;
+            }
+            "--config" => {
+                i += 1;
+                let value = args
+                    .get(i)
+                    .ok_or_else(|| "--config requires a value".to_string())?;
+                config_file_path = Some(value.clone());
             }
             "--once" => {
                 once = true;
@@ -126,6 +150,32 @@ pub(crate) fn parse_daemon_args(args: &[String]) -> Result<DaemonConfig, String>
             }
         }
         i += 1;
+    }
+
+    if let Some(path) = config_file_path {
+        let file_cfg = load_runtime_config(&path)?;
+        if !listen_set {
+            if let Some(file_listen) = file_cfg.listen_addr {
+                listen_addr = file_listen;
+            }
+        }
+        if db_root.is_none() {
+            db_root = file_cfg.db_root;
+        }
+        if memory_max_mb.is_none() {
+            memory_max_mb = file_cfg.memory_max_mb;
+        }
+        if !max_peers_set {
+            if let Some(file_max_peers) = file_cfg.max_peers {
+                if file_max_peers == 0 {
+                    return Err("config max_peers must be greater than zero".to_string());
+                }
+                max_peers = file_max_peers;
+            }
+        }
+        if folders.is_empty() && !folder_id_set && !folder_path_set {
+            folders = file_cfg.folders;
+        }
     }
 
     let folders = if !folders.is_empty() {
@@ -170,6 +220,30 @@ pub(crate) fn run_daemon(config: DaemonConfig) -> Result<(), String> {
     let listener = TcpListener::bind(&config.listen_addr)
         .map_err(|err| format!("listen {}: {err}", config.listen_addr))?;
     run_daemon_with_listener(listener, model, config.once, config.max_peers)
+}
+
+fn load_runtime_config(path: &str) -> Result<RuntimeConfigFile, String> {
+    let raw = fs::read_to_string(path).map_err(|err| format!("read config {path}: {err}"))?;
+    let cfg: RuntimeConfigFile =
+        serde_json::from_str(&raw).map_err(|err| format!("parse config {path}: {err}"))?;
+    for folder in &cfg.folders {
+        if folder.id.trim().is_empty() || folder.path.trim().is_empty() {
+            return Err(format!(
+                "config {path}: folders require non-empty id and path"
+            ));
+        }
+    }
+    if cfg.memory_max_mb == Some(0) {
+        return Err(format!(
+            "config {path}: memory_max_mb must be greater than zero"
+        ));
+    }
+    if cfg.max_peers == Some(0) {
+        return Err(format!(
+            "config {path}: max_peers must be greater than zero"
+        ));
+    }
+    Ok(cfg)
 }
 
 fn run_daemon_with_listener(
@@ -394,6 +468,53 @@ mod tests {
     }
 
     #[test]
+    fn parse_daemon_args_loads_config_file_and_allows_overrides() {
+        let root = temp_root("config-file");
+        let config_path = root.join("daemon.json");
+        fs::write(
+            &config_path,
+            r#"{
+                "listen_addr":"127.0.0.1:24100",
+                "db_root":"/tmp/syncthing-rs-db-config",
+                "memory_max_mb":71,
+                "max_peers":4,
+                "folders":[
+                    {"id":"docs","path":"/srv/docs"},
+                    {"id":"photos","path":"/srv/photos"}
+                ]
+            }"#,
+        )
+        .expect("write config");
+
+        let args = vec![
+            "--config".to_string(),
+            config_path.to_string_lossy().to_string(),
+            "--max-peers".to_string(),
+            "10".to_string(),
+        ];
+        let cfg = parse_daemon_args(&args).expect("parse");
+        assert_eq!(cfg.listen_addr, "127.0.0.1:24100");
+        assert_eq!(cfg.db_root.as_deref(), Some("/tmp/syncthing-rs-db-config"));
+        assert_eq!(cfg.memory_max_mb, Some(71));
+        assert_eq!(cfg.max_peers, 10);
+        assert_eq!(
+            cfg.folders,
+            vec![
+                FolderSpec {
+                    id: "docs".to_string(),
+                    path: "/srv/docs".to_string()
+                },
+                FolderSpec {
+                    id: "photos".to_string(),
+                    path: "/srv/photos".to_string()
+                }
+            ]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn parse_daemon_args_rejects_invalid_numeric_flags() {
         let args = vec![
             "--folder-path".to_string(),
@@ -421,6 +542,18 @@ mod tests {
         ];
         let err = parse_daemon_args(&args).expect_err("must fail");
         assert!(err.contains("cannot mix --folder"));
+
+        let root = temp_root("bad-config");
+        let config_path = root.join("daemon.json");
+        fs::write(&config_path, r#"{"max_peers":0,"folders":[{"id":"a","path":"/tmp/a"}]}"#)
+            .expect("write config");
+        let args = vec![
+            "--config".to_string(),
+            config_path.to_string_lossy().to_string(),
+        ];
+        let err = parse_daemon_args(&args).expect_err("must fail");
+        assert!(err.contains("max_peers"));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

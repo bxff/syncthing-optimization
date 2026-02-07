@@ -11,7 +11,7 @@ use crate::walker::{walk_deterministic, WalkConfig};
 use crc32fast::Hasher;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
@@ -493,9 +493,39 @@ impl folder {
         self.pullBasePause();
         self.pullScheduled = false;
 
-        let mut db = self.db.lock().map_err(|_| "db lock poisoned".to_string())?;
-        let estimated = db.estimated_memory_bytes();
-        let budget = db.memory_budget_bytes();
+        let (needed, estimated, budget, total_blocks, reused_same_path_blocks) = {
+            let db = self.db.lock().map_err(|_| "db lock poisoned".to_string())?;
+            let estimated = db.estimated_memory_bytes();
+            let budget = db.memory_budget_bytes();
+            let needed = db
+                .all_needed_global_files(
+                    &self.config.id,
+                    "local",
+                    db::PullOrder::Alphabetic,
+                    10_000,
+                    0,
+                )
+                .map_err(|e| format!("pull query: {e}"))?;
+            let mut total_blocks = 0_usize;
+            let mut reused_same_path_blocks = 0_usize;
+            for global in &needed {
+                total_blocks = total_blocks.saturating_add(global.block_hashes.len());
+                if let Ok(Some(local_prev)) =
+                    db.get_device_file(&self.config.id, LOCAL_DEVICE_ID, &global.path)
+                {
+                    reused_same_path_blocks = reused_same_path_blocks
+                        .saturating_add(count_same_path_reuse_blocks(&local_prev, global));
+                }
+            }
+            (
+                needed,
+                estimated,
+                budget,
+                total_blocks,
+                reused_same_path_blocks,
+            )
+        };
+
         let soft_limit = if budget == 0 {
             0
         } else {
@@ -533,25 +563,21 @@ impl folder {
             MemoryPolicy::BestEffort => {}
         }
 
-        let needed = db
-            .all_needed_global_files(
-                &self.config.id,
-                "local",
-                db::PullOrder::Alphabetic,
-                query_limit,
-                0,
-            )
-            .map_err(|e| format!("pull query: {e}"))?;
+        let needed = if query_limit >= needed.len() {
+            needed
+        } else {
+            needed.into_iter().take(query_limit).collect::<Vec<_>>()
+        };
 
-        let mut total_blocks = 0_usize;
-        let mut reused_same_path_blocks = 0_usize;
         let mut local_updates = Vec::with_capacity(needed.len());
+        let folder_root = PathBuf::from(&self.config.path);
         for global in &needed {
-            total_blocks = total_blocks.saturating_add(global.block_hashes.len());
-            if let Ok(Some(local_prev)) = db.get_device_file(&self.config.id, "local", &global.path)
-            {
-                reused_same_path_blocks = reused_same_path_blocks
-                    .saturating_add(count_same_path_reuse_blocks(&local_prev, global));
+            if let Err(err) = apply_remote_file_to_disk(&folder_root, global) {
+                self.errorsMut.push(FileError {
+                    Path: global.path.clone(),
+                    Err: err.clone(),
+                });
+                return Err(format!("pull apply {}: {err}", global.path));
             }
             let mut applied = global.clone();
             applied.folder = self.config.id.clone();
@@ -563,6 +589,7 @@ impl folder {
         }
 
         if !local_updates.is_empty() {
+            let mut db = self.db.lock().map_err(|_| "db lock poisoned".to_string())?;
             db.update(&self.config.id, "local", local_updates)
                 .map_err(|e| format!("pull apply update: {e}"))?;
         }
@@ -1050,6 +1077,107 @@ fn count_same_path_reuse_blocks(local_prev: &db::FileInfo, target: &db::FileInfo
     reused
 }
 
+fn apply_remote_file_to_disk(root: &Path, file: &db::FileInfo) -> Result<(), String> {
+    let abs = safe_join_relative_path(root, &file.path)?;
+    if file.deleted {
+        return delete_path_if_exists(&abs);
+    }
+
+    match file.file_type {
+        db::FileInfoType::Directory => ensure_directory_path(&abs),
+        db::FileInfoType::File | db::FileInfoType::Symlink => {
+            write_placeholder_file(&abs, file.size, &file.block_hashes)
+        }
+    }
+}
+
+fn safe_join_relative_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
+    use std::path::Component;
+
+    let candidate = Path::new(relative);
+    let mut clean = PathBuf::new();
+    for component in candidate.components() {
+        match component {
+            Component::Normal(seg) => clean.push(seg),
+            Component::CurDir => {}
+            _ => {
+                return Err(format!("invalid relative path: {relative}"));
+            }
+        }
+    }
+
+    Ok(root.join(clean))
+}
+
+fn delete_path_if_exists(path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if meta.is_dir() {
+                fs::remove_dir_all(path).map_err(|e| format!("remove dir {}: {e}", path.display()))
+            } else {
+                fs::remove_file(path).map_err(|e| format!("remove file {}: {e}", path.display()))
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!("stat {}: {err}", path.display())),
+    }
+}
+
+fn ensure_directory_path(path: &Path) -> Result<(), String> {
+    if path.exists() && !path.is_dir() {
+        fs::remove_file(path).map_err(|e| format!("remove non-dir {}: {e}", path.display()))?;
+    }
+    fs::create_dir_all(path).map_err(|e| format!("create dir {}: {e}", path.display()))
+}
+
+fn write_placeholder_file(path: &Path, size: i64, block_hashes: &[String]) -> Result<(), String> {
+    let size = usize::try_from(size).map_err(|_| format!("invalid file size: {size}"))?;
+    if path.exists() && path.is_dir() {
+        fs::remove_dir_all(path).map_err(|e| format!("remove dir {}: {e}", path.display()))?;
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
+    let file = File::create(path).map_err(|e| format!("create file {}: {e}", path.display()))?;
+    let mut writer = BufWriter::new(file);
+    if size == 0 {
+        writer
+            .flush()
+            .map_err(|e| format!("flush file {}: {e}", path.display()))?;
+        return Ok(());
+    }
+
+    let seed = placeholder_seed(block_hashes);
+    let mut seed_pos = 0_usize;
+    let mut remaining = size;
+    let mut chunk = vec![0_u8; BLOCK_CHUNK_SIZE.min(remaining.max(1))];
+
+    while remaining > 0 {
+        let n = chunk.len().min(remaining);
+        for b in &mut chunk[..n] {
+            *b = seed[seed_pos];
+            seed_pos = (seed_pos + 1) % seed.len();
+        }
+        writer
+            .write_all(&chunk[..n])
+            .map_err(|e| format!("write file {}: {e}", path.display()))?;
+        remaining -= n;
+    }
+
+    writer
+        .flush()
+        .map_err(|e| format!("flush file {}: {e}", path.display()))?;
+    Ok(())
+}
+
+fn placeholder_seed(block_hashes: &[String]) -> Vec<u8> {
+    let mut out = block_hashes.join("|").into_bytes();
+    if out.is_empty() {
+        out.push(0_u8);
+    }
+    out
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct sendReceiveFolder {
     pub(crate) folder: folder,
@@ -1508,7 +1636,8 @@ mod tests {
     #[test]
     fn pull_reuses_blocks_from_same_path_only() {
         let root = temp_root("same-path-reuse");
-        let mut dbv = db::WalFreeDb::open_runtime(&root, 50).expect("open runtime db");
+        let db_root = temp_root("same-path-reuse-db");
+        let mut dbv = db::WalFreeDb::open_runtime(&db_root, 50).expect("open runtime db");
         dbv.update(
             "default",
             "local",
@@ -1548,14 +1677,19 @@ mod tests {
         assert_eq!(synced.block_hashes, vec!["h1", "h2", "h3"]);
         let need = guard.count_need("default", "local").expect("count need after pull");
         assert_eq!(need.files, 0);
+        let disk_file = root.join("same.txt");
+        assert!(disk_file.exists());
+        assert_eq!(fs::metadata(&disk_file).expect("meta same.txt").len(), 1);
 
         let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(db_root);
     }
 
     #[test]
     fn pull_hard_blocks_when_fail_policy_exceeds_cap() {
         let root = temp_root("fail-policy");
-        let mut dbv = db::WalFreeDb::open_runtime(&root, 0).expect("open runtime db");
+        let db_root = temp_root("fail-policy-db");
+        let mut dbv = db::WalFreeDb::open_runtime(&db_root, 0).expect("open runtime db");
         dbv.update(
             "default",
             "local",
@@ -1582,12 +1716,14 @@ mod tests {
         assert!(f.PullStats().hard_blocked);
 
         let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(db_root);
     }
 
     #[test]
     fn pull_propagates_remote_delete_to_local() {
         let root = temp_root("pull-delete");
-        let mut dbv = db::WalFreeDb::open_runtime(&root, 50).expect("open runtime db");
+        let db_root = temp_root("pull-delete-db");
+        let mut dbv = db::WalFreeDb::open_runtime(&db_root, 50).expect("open runtime db");
         dbv.update(
             "default",
             "local",
@@ -1603,6 +1739,7 @@ mod tests {
         let mut cfg = FolderConfiguration::default();
         cfg.id = "default".to_string();
         cfg.path = root.to_string_lossy().to_string();
+        fs::write(root.join("gone.txt"), b"to-delete").expect("create local file");
         let mut f = newFolder(cfg, db);
 
         let pulled = f.pull().expect("pull");
@@ -1618,14 +1755,17 @@ mod tests {
         let need = guard.count_need("default", "local").expect("need");
         assert_eq!(need.files, 0);
         assert_eq!(need.deleted, 0);
+        assert!(!root.join("gone.txt").exists());
 
         let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(db_root);
     }
 
     #[test]
     fn memory_telemetry_reports_cap_violation_state() {
         let root = temp_root("telemetry-cap");
-        let mut dbv = db::WalFreeDb::open_runtime(&root, 0).expect("open runtime db");
+        let db_root = temp_root("telemetry-cap-db");
+        let mut dbv = db::WalFreeDb::open_runtime(&db_root, 0).expect("open runtime db");
         dbv.update(
             "default",
             "local",
@@ -1653,6 +1793,72 @@ mod tests {
         assert!(telemetry.last_cap_violation.is_some());
 
         let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(db_root);
+    }
+
+    #[test]
+    fn pull_materializes_remote_file_on_disk() {
+        let root = temp_root("pull-materialize");
+        let db_root = temp_root("pull-materialize-db");
+        let mut dbv = db::WalFreeDb::open_runtime(&db_root, 50).expect("open runtime db");
+        let mut remote = file("dir/new.bin", 1, &["h1", "h2"]);
+        remote.size = 4096;
+        dbv.update("default", "remote", vec![remote.clone()])
+            .expect("update remote");
+
+        let db = Arc::new(Mutex::new(dbv));
+        let mut cfg = FolderConfiguration::default();
+        cfg.id = "default".to_string();
+        cfg.path = root.to_string_lossy().to_string();
+        let mut f = newFolder(cfg, db);
+
+        let pulled = f.pull().expect("pull");
+        assert_eq!(pulled, 1);
+
+        let on_disk = root.join("dir").join("new.bin");
+        assert!(on_disk.exists());
+        assert_eq!(fs::metadata(&on_disk).expect("meta").len(), 4096);
+
+        let guard = f.db.lock().expect("db lock");
+        let local = guard
+            .get_device_file("default", "local", "dir/new.bin")
+            .expect("lookup")
+            .expect("local file");
+        assert_eq!(local.sequence, 1);
+        assert!(!local.deleted);
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(db_root);
+    }
+
+    #[test]
+    fn pull_rejects_parent_path_escape() {
+        let root = temp_root("pull-path-escape");
+        let db_root = temp_root("pull-path-escape-db");
+        let mut dbv = db::WalFreeDb::open_runtime(&db_root, 50).expect("open runtime db");
+        let mut remote = file("../outside.txt", 1, &["h1"]);
+        remote.size = 12;
+        dbv.update("default", "remote", vec![remote])
+            .expect("update remote");
+
+        let outside = root
+            .parent()
+            .expect("parent")
+            .join("outside.txt");
+        let _ = fs::remove_file(&outside);
+
+        let db = Arc::new(Mutex::new(dbv));
+        let mut cfg = FolderConfiguration::default();
+        cfg.id = "default".to_string();
+        cfg.path = root.to_string_lossy().to_string();
+        let mut f = newFolder(cfg, db);
+
+        let err = f.pull().expect_err("must reject path escape");
+        assert!(err.contains("invalid relative path"));
+        assert!(!outside.exists());
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(db_root);
     }
 
     #[test]

@@ -1228,21 +1228,7 @@ func enforceDiffReports(report *guardrailReport, mode string) {
 		})
 	} else {
 		validateReportFreshness(report, testPath, "memory-cap status report", test.GeneratedAt, maxDiffReportAge)
-		status := strings.ToLower(strings.TrimSpace(test.MemoryCap.Status))
-		if status == "" || status == "skipped" || (status != "pass" && status != "passed") {
-			report.Failures = append(report.Failures, reportFailure{
-				Rule:    "memory-cap-tests",
-				Path:    testPath,
-				Message: fmt.Sprintf("memory-cap tests must pass and not be skipped (status=%q)", test.MemoryCap.Status),
-			})
-		}
-		if test.MemoryCap.Flaky {
-			report.Failures = append(report.Failures, reportFailure{
-				Rule:    "memory-cap-tests",
-				Path:    testPath,
-				Message: "memory-cap tests must not be marked flaky",
-			})
-		}
+		validateMemoryCapStatus(report, testPath, test)
 	}
 
 	if mode != "release" {
@@ -1285,6 +1271,31 @@ func enforceDiffReports(report *guardrailReport, mode string) {
 				Message: fmt.Sprintf("crash_recovery=%s", dur.CrashRecovery),
 			})
 		}
+	}
+}
+
+func validateMemoryCapStatus(report *guardrailReport, path string, test testStatusReport) {
+	status := strings.ToLower(strings.TrimSpace(test.MemoryCap.Status))
+	if status == "" || status == "skipped" || (status != "pass" && status != "passed") {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "memory-cap-tests",
+			Path:    path,
+			Message: fmt.Sprintf("memory-cap tests must pass and not be skipped (status=%q)", test.MemoryCap.Status),
+		})
+	}
+	if test.MemoryCap.Flaky {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "memory-cap-tests",
+			Path:    path,
+			Message: "memory-cap tests must not be marked flaky",
+		})
+	}
+	if test.MemoryCap.ProfileMB != 50 {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "memory-cap-tests",
+			Path:    path,
+			Message: fmt.Sprintf("memory-cap profile must be 50 MB (profile_mb=%d)", test.MemoryCap.ProfileMB),
+		})
 	}
 }
 

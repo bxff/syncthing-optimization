@@ -130,3 +130,43 @@ func TestValidateReportFreshnessAllowsRecentReports(t *testing.T) {
 		t.Fatalf("expected no failures, got %#v", report.Failures)
 	}
 }
+
+func TestValidateMemoryCapStatusAcceptsPassing50MBProfile(t *testing.T) {
+	report := &guardrailReport{}
+	test := testStatusReport{
+		MemoryCap: memoryCapStatus{
+			Status:    "pass",
+			Flaky:     false,
+			ProfileMB: 50,
+		},
+	}
+
+	validateMemoryCapStatus(report, "parity/diff-reports/test-status.json", test)
+
+	if len(report.Failures) != 0 {
+		t.Fatalf("expected no failures, got %#v", report.Failures)
+	}
+}
+
+func TestValidateMemoryCapStatusRejectsNon50MBProfile(t *testing.T) {
+	report := &guardrailReport{}
+	test := testStatusReport{
+		MemoryCap: memoryCapStatus{
+			Status:    "pass",
+			Flaky:     false,
+			ProfileMB: 64,
+		},
+	}
+
+	validateMemoryCapStatus(report, "parity/diff-reports/test-status.json", test)
+
+	if len(report.Failures) != 1 {
+		t.Fatalf("expected 1 failure, got %#v", report.Failures)
+	}
+	if report.Failures[0].Rule != "memory-cap-tests" {
+		t.Fatalf("unexpected rule: %s", report.Failures[0].Rule)
+	}
+	if !strings.Contains(report.Failures[0].Message, "50 MB") {
+		t.Fatalf("unexpected message: %s", report.Failures[0].Message)
+	}
+}

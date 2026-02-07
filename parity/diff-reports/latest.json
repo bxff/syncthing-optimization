@@ -1,13 +1,113 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-02-07T06:35:06Z",
+  "produced_by": "parity-harness",
   "match": false,
   "mismatches": [
     {
-      "id": "bootstrap",
+      "id": "crash-recovery",
       "severity": "P0",
       "open": true,
-      "message": "Differential parity harness not executed yet"
+      "message": "rust side unavailable: open parity/harness/snapshots/rust-crash-recovery.json: no such file or directory"
+    },
+    {
+      "id": "folder-type-behavior",
+      "severity": "P0",
+      "open": true,
+      "message": "rust side unavailable: open parity/harness/snapshots/rust-folder-type-behavior.json: no such file or directory"
+    },
+    {
+      "id": "global-need-decision",
+      "severity": "P0",
+      "open": true,
+      "message": "rust side unavailable: open parity/harness/snapshots/rust-global-need-decision.json: no such file or directory"
+    },
+    {
+      "id": "index-sequence-behavior",
+      "severity": "P0",
+      "open": true,
+      "message": "rust side unavailable: open parity/harness/snapshots/rust-index-sequence-behavior.json: no such file or directory"
+    },
+    {
+      "id": "memory-cap-50mb",
+      "severity": "P0",
+      "open": true,
+      "message": "rust side unavailable: open parity/harness/snapshots/rust-memory-cap-50mb.json: no such file or directory"
+    },
+    {
+      "id": "protocol-state-transition",
+      "severity": "P0",
+      "open": true,
+      "message": "rust side unavailable: open parity/harness/snapshots/rust-protocol-state-transition.json: no such file or directory"
+    },
+    {
+      "id": "wal-free-durability",
+      "severity": "P0",
+      "open": true,
+      "message": "rust side unavailable: open parity/harness/snapshots/rust-wal-free-durability.json: no such file or directory"
+    },
+    {
+      "id": "conflict-and-ignore-semantics",
+      "severity": "P1",
+      "open": true,
+      "message": "rust side unavailable: open parity/harness/snapshots/rust-conflict-and-ignore-semantics.json: no such file or directory"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "conflict-and-ignore-semantics",
+      "severity": "P1",
+      "required": true,
+      "status": "blocked",
+      "message": "rust side unavailable: open parity/harness/snapshots/rust-conflict-and-ignore-semantics.json: no such file or directory"
+    },
+    {
+      "id": "crash-recovery",
+      "severity": "P0",
+      "required": true,
+      "status": "blocked",
+      "message": "rust side unavailable: open parity/harness/snapshots/rust-crash-recovery.json: no such file or directory"
+    },
+    {
+      "id": "folder-type-behavior",
+      "severity": "P0",
+      "required": true,
+      "status": "blocked",
+      "message": "rust side unavailable: open parity/harness/snapshots/rust-folder-type-behavior.json: no such file or directory"
+    },
+    {
+      "id": "global-need-decision",
+      "severity": "P0",
+      "required": true,
+      "status": "blocked",
+      "message": "rust side unavailable: open parity/harness/snapshots/rust-global-need-decision.json: no such file or directory"
+    },
+    {
+      "id": "index-sequence-behavior",
+      "severity": "P0",
+      "required": true,
+      "status": "blocked",
+      "message": "rust side unavailable: open parity/harness/snapshots/rust-index-sequence-behavior.json: no such file or directory"
+    },
+    {
+      "id": "memory-cap-50mb",
+      "severity": "P0",
+      "required": true,
+      "status": "blocked",
+      "message": "rust side unavailable: open parity/harness/snapshots/rust-memory-cap-50mb.json: no such file or directory"
+    },
+    {
+      "id": "protocol-state-transition",
+      "severity": "P0",
+      "required": true,
+      "status": "blocked",
+      "message": "rust side unavailable: open parity/harness/snapshots/rust-protocol-state-transition.json: no such file or directory"
+    },
+    {
+      "id": "wal-free-durability",
+      "severity": "P0",
+      "required": true,
+      "status": "blocked",
+      "message": "rust side unavailable: open parity/harness/snapshots/rust-wal-free-durability.json: no such file or directory"
     }
   ]
 }

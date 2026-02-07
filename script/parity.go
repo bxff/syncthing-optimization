@@ -120,6 +120,7 @@ type reportFailure struct {
 type differentialReport struct {
 	SchemaVersion int            `json:"schema_version"`
 	GeneratedAt   string         `json:"generated_at"`
+	ProducedBy    string         `json:"produced_by,omitempty"`
 	Match         bool           `json:"match"`
 	Mismatches    []diffMismatch `json:"mismatches"`
 }
@@ -899,6 +900,13 @@ func enforceDiffReports(report *guardrailReport, mode string) {
 			Message: "missing or invalid differential report",
 		})
 	} else {
+		if strings.TrimSpace(latest.ProducedBy) != "parity-harness" {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "differential-report",
+				Path:    latestPath,
+				Message: "differential report must be produced by parity-harness",
+			})
+		}
 		if !latest.Match {
 			report.Failures = append(report.Failures, reportFailure{
 				Rule:    "differential-mismatch",

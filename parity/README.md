@@ -20,6 +20,18 @@ Regenerate artifacts:
 go run ./script/parity.go generate
 ```
 
+Run differential parity harness:
+
+```bash
+GOCACHE=/tmp/go-cache go run ./script/parity_harness.go run \
+  --config parity/harness/scenarios.json \
+  --latest parity/diff-reports/latest.json \
+  --test-status parity/diff-reports/test-status.json \
+  --interop parity/diff-reports/interop.json \
+  --durability parity/diff-reports/durability.json \
+  --profile-mb 50
+```
+
 Run guardrails in CI mode:
 
 ```bash

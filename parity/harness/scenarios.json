@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "description": "Deterministic differential scenarios for Go vs Rust parity checks.",
+  "timeout_sec": 120,
+  "scenarios": [
+    {
+      "id": "index-sequence-behavior",
+      "description": "Validate index/index-update sequence progression and boundary checks.",
+      "severity": "P0",
+      "required": true,
+      "tags": ["core", "interop"],
+      "comparator": "json-equal",
+      "go": {
+        "snapshot_path": "parity/harness/snapshots/go-index-sequence-behavior.json"
+      },
+      "rust": {
+        "snapshot_path": "parity/harness/snapshots/rust-index-sequence-behavior.json"
+      }
+    },
+    {
+      "id": "global-need-decision",
+      "description": "Validate global winner and local-need decisions for mixed versions/deletes.",
+      "severity": "P0",
+      "required": true,
+      "tags": ["core"],
+      "comparator": "json-equal",
+      "go": {
+        "snapshot_path": "parity/harness/snapshots/go-global-need-decision.json"
+      },
+      "rust": {
+        "snapshot_path": "parity/harness/snapshots/rust-global-need-decision.json"
+      }
+    },
+    {
+      "id": "conflict-and-ignore-semantics",
+      "description": "Validate conflict outcomes and ignore/deletion semantics.",
+      "severity": "P1",
+      "required": true,
+      "tags": ["core"],
+      "comparator": "json-equal",
+      "go": {
+        "snapshot_path": "parity/harness/snapshots/go-conflict-and-ignore-semantics.json"
+      },
+      "rust": {
+        "snapshot_path": "parity/harness/snapshots/rust-conflict-and-ignore-semantics.json"
+      }
+    },
+    {
+      "id": "folder-type-behavior",
+      "description": "Validate send/receive, receive-only, and receive-encrypted behavior parity.",
+      "severity": "P0",
+      "required": true,
+      "tags": ["core"],
+      "comparator": "json-equal",
+      "go": {
+        "snapshot_path": "parity/harness/snapshots/go-folder-type-behavior.json"
+      },
+      "rust": {
+        "snapshot_path": "parity/harness/snapshots/rust-folder-type-behavior.json"
+      }
+    },
+    {
+      "id": "protocol-state-transition",
+      "description": "Validate protocol exchange and state transition outputs.",
+      "severity": "P0",
+      "required": true,
+      "tags": ["interop"],
+      "comparator": "json-equal",
+      "go": {
+        "snapshot_path": "parity/harness/snapshots/go-protocol-state-transition.json"
+      },
+      "rust": {
+        "snapshot_path": "parity/harness/snapshots/rust-protocol-state-transition.json"
+      }
+    },
+    {
+      "id": "memory-cap-50mb",
+      "description": "Validate memory-cap profile behavior at 50 MB process cap.",
+      "severity": "P0",
+      "required": true,
+      "tags": ["memory-cap"],
+      "comparator": "json-equal",
+      "go": {
+        "snapshot_path": "parity/harness/snapshots/go-memory-cap-50mb.json"
+      },
+      "rust": {
+        "snapshot_path": "parity/harness/snapshots/rust-memory-cap-50mb.json"
+      }
+    },
+    {
+      "id": "wal-free-durability",
+      "description": "Validate WAL-free store durability semantics under normal operation.",
+      "severity": "P0",
+      "required": true,
+      "tags": ["durability"],
+      "comparator": "json-equal",
+      "go": {
+        "snapshot_path": "parity/harness/snapshots/go-wal-free-durability.json"
+      },
+      "rust": {
+        "snapshot_path": "parity/harness/snapshots/rust-wal-free-durability.json"
+      }
+    },
+    {
+      "id": "crash-recovery",
+      "description": "Validate crash-recovery behavior for the WAL-free custom store.",
+      "severity": "P0",
+      "required": true,
+      "tags": ["crash-recovery"],
+      "comparator": "json-equal",
+      "go": {
+        "snapshot_path": "parity/harness/snapshots/go-crash-recovery.json"
+      },
+      "rust": {
+        "snapshot_path": "parity/harness/snapshots/rust-crash-recovery.json"
+      }
+    }
+  ]
+}

@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-02-07T06:36:30Z",
+  "generated_at": "2026-02-07T06:45:40Z",
   "mode": "release",
   "summary": {
     "total_features": 1466,
     "missing": 1466,
     "implemented": 0,
     "parity_verified": 0,
-    "failures": 1473
+    "failures": 1480
   },
   "failures": [
     {
@@ -7347,14 +7347,56 @@
     },
     {
       "rule": "differential-open-critical",
-      "id": "bootstrap",
+      "id": "crash-recovery",
       "path": "parity/diff-reports/latest.json",
-      "message": "open P0 mismatch: Differential parity harness not executed yet"
+      "message": "open P0 mismatch: rust side unavailable: open parity/harness/snapshots/rust-crash-recovery.json: no such file or directory"
+    },
+    {
+      "rule": "differential-open-critical",
+      "id": "folder-type-behavior",
+      "path": "parity/diff-reports/latest.json",
+      "message": "open P0 mismatch: rust side unavailable: open parity/harness/snapshots/rust-folder-type-behavior.json: no such file or directory"
+    },
+    {
+      "rule": "differential-open-critical",
+      "id": "global-need-decision",
+      "path": "parity/diff-reports/latest.json",
+      "message": "open P0 mismatch: rust side unavailable: open parity/harness/snapshots/rust-global-need-decision.json: no such file or directory"
+    },
+    {
+      "rule": "differential-open-critical",
+      "id": "index-sequence-behavior",
+      "path": "parity/diff-reports/latest.json",
+      "message": "open P0 mismatch: rust side unavailable: open parity/harness/snapshots/rust-index-sequence-behavior.json: no such file or directory"
+    },
+    {
+      "rule": "differential-open-critical",
+      "id": "memory-cap-50mb",
+      "path": "parity/diff-reports/latest.json",
+      "message": "open P0 mismatch: rust side unavailable: open parity/harness/snapshots/rust-memory-cap-50mb.json: no such file or directory"
+    },
+    {
+      "rule": "differential-open-critical",
+      "id": "protocol-state-transition",
+      "path": "parity/diff-reports/latest.json",
+      "message": "open P0 mismatch: rust side unavailable: open parity/harness/snapshots/rust-protocol-state-transition.json: no such file or directory"
+    },
+    {
+      "rule": "differential-open-critical",
+      "id": "wal-free-durability",
+      "path": "parity/diff-reports/latest.json",
+      "message": "open P0 mismatch: rust side unavailable: open parity/harness/snapshots/rust-wal-free-durability.json: no such file or directory"
+    },
+    {
+      "rule": "differential-open-critical",
+      "id": "conflict-and-ignore-semantics",
+      "path": "parity/diff-reports/latest.json",
+      "message": "open P1 mismatch: rust side unavailable: open parity/harness/snapshots/rust-conflict-and-ignore-semantics.json: no such file or directory"
     },
     {
       "rule": "memory-cap-tests",
       "path": "parity/diff-reports/test-status.json",
-      "message": "memory-cap tests must pass and not be skipped (status=\"skipped\")"
+      "message": "memory-cap tests must pass and not be skipped (status=\"failed\")"
     },
     {
       "rule": "release-interop",

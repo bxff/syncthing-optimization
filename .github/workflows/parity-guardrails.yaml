@@ -25,8 +25,18 @@ jobs:
       - name: Generate parity artifacts
         run: go run ./script/parity.go generate
 
+      - name: Run differential parity harness
+        run: |
+          go run ./script/parity_harness.go run \
+            --config parity/harness/scenarios.json \
+            --latest parity/diff-reports/latest.json \
+            --test-status parity/diff-reports/test-status.json \
+            --interop parity/diff-reports/interop.json \
+            --durability parity/diff-reports/durability.json \
+            --profile-mb 50 || true
+
       - name: Verify committed parity artifacts are up to date
-        run: git diff --exit-code -- parity/feature-manifest.json parity/mapping-rust.json parity/exceptions.json parity/diff-reports
+        run: git diff --exit-code -- parity/feature-manifest.json parity/mapping-rust.json parity/exceptions.json parity/diff-reports parity/harness
 
       - name: Enforce parity guardrails (CI mode)
         run: go run ./script/parity.go check --mode ci --report parity/guardrail-report.json
@@ -68,6 +78,16 @@ jobs:
 
       - name: Generate parity artifacts
         run: go run ./script/parity.go generate
+
+      - name: Run differential parity harness
+        run: |
+          go run ./script/parity_harness.go run \
+            --config parity/harness/scenarios.json \
+            --latest parity/diff-reports/latest.json \
+            --test-status parity/diff-reports/test-status.json \
+            --interop parity/diff-reports/interop.json \
+            --durability parity/diff-reports/durability.json \
+            --profile-mb 50 || true
 
       - name: Enforce parity guardrails (release mode)
         run: go run ./script/parity.go check --mode release --report parity/guardrail-report-release.json

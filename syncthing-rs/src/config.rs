@@ -29,6 +29,7 @@ pub(crate) const ErrMarkerMissing: &str = ERR_MARKER_MISSING;
 #[serde(rename_all = "lowercase")]
 pub(crate) enum FolderType {
     SendReceive,
+    SendOnly,
     ReceiveOnly,
     ReceiveEncrypted,
 }
@@ -253,6 +254,7 @@ impl FolderType {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::SendReceive => "sendrecv",
+            Self::SendOnly => "sendonly",
             Self::ReceiveOnly => "recvonly",
             Self::ReceiveEncrypted => "recvenc",
         }
@@ -261,6 +263,7 @@ impl FolderType {
     pub(crate) fn to_mode(self) -> FolderMode {
         match self {
             Self::SendReceive => FolderMode::SendReceive,
+            Self::SendOnly => FolderMode::SendOnly,
             Self::ReceiveOnly => FolderMode::ReceiveOnly,
             Self::ReceiveEncrypted => FolderMode::ReceiveEncrypted,
         }
@@ -540,6 +543,7 @@ impl FolderConfiguration {
         cfg.label = extract_xml_attr(data, "label").unwrap_or_default();
         cfg.path = extract_xml_attr(data, "path").unwrap_or_default();
         cfg.folder_type = match extract_xml_attr(data, "type").as_deref() {
+            Some("sendonly") => FolderType::SendOnly,
             Some("receiveonly") | Some("recvonly") => FolderType::ReceiveOnly,
             Some("receiveencrypted") | Some("recvenc") => FolderType::ReceiveEncrypted,
             _ => FolderType::SendReceive,
@@ -566,6 +570,12 @@ pub(crate) fn demo_configs() -> Vec<FolderConfiguration> {
     recv_only.path = "/data/readonly".to_string();
     recv_only.folder_type = FolderType::ReceiveOnly;
 
+    let mut send_only = base.clone();
+    send_only.id = "sendonly".to_string();
+    send_only.label = "SendOnly".to_string();
+    send_only.path = "/data/sendonly".to_string();
+    send_only.folder_type = FolderType::SendOnly;
+
     let mut recv_enc = base.clone();
     recv_enc.id = "encrypted".to_string();
     recv_enc.label = "Encrypted".to_string();
@@ -573,7 +583,7 @@ pub(crate) fn demo_configs() -> Vec<FolderConfiguration> {
     recv_enc.folder_type = FolderType::ReceiveEncrypted;
     recv_enc.ignore_perms = true;
 
-    vec![base, recv_only, recv_enc]
+    vec![base, send_only, recv_only, recv_enc]
 }
 
 fn extract_xml_attr(xml: &str, attr: &str) -> Option<String> {
@@ -789,6 +799,12 @@ mod tests {
         .expect("xml parse");
         assert_eq!(xml_cfg.id, "fx");
         assert_eq!(xml_cfg.folder_type, FolderType::ReceiveOnly);
+
+        let xml_send_only = FolderConfiguration::unmarshal_xml(
+            r#"<folder id="so" label="SendOnly" path="/tmp/so" type="sendonly"></folder>"#,
+        )
+        .expect("xml sendonly parse");
+        assert_eq!(xml_send_only.folder_type, FolderType::SendOnly);
     }
 
     #[test]

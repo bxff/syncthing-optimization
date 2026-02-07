@@ -265,6 +265,12 @@ func scenarioFolderTypeBehavior() map[string]any {
 			"requires_local_revert": false,
 			"encrypted_index":       false,
 		},
+		"sendonly": map[string]any{
+			"pipeline":              []string{"scan", "index", "push"},
+			"may_push":              true,
+			"requires_local_revert": false,
+			"encrypted_index":       false,
+		},
 		"recvonly": map[string]any{
 			"pipeline":              []string{"scan", "index", "pull", "local_revert_required"},
 			"may_push":              false,
@@ -283,6 +289,13 @@ func scenarioFolderTypeBehavior() map[string]any {
 		"default": map[string]any{
 			"folder_type":        "sendrecv",
 			"mode":               "sendrecv",
+			"fs_watcher_enabled": true,
+			"rescan_interval_s":  3600,
+			"paused":             false,
+		},
+		"sendonly": map[string]any{
+			"folder_type":        "sendonly",
+			"mode":               "sendonly",
 			"fs_watcher_enabled": true,
 			"rescan_interval_s":  3600,
 			"paused":             false,
@@ -398,9 +411,9 @@ func scenarioProtocolStateTransition() (map[string]any, error) {
 	}
 
 	return baseScenario("protocol-state-transition", map[string]any{
-		"transitions": transitions,
+		"transitions":   transitions,
 		"message_types": msgTypes,
-		"frame_sizes": frameSizes,
+		"frame_sizes":   frameSizes,
 		"generated_responses": []any{
 			map[string]any{
 				"id":       1,
@@ -426,12 +439,12 @@ func scenarioPathOrderInvariant() map[string]any {
 	}
 
 	return baseScenario("path-order-invariant", map[string]any{
-		"walk_paths":           paths,
-		"db_paths":             paths,
-		"match":                true,
-		"spill_files_created":  5,
-		"files_emitted":        7,
-		"directories_seen":     4,
+		"walk_paths":          paths,
+		"db_paths":            paths,
+		"match":               true,
+		"spill_files_created": 5,
+		"files_emitted":       7,
+		"directories_seen":    4,
 	})
 }
 

@@ -928,9 +928,12 @@ impl Db for WalFreeDb {
         self.ensure_open()?;
         let mut cursor: Option<String> = None;
         loop {
-            let page = self
-                .store
-                .files_in_folder_device_ordered_page(folder, device, cursor.as_deref(), 1024);
+            let page = self.store.files_in_folder_device_ordered_page(
+                folder,
+                device,
+                cursor.as_deref(),
+                1024,
+            );
             if page.items.is_empty() {
                 break;
             }
@@ -990,10 +993,11 @@ impl Db for WalFreeDb {
     fn get_device_sequence(&self, folder: &str, device: &str) -> Result<i64, String> {
         self.ensure_open()?;
         let mut max_seq = 0_i64;
-        self.store.for_each_file_in_folder_device(folder, device, |meta| {
-            max_seq = max_seq.max(u64_to_i64(meta.sequence));
-            true
-        });
+        self.store
+            .for_each_file_in_folder_device(folder, device, |meta| {
+                max_seq = max_seq.max(u64_to_i64(meta.sequence));
+                true
+            });
         Ok(max_seq)
     }
 
@@ -1526,7 +1530,12 @@ mod tests {
         assert_eq!(first.next_cursor.as_deref(), Some("a/z.txt"));
 
         let second = db
-            .all_needed_global_files_ordered_page("default", "local", first.next_cursor.as_deref(), 2)
+            .all_needed_global_files_ordered_page(
+                "default",
+                "local",
+                first.next_cursor.as_deref(),
+                2,
+            )
             .expect("second page");
         let second_paths = second.items.into_iter().map(|f| f.path).collect::<Vec<_>>();
         assert_eq!(second_paths, vec!["a.d/x.txt", "b.txt"]);

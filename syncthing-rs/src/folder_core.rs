@@ -497,6 +497,12 @@ impl folder {
         self.pullBasePause();
         self.pullScheduled = false;
 
+        let mode = self.config.folder_type.to_mode();
+        if mode == FolderMode::SendOnly {
+            self.pullStats = PullStats::default();
+            return Ok(0);
+        }
+
         let (estimated, budget) = {
             let db = self.db.lock().map_err(|_| "db lock poisoned".to_string())?;
             let estimated = db.estimated_memory_bytes();
@@ -1728,6 +1734,36 @@ mod tests {
         assert!(root.join("a.txt").exists());
         assert!(root.join("b.txt").exists());
         assert!(root.join("c.txt").exists());
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(db_root);
+    }
+
+    #[test]
+    fn send_only_mode_does_not_apply_remote_pull() {
+        let root = temp_root("send-only-no-pull");
+        let db_root = temp_root("send-only-no-pull-db");
+        let mut dbv = db::WalFreeDb::open_runtime(&db_root, 50).expect("open runtime db");
+        dbv.update("default", "local", vec![file("local.txt", 1, &["h1"])])
+            .expect("update local");
+        dbv.update("default", "remote", vec![file("remote.txt", 2, &["h2"])])
+            .expect("update remote");
+        let db = Arc::new(Mutex::new(dbv));
+
+        let mut cfg = scan_cfg(&root);
+        cfg.folder_type = crate::config::FolderType::SendOnly;
+        let mut f = newFolder(cfg, db.clone());
+        let pulled = f.pull().expect("pull");
+        assert_eq!(pulled, 0);
+
+        let guard = db.lock().expect("db lock");
+        assert!(
+            guard
+                .get_device_file("default", "local", "remote.txt")
+                .expect("lookup")
+                .is_none(),
+            "send-only mode must not mirror remote file into local device view"
+        );
 
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(db_root);

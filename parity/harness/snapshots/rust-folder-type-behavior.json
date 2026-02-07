@@ -20,6 +20,13 @@
       "mode": "recvonly",
       "paused": false,
       "rescan_interval_s": 3600
+    },
+    "sendonly": {
+      "folder_type": "sendonly",
+      "fs_watcher_enabled": true,
+      "mode": "sendonly",
+      "paused": false,
+      "rescan_interval_s": 3600
     }
   },
   "folder_modes": {
@@ -43,6 +50,16 @@
         "local_revert_required"
       ],
       "requires_local_revert": true
+    },
+    "sendonly": {
+      "encrypted_index": false,
+      "may_push": true,
+      "pipeline": [
+        "scan",
+        "index",
+        "push"
+      ],
+      "requires_local_revert": false
     },
     "sendrecv": {
       "encrypted_index": false,

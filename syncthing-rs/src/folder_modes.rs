@@ -1,6 +1,7 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum FolderMode {
     SendReceive,
+    SendOnly,
     ReceiveOnly,
     ReceiveEncrypted,
 }
@@ -18,6 +19,7 @@ impl FolderMode {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::SendReceive => "sendrecv",
+            Self::SendOnly => "sendonly",
             Self::ReceiveOnly => "recvonly",
             Self::ReceiveEncrypted => "recvenc",
         }
@@ -29,6 +31,13 @@ pub(crate) fn mode_actions(mode: FolderMode) -> FolderModeActions {
         FolderMode::SendReceive => FolderModeActions {
             mode,
             pipeline: vec!["scan", "index", "pull", "push"],
+            may_push: true,
+            requires_local_revert: false,
+            encrypted_index: false,
+        },
+        FolderMode::SendOnly => FolderModeActions {
+            mode,
+            pipeline: vec!["scan", "index", "push"],
             may_push: true,
             requires_local_revert: false,
             encrypted_index: false,
@@ -53,6 +62,7 @@ pub(crate) fn mode_actions(mode: FolderMode) -> FolderModeActions {
 pub(crate) fn all_mode_actions() -> Vec<FolderModeActions> {
     let mut out = vec![
         mode_actions(FolderMode::SendReceive),
+        mode_actions(FolderMode::SendOnly),
         mode_actions(FolderMode::ReceiveOnly),
         mode_actions(FolderMode::ReceiveEncrypted),
     ];
@@ -80,5 +90,13 @@ mod tests {
             actions.pipeline,
             vec!["scan", "index_encrypted", "pull_encrypted"]
         );
+    }
+
+    #[test]
+    fn send_only_disables_pull_pipeline() {
+        let actions = mode_actions(FolderMode::SendOnly);
+        assert!(actions.may_push);
+        assert!(!actions.requires_local_revert);
+        assert_eq!(actions.pipeline, vec!["scan", "index", "push"]);
     }
 }

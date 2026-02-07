@@ -13,10 +13,15 @@ const MAX_FRAME_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_MAX_PEERS: usize = 32;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FolderSpec {
+    pub(crate) id: String,
+    pub(crate) path: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DaemonConfig {
     pub(crate) listen_addr: String,
-    pub(crate) folder_id: String,
-    pub(crate) folder_path: String,
+    pub(crate) folders: Vec<FolderSpec>,
     pub(crate) db_root: Option<String>,
     pub(crate) memory_max_mb: Option<usize>,
     pub(crate) max_peers: usize,
@@ -26,7 +31,10 @@ pub(crate) struct DaemonConfig {
 pub(crate) fn parse_daemon_args(args: &[String]) -> Result<DaemonConfig, String> {
     let mut listen_addr = DEFAULT_LISTEN_ADDR.to_string();
     let mut folder_id = DEFAULT_FOLDER_ID.to_string();
+    let mut folder_id_set = false;
     let mut folder_path: Option<String> = None;
+    let mut folder_path_set = false;
+    let mut folders: Vec<FolderSpec> = Vec::new();
     let mut db_root: Option<String> = None;
     let mut memory_max_mb: Option<usize> = None;
     let mut max_peers = DEFAULT_MAX_PEERS;
@@ -48,6 +56,7 @@ pub(crate) fn parse_daemon_args(args: &[String]) -> Result<DaemonConfig, String>
                     .get(i)
                     .ok_or_else(|| "--folder-id requires a value".to_string())?;
                 folder_id = value.clone();
+                folder_id_set = true;
             }
             "--folder-path" => {
                 i += 1;
@@ -55,6 +64,23 @@ pub(crate) fn parse_daemon_args(args: &[String]) -> Result<DaemonConfig, String>
                     .get(i)
                     .ok_or_else(|| "--folder-path requires a value".to_string())?;
                 folder_path = Some(value.clone());
+                folder_path_set = true;
+            }
+            "--folder" => {
+                i += 1;
+                let value = args
+                    .get(i)
+                    .ok_or_else(|| "--folder requires a value".to_string())?;
+                let (id, path) = value
+                    .split_once(':')
+                    .ok_or_else(|| "--folder must be in the form <id>:<path>".to_string())?;
+                if id.trim().is_empty() || path.trim().is_empty() {
+                    return Err("--folder must have non-empty id and path".to_string());
+                }
+                folders.push(FolderSpec {
+                    id: id.to_string(),
+                    path: path.to_string(),
+                });
             }
             "--db-root" => {
                 i += 1;
@@ -102,11 +128,26 @@ pub(crate) fn parse_daemon_args(args: &[String]) -> Result<DaemonConfig, String>
         i += 1;
     }
 
-    let folder_path = folder_path.ok_or_else(|| "--folder-path is required".to_string())?;
+    let folders = if !folders.is_empty() {
+        if folder_id_set || folder_path_set {
+            return Err(
+                "cannot mix --folder with --folder-id/--folder-path; use one style".to_string(),
+            );
+        }
+        folders
+    } else {
+        let path = folder_path.ok_or_else(|| {
+            "one folder is required: use --folder <id>:<path> or --folder-path <path>".to_string()
+        })?;
+        vec![FolderSpec {
+            id: folder_id,
+            path,
+        }]
+    };
+
     Ok(DaemonConfig {
         listen_addr,
-        folder_id,
-        folder_path,
+        folders,
         db_root,
         memory_max_mb,
         max_peers,
@@ -121,7 +162,9 @@ pub(crate) fn run_daemon(config: DaemonConfig) -> Result<(), String> {
     )));
     {
         let mut guard = model.lock().map_err(|_| "model lock poisoned".to_string())?;
-        guard.newFolder(newFolderConfiguration(&config.folder_id, &config.folder_path));
+        for folder in &config.folders {
+            guard.newFolder(newFolderConfiguration(&folder.id, &folder.path));
+        }
     }
 
     let listener = TcpListener::bind(&config.listen_addr)
@@ -291,7 +334,7 @@ mod tests {
     #[test]
     fn parse_daemon_args_requires_folder_path() {
         let err = parse_daemon_args(&[]).expect_err("must fail");
-        assert!(err.contains("--folder-path is required"));
+        assert!(err.contains("one folder is required"));
     }
 
     #[test]
@@ -313,12 +356,41 @@ mod tests {
         ];
         let cfg = parse_daemon_args(&args).expect("parse");
         assert_eq!(cfg.listen_addr, "127.0.0.1:23000");
-        assert_eq!(cfg.folder_id, "photos");
-        assert_eq!(cfg.folder_path, "/tmp/photos");
+        assert_eq!(
+            cfg.folders,
+            vec![FolderSpec {
+                id: "photos".to_string(),
+                path: "/tmp/photos".to_string()
+            }]
+        );
         assert_eq!(cfg.db_root.as_deref(), Some("/tmp/syncthing-rs-db"));
         assert_eq!(cfg.memory_max_mb, Some(64));
         assert_eq!(cfg.max_peers, 8);
         assert!(cfg.once);
+    }
+
+    #[test]
+    fn parse_daemon_args_parses_multiple_folder_specs() {
+        let args = vec![
+            "--folder".to_string(),
+            "docs:/srv/docs".to_string(),
+            "--folder".to_string(),
+            "photos:/srv/photos".to_string(),
+        ];
+        let cfg = parse_daemon_args(&args).expect("parse");
+        assert_eq!(
+            cfg.folders,
+            vec![
+                FolderSpec {
+                    id: "docs".to_string(),
+                    path: "/srv/docs".to_string()
+                },
+                FolderSpec {
+                    id: "photos".to_string(),
+                    path: "/srv/photos".to_string()
+                }
+            ]
+        );
     }
 
     #[test]
@@ -340,6 +412,15 @@ mod tests {
         ];
         let err = parse_daemon_args(&args).expect_err("must fail");
         assert!(err.contains("--max-peers"));
+
+        let args = vec![
+            "--folder".to_string(),
+            "docs:/srv/docs".to_string(),
+            "--folder-path".to_string(),
+            "/tmp/photos".to_string(),
+        ];
+        let err = parse_daemon_args(&args).expect_err("must fail");
+        assert!(err.contains("cannot mix --folder"));
     }
 
     #[test]

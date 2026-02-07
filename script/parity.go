@@ -1497,11 +1497,12 @@ func validateGoVsRustRESTSurface(report *guardrailReport) {
 		missing = append(missing, endpoint)
 	}
 	sort.Strings(missing)
+	const gapPath = "parity/diff-reports/replacement-rest-surface-missing.json"
 	if len(missing) == 0 {
+		_ = os.Remove(gapPath)
 		return
 	}
 
-	const gapPath = "parity/diff-reports/replacement-rest-surface-missing.json"
 	if err := writeReplacementGapFile(gapPath, "replacement-rest-surface", len(goSurface), len(rustSurface), missing); err != nil {
 		report.Failures = append(report.Failures, reportFailure{
 			Rule:    "replacement-rest-surface",
@@ -1617,6 +1618,18 @@ func validateGoVsRustProtocolSurface(report *guardrailReport) {
 		}
 		rustSurface[normalized] = struct{}{}
 	}
+	rustCoreSurface, err := extractRustBEPMessageTypes()
+	if err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-protocol-surface",
+			Path:    "syncthing-rs/src/bep_core.rs",
+			Message: fmt.Sprintf("failed to extract rust bep message surface: %v", err),
+		})
+		return
+	}
+	for messageType := range rustCoreSurface {
+		rustSurface[messageType] = struct{}{}
+	}
 
 	missing := make([]string, 0)
 	for messageType := range goSurface {
@@ -1626,11 +1639,12 @@ func validateGoVsRustProtocolSurface(report *guardrailReport) {
 		missing = append(missing, messageType)
 	}
 	sort.Strings(missing)
+	const gapPath = "parity/diff-reports/replacement-protocol-surface-missing.json"
 	if len(missing) == 0 {
+		_ = os.Remove(gapPath)
 		return
 	}
 
-	const gapPath = "parity/diff-reports/replacement-protocol-surface-missing.json"
 	if err := writeReplacementGapFile(gapPath, "replacement-protocol-surface", len(goSurface), len(rustSurface), missing); err != nil {
 		report.Failures = append(report.Failures, reportFailure{
 			Rule:    "replacement-protocol-surface",
@@ -1655,6 +1669,32 @@ func validateGoVsRustProtocolSurface(report *guardrailReport) {
 			strings.Join(preview, ", "),
 		),
 	})
+}
+
+func extractRustBEPMessageTypes() (map[string]struct{}, error) {
+	bs, err := readRepoFile("syncthing-rs/src/bep_core.rs")
+	if err != nil {
+		return nil, err
+	}
+	text := string(bs)
+	messageTypes := make(map[string]struct{})
+
+	structPattern := regexp.MustCompile(`pub\(crate\)\s+struct\s+([A-Za-z][A-Za-z0-9_]*)\s*\{`)
+	for _, match := range structPattern.FindAllStringSubmatch(text, -1) {
+		if len(match) != 2 {
+			continue
+		}
+		normalized := normalizeBEPMessageType(match[1])
+		if normalized == "" {
+			continue
+		}
+		messageTypes[normalized] = struct{}{}
+	}
+
+	if len(messageTypes) == 0 {
+		return nil, errors.New("no rust bep message structs found")
+	}
+	return messageTypes, nil
 }
 
 func extractGoBEPMessageTypes() (map[string]struct{}, error) {
@@ -1728,11 +1768,12 @@ func validateGoVsRustFolderModeSurface(report *guardrailReport) {
 		missing = append(missing, mode)
 	}
 	sort.Strings(missing)
+	const gapPath = "parity/diff-reports/replacement-folder-mode-surface-missing.json"
 	if len(missing) == 0 {
+		_ = os.Remove(gapPath)
 		return
 	}
 
-	const gapPath = "parity/diff-reports/replacement-folder-mode-surface-missing.json"
 	if err := writeReplacementGapFile(gapPath, "replacement-folder-mode-surface", len(goModes), len(rustModes), missing); err != nil {
 		report.Failures = append(report.Failures, reportFailure{
 			Rule:    "replacement-folder-mode-surface",

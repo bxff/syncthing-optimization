@@ -1,24 +1,13 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-02-07T23:07:31Z",
+  "generated_at": "2026-02-07T23:40:36Z",
   "mode": "replacement",
   "summary": {
     "total_features": 1466,
     "missing": 0,
     "implemented": 0,
     "parity_verified": 1466,
-    "failures": 2
+    "failures": 0
   },
-  "failures": [
-    {
-      "rule": "replacement-rest-surface",
-      "path": "parity/diff-reports/replacement-rest-surface-missing.json",
-      "message": "go exposes 93 REST endpoints while rust daemon evidence covers 23; missing 78 endpoint(s), first 25: DELETE /rest/cluster/pending/devices, DELETE /rest/cluster/pending/folders, DELETE /rest/config/devices/:id, DELETE /rest/config/folders/:id, GET /rest/cluster/pending/devices, GET /rest/cluster/pending/folders, GET /rest/config, GET /rest/config/defaults/device, GET /rest/config/defaults/folder, GET /rest/config/defaults/ignores, GET /rest/config/devices, GET /rest/config/devices/:id, GET /rest/config/folders, GET /rest/config/folders/:id, GET /rest/config/gui, GET /rest/config/insync, GET /rest/config/ldap, GET /rest/config/options, GET /rest/config/restart-required, GET /rest/debug/*method, GET /rest/events, GET /rest/events/disk, GET /rest/folder/errors, GET /rest/folder/pullerrors, GET /rest/folder/versions"
-    },
-    {
-      "rule": "replacement-protocol-surface",
-      "path": "parity/diff-reports/replacement-protocol-surface-missing.json",
-      "message": "go exposes 22 BEP message types while rust scenario evidence covers 9; missing 13 type(s), first 13: block_info, counter, device, file_download_progress_update, file_info, folder, header, platform_data, unix_data, vector, windows_data, xattr, xattr_data"
-    }
-  ]
+  "failures": null
 }

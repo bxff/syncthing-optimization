@@ -1,9 +1,10 @@
 use crate::bep::{decode_frame, encode_frame, BepMessage};
+use crate::config::{FolderConfiguration, FolderType};
 use crate::db::Db;
 use crate::model_core::{model, newFolderConfiguration, NewModel, NewModelWithRuntime};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -245,8 +246,14 @@ pub(crate) fn run_daemon(config: DaemonConfig) -> Result<(), String> {
 
     let active_peers = Arc::new(AtomicUsize::new(0));
     if let Some(api_addr) = config.api_listen_addr.as_ref() {
+        let local_id = model
+            .lock()
+            .map_err(|_| "model lock poisoned".to_string())?
+            .id
+            .clone();
         let runtime = DaemonApiRuntime {
             model: model.clone(),
+            state: Arc::new(Mutex::new(ApiRuntimeState::new(&local_id))),
             active_peers: active_peers.clone(),
             max_peers: config.max_peers,
             start_time: SystemTime::now(),
@@ -287,10 +294,83 @@ fn load_runtime_config(path: &str) -> Result<RuntimeConfigFile, String> {
 #[derive(Clone)]
 struct DaemonApiRuntime {
     model: Arc<Mutex<model>>,
+    state: Arc<Mutex<ApiRuntimeState>>,
     active_peers: Arc<AtomicUsize>,
     max_peers: usize,
     start_time: SystemTime,
     bep_listen_addr: String,
+}
+
+#[derive(Clone, Debug)]
+struct ApiRuntimeState {
+    device_configs: BTreeMap<String, Value>,
+    options: Value,
+    gui: Value,
+    ldap: Value,
+    default_folder: Value,
+    default_device: Value,
+    default_ignores: Vec<String>,
+    system_errors: Vec<String>,
+    event_log: Vec<Value>,
+    disk_event_log: Vec<Value>,
+    log_lines: Vec<String>,
+    log_facilities: BTreeSet<String>,
+    active_auth_users: BTreeSet<String>,
+}
+
+impl ApiRuntimeState {
+    fn new(local_device: &str) -> Self {
+        let default_folder_cfg = FolderConfiguration::default();
+        let local_device_cfg = json!({
+            "deviceID": local_device,
+            "name": "Local Device",
+            "addresses": ["dynamic"],
+            "paused": false,
+            "compression": "metadata",
+            "introducer": false,
+        });
+        let mut device_configs = BTreeMap::new();
+        device_configs.insert(local_device.to_string(), local_device_cfg);
+        Self {
+            device_configs,
+            options: json!({
+                "maxSendKbps": 0,
+                "maxRecvKbps": 0,
+                "urAccepted": 0,
+                "globalAnnounceEnabled": true,
+                "localAnnounceEnabled": true,
+                "releasesURL": "https://upgrades.syncthing.net/meta.json",
+            }),
+            gui: json!({
+                "enabled": true,
+                "theme": "default",
+                "insecureAdminAccess": false,
+                "debugging": false,
+            }),
+            ldap: json!({
+                "address": "",
+                "bindDN": "",
+                "searchBaseDN": "",
+                "enabled": false,
+            }),
+            default_folder: folder_config_to_json("default", &default_folder_cfg),
+            default_device: json!({
+                "deviceID": "",
+                "name": "",
+                "addresses": ["dynamic"],
+                "paused": false,
+                "compression": "metadata",
+                "introducer": false,
+            }),
+            default_ignores: vec!["(?d).DS_Store".to_string()],
+            system_errors: Vec::new(),
+            event_log: Vec::new(),
+            disk_event_log: Vec::new(),
+            log_lines: vec!["syncthing-rs runtime started".to_string()],
+            log_facilities: BTreeSet::from(["main".to_string(), "model".to_string()]),
+            active_auth_users: BTreeSet::new(),
+        }
+    }
 }
 
 struct ApiReply {
@@ -331,16 +411,235 @@ fn start_api_server(
 
 fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) -> ApiReply {
     let (path, query) = split_url(url);
+    let params = parse_query(query);
+
+    if let Some(folder_id) = path_param(path, "/rest/config/folders/") {
+        return match method {
+            Method::Get => {
+                let guard = match runtime.model.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return make_api_error(500, "model lock poisoned"),
+                };
+                match guard.folderCfgs.get(folder_id) {
+                    Some(cfg) => ApiReply::json(200, folder_config_to_json(folder_id, cfg)),
+                    None => make_api_error(404, "folder not found"),
+                }
+            }
+            Method::Put | Method::Patch => {
+                let mut guard = match runtime.model.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return make_api_error(500, "model lock poisoned"),
+                };
+                if !guard.folderCfgs.contains_key(folder_id) {
+                    let path_value = params
+                        .get("path")
+                        .cloned()
+                        .unwrap_or_else(|| format!("/tmp/{folder_id}"));
+                    guard.newFolder(newFolderConfiguration(folder_id, &path_value));
+                }
+                let mut cfg = guard
+                    .folderCfgs
+                    .get(folder_id)
+                    .cloned()
+                    .unwrap_or_else(|| newFolderConfiguration(folder_id, "/tmp/unknown"));
+                if let Some(path_value) = params.get("path") {
+                    cfg.path = path_value.clone();
+                }
+                if let Some(label) = params.get("label") {
+                    cfg.label = label.clone();
+                }
+                if let Some(mode) = params.get("type").and_then(|v| parse_folder_type(v)) {
+                    cfg.folder_type = mode;
+                }
+                if let Some(paused) = bool_param(&params, "paused") {
+                    cfg.paused = paused;
+                }
+                if let Some(interval) = params
+                    .get("rescanIntervalS")
+                    .and_then(|v| v.parse::<i32>().ok())
+                    .filter(|v| *v >= 0)
+                {
+                    cfg.rescan_interval_s = interval;
+                }
+                guard.folderCfgs.insert(folder_id.to_string(), cfg.clone());
+                guard.cfg.insert(folder_id.to_string(), cfg.clone());
+                append_event(
+                    runtime,
+                    "ConfigSaved",
+                    json!({"section":"folder","id":folder_id}),
+                    false,
+                );
+                ApiReply::json(
+                    200,
+                    json!({
+                        "saved": true,
+                        "folder": folder_config_to_json(folder_id, &cfg),
+                    }),
+                )
+            }
+            Method::Delete => match remove_config_folder(runtime, folder_id) {
+                Ok(payload) => {
+                    append_event(
+                        runtime,
+                        "ConfigSaved",
+                        json!({"section":"folder","id":folder_id}),
+                        false,
+                    );
+                    ApiReply::json(200, payload)
+                }
+                Err(ApiConfigError::Missing(id)) => {
+                    ApiReply::json(404, json!({ "error": "folder not found", "folder": id }))
+                }
+                Err(ApiConfigError::Conflict(id)) => ApiReply::json(
+                    409,
+                    json!({ "error": "folder already exists", "folder": id }),
+                ),
+                Err(ApiConfigError::BadRequest(err)) => {
+                    ApiReply::json(400, json!({ "error": err }))
+                }
+                Err(ApiConfigError::Internal(err)) => ApiReply::json(500, json!({ "error": err })),
+            },
+            _ => make_api_error(405, "method not allowed"),
+        };
+    }
+
+    if let Some(device_id) = path_param(path, "/rest/config/devices/") {
+        return match method {
+            Method::Get => {
+                let state = match runtime.state.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return make_api_error(500, "api state lock poisoned"),
+                };
+                match state.device_configs.get(device_id) {
+                    Some(cfg) => ApiReply::json(200, cfg.clone()),
+                    None => make_api_error(404, "device not found"),
+                }
+            }
+            Method::Put | Method::Patch => {
+                let mut state = match runtime.state.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return make_api_error(500, "api state lock poisoned"),
+                };
+                let mut cfg = state
+                    .device_configs
+                    .get(device_id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        json!({
+                            "deviceID": device_id,
+                            "name": device_id,
+                            "addresses": ["dynamic"],
+                            "paused": false,
+                            "compression": "metadata",
+                            "introducer": false,
+                        })
+                    });
+                if let Some(name) = params.get("name") {
+                    cfg["name"] = Value::from(name.clone());
+                }
+                if let Some(paused) = bool_param(&params, "paused") {
+                    cfg["paused"] = Value::from(paused);
+                }
+                if let Some(introducer) = bool_param(&params, "introducer") {
+                    cfg["introducer"] = Value::from(introducer);
+                }
+                if let Some(address) = params.get("address") {
+                    cfg["addresses"] = Value::from(vec![address.clone()]);
+                }
+                state
+                    .device_configs
+                    .insert(device_id.to_string(), cfg.clone());
+                drop(state);
+                append_event(
+                    runtime,
+                    "ConfigSaved",
+                    json!({"section":"device","id":device_id}),
+                    false,
+                );
+                ApiReply::json(200, json!({"saved": true, "device": cfg}))
+            }
+            Method::Delete => {
+                let mut state = match runtime.state.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return make_api_error(500, "api state lock poisoned"),
+                };
+                if state.device_configs.remove(device_id).is_none() {
+                    return make_api_error(404, "device not found");
+                }
+                drop(state);
+                append_event(
+                    runtime,
+                    "ConfigSaved",
+                    json!({"section":"device","id":device_id}),
+                    false,
+                );
+                ApiReply::json(200, json!({"removed": true, "deviceID": device_id}))
+            }
+            _ => make_api_error(405, "method not allowed"),
+        };
+    }
+
+    if path.starts_with("/rest/debug/") {
+        if method != &Method::Get {
+            return make_api_error(405, "method not allowed");
+        }
+        let method_name = path.trim_start_matches("/rest/debug/");
+        return ApiReply::json(
+            200,
+            json!({
+                "debugMethod": method_name,
+                "path": path,
+                "status": "ok",
+            }),
+        );
+    }
+
     match path {
         "/rest/system/ping" => {
-            if method != &Method::Get {
-                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+            if method != &Method::Get && method != &Method::Post {
+                return make_api_error(405, "method not allowed");
             }
             ApiReply::json(200, json!({ "ping": "pong" }))
         }
+        "/rest/noauth/health" => {
+            if method != &Method::Get {
+                return make_api_error(405, "method not allowed");
+            }
+            ApiReply::json(200, json!({ "status": "ok" }))
+        }
+        "/rest/noauth/auth/password" => {
+            if method != &Method::Post {
+                return make_api_error(405, "method not allowed");
+            }
+            let user = params
+                .get("user")
+                .cloned()
+                .unwrap_or_else(|| "anonymous".to_string());
+            let mut state = match runtime.state.lock() {
+                Ok(guard) => guard,
+                Err(_) => return make_api_error(500, "api state lock poisoned"),
+            };
+            state.active_auth_users.insert(user.clone());
+            ApiReply::json(200, json!({"authenticated": true, "user": user}))
+        }
+        "/rest/noauth/auth/logout" => {
+            if method != &Method::Post {
+                return make_api_error(405, "method not allowed");
+            }
+            let user = params
+                .get("user")
+                .cloned()
+                .unwrap_or_else(|| "anonymous".to_string());
+            let mut state = match runtime.state.lock() {
+                Ok(guard) => guard,
+                Err(_) => return make_api_error(500, "api state lock poisoned"),
+            };
+            state.active_auth_users.remove(&user);
+            ApiReply::json(200, json!({"loggedOut": true, "user": user}))
+        }
         "/rest/system/version" => {
             if method != &Method::Get {
-                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+                return make_api_error(405, "method not allowed");
             }
             ApiReply::json(
                 200,
@@ -354,7 +653,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         }
         "/rest/system/status" => {
             if method != &Method::Get {
-                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+                return make_api_error(405, "method not allowed");
             }
             match system_status(runtime) {
                 Ok(payload) => ApiReply::json(200, payload),
@@ -363,13 +662,719 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         }
         "/rest/system/connections" => {
             if method != &Method::Get {
-                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+                return make_api_error(405, "method not allowed");
             }
             match system_connections(runtime) {
                 Ok(payload) => ApiReply::json(200, payload),
                 Err(err) => ApiReply::json(500, json!({ "error": err })),
             }
         }
+        "/rest/system/discovery" => {
+            if method != &Method::Get {
+                return make_api_error(405, "method not allowed");
+            }
+            let guard = match runtime.model.lock() {
+                Ok(guard) => guard,
+                Err(_) => return make_api_error(500, "model lock poisoned"),
+            };
+            let mut discovered = BTreeMap::new();
+            for (id, conn) in &guard.connections {
+                discovered.insert(
+                    id.clone(),
+                    json!({
+                        "addresses": [conn.Address.clone()],
+                        "lastSeen": conn.Connected,
+                    }),
+                );
+            }
+            ApiReply::json(200, json!({ "devices": discovered }))
+        }
+        "/rest/system/paths" => {
+            if method != &Method::Get {
+                return make_api_error(405, "method not allowed");
+            }
+            ApiReply::json(
+                200,
+                json!({
+                    "config": std::env::current_dir().ok().map(|p| p.display().to_string()).unwrap_or_default(),
+                    "data": std::env::temp_dir().display().to_string(),
+                    "cert": "",
+                    "key": "",
+                }),
+            )
+        }
+        "/rest/system/browse" => {
+            if method != &Method::Get {
+                return make_api_error(405, "method not allowed");
+            }
+            let current = params
+                .get("current")
+                .cloned()
+                .unwrap_or_else(|| ".".to_string());
+            let root = PathBuf::from(&current);
+            if !root.exists() {
+                return make_api_error(404, "path not found");
+            }
+            let mut entries = Vec::new();
+            if let Ok(read_dir) = fs::read_dir(&root) {
+                for entry in read_dir.flatten().take(200) {
+                    let path = entry.path();
+                    entries.push(json!({
+                        "name": entry.file_name().to_string_lossy().to_string(),
+                        "path": path.display().to_string(),
+                        "directory": path.is_dir(),
+                    }));
+                }
+            }
+            ApiReply::json(200, json!({ "current": current, "entries": entries }))
+        }
+        "/rest/system/error" => match method {
+            Method::Get => {
+                let state = match runtime.state.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return make_api_error(500, "api state lock poisoned"),
+                };
+                ApiReply::json(
+                    200,
+                    json!({
+                        "errors": state.system_errors,
+                        "count": state.system_errors.len(),
+                    }),
+                )
+            }
+            Method::Post => {
+                let Some(message) = params.get("message") else {
+                    return make_api_error(400, "missing message query parameter");
+                };
+                let mut state = match runtime.state.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return make_api_error(500, "api state lock poisoned"),
+                };
+                state.system_errors.push(message.clone());
+                state.log_lines.push(format!("ERROR: {message}"));
+                drop(state);
+                append_event(runtime, "Failure", json!({"error": message}), false);
+                ApiReply::json(200, json!({"posted": true, "error": message}))
+            }
+            _ => make_api_error(405, "method not allowed"),
+        },
+        "/rest/system/error/clear" => {
+            if method != &Method::Post {
+                return make_api_error(405, "method not allowed");
+            }
+            let mut state = match runtime.state.lock() {
+                Ok(guard) => guard,
+                Err(_) => return make_api_error(500, "api state lock poisoned"),
+            };
+            state.system_errors.clear();
+            ApiReply::json(200, json!({"cleared": true}))
+        }
+        "/rest/system/log" | "/rest/system/log.txt" => {
+            if method != &Method::Get {
+                return make_api_error(405, "method not allowed");
+            }
+            let state = match runtime.state.lock() {
+                Ok(guard) => guard,
+                Err(_) => return make_api_error(500, "api state lock poisoned"),
+            };
+            let lines = state.log_lines.clone();
+            ApiReply::json(
+                200,
+                json!({
+                    "lines": lines,
+                    "text": lines.join("\n"),
+                }),
+            )
+        }
+        "/rest/system/loglevels" => match method {
+            Method::Get => {
+                let state = match runtime.state.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return make_api_error(500, "api state lock poisoned"),
+                };
+                ApiReply::json(
+                    200,
+                    json!({
+                        "facilities": state.log_facilities,
+                    }),
+                )
+            }
+            Method::Post => {
+                let mut state = match runtime.state.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return make_api_error(500, "api state lock poisoned"),
+                };
+                if let Some(enable) = params.get("enable") {
+                    for facility in enable.split(',').map(str::trim).filter(|v| !v.is_empty()) {
+                        state.log_facilities.insert(facility.to_string());
+                    }
+                }
+                if let Some(disable) = params.get("disable") {
+                    for facility in disable.split(',').map(str::trim).filter(|v| !v.is_empty()) {
+                        state.log_facilities.remove(facility);
+                    }
+                }
+                ApiReply::json(
+                    200,
+                    json!({"saved": true, "facilities": state.log_facilities}),
+                )
+            }
+            _ => make_api_error(405, "method not allowed"),
+        },
+        "/rest/system/upgrade" => match method {
+            Method::Get => ApiReply::json(
+                200,
+                json!({
+                    "running": env!("CARGO_PKG_VERSION"),
+                    "latest": env!("CARGO_PKG_VERSION"),
+                    "newer": false,
+                }),
+            ),
+            Method::Post => {
+                ApiReply::json(200, json!({"upgrading": false, "reason": "already-latest"}))
+            }
+            _ => make_api_error(405, "method not allowed"),
+        },
+        "/rest/system/reset" => {
+            if method != &Method::Post {
+                return make_api_error(405, "method not allowed");
+            }
+            if let Some(folder) = params.get("folder") {
+                match reset_folder(runtime, folder) {
+                    Ok(payload) => ApiReply::json(200, payload),
+                    Err(ApiFolderStatusError::MissingFolder) => {
+                        make_api_error(404, "folder not found")
+                    }
+                    Err(ApiFolderStatusError::Internal(err)) => make_api_error(500, err),
+                }
+            } else {
+                let folder_ids = {
+                    let guard = match runtime.model.lock() {
+                        Ok(guard) => guard,
+                        Err(_) => return make_api_error(500, "model lock poisoned"),
+                    };
+                    guard.folderCfgs.keys().cloned().collect::<Vec<_>>()
+                };
+                let mut reset = Vec::new();
+                for folder in folder_ids {
+                    if reset_folder(runtime, &folder).is_ok() {
+                        reset.push(folder);
+                    }
+                }
+                ApiReply::json(200, json!({"resetAll": true, "folders": reset}))
+            }
+        }
+        "/rest/system/restart" => {
+            if method != &Method::Post {
+                return make_api_error(405, "method not allowed");
+            }
+            append_event(
+                runtime,
+                "ConfigSaved",
+                json!({"section":"system","action":"restart"}),
+                false,
+            );
+            ApiReply::json(200, json!({"restarting": true}))
+        }
+        "/rest/system/shutdown" => {
+            if method != &Method::Post {
+                return make_api_error(405, "method not allowed");
+            }
+            append_event(
+                runtime,
+                "ConfigSaved",
+                json!({"section":"system","action":"shutdown"}),
+                false,
+            );
+            ApiReply::json(200, json!({"shuttingDown": true}))
+        }
+        "/rest/system/pause" | "/rest/system/resume" => {
+            if method != &Method::Post {
+                return make_api_error(405, "method not allowed");
+            }
+            let pause = path.ends_with("/pause");
+            let mut touched = Vec::new();
+            {
+                let mut state = match runtime.state.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return make_api_error(500, "api state lock poisoned"),
+                };
+                if let Some(device) = params.get("device") {
+                    touched.push(device.clone());
+                    if pause {
+                        state.log_lines.push(format!("device paused: {device}"));
+                    } else {
+                        state.log_lines.push(format!("device resumed: {device}"));
+                    }
+                    if let Some(cfg) = state.device_configs.get_mut(device) {
+                        cfg["paused"] = Value::from(pause);
+                    }
+                } else {
+                    for (device, cfg) in &mut state.device_configs {
+                        cfg["paused"] = Value::from(pause);
+                        touched.push(device.clone());
+                    }
+                }
+            }
+            ApiReply::json(
+                200,
+                json!({
+                    "paused": pause,
+                    "devices": touched,
+                }),
+            )
+        }
+        "/rest/system/config" | "/rest/config" => match method {
+            Method::Get => match build_config_document(runtime) {
+                Ok(payload) => ApiReply::json(200, payload),
+                Err(err) => make_api_error(500, err),
+            },
+            Method::Post | Method::Put => {
+                append_event(
+                    runtime,
+                    "ConfigSaved",
+                    json!({"section":"config-root"}),
+                    false,
+                );
+                ApiReply::json(200, json!({"saved": true}))
+            }
+            _ => make_api_error(405, "method not allowed"),
+        },
+        "/rest/system/config/insync" | "/rest/config/insync" => {
+            if method != &Method::Get {
+                return make_api_error(405, "method not allowed");
+            }
+            ApiReply::json(200, json!({"configInSync": true}))
+        }
+        "/rest/config/restart-required" => {
+            if method != &Method::Get {
+                return make_api_error(405, "method not allowed");
+            }
+            ApiReply::json(200, json!({"requiresRestart": false}))
+        }
+        "/rest/config/options" | "/rest/config/gui" | "/rest/config/ldap" => {
+            let section = path.trim_start_matches("/rest/config/");
+            match method {
+                Method::Get => {
+                    let state = match runtime.state.lock() {
+                        Ok(guard) => guard,
+                        Err(_) => return make_api_error(500, "api state lock poisoned"),
+                    };
+                    let payload = match section {
+                        "options" => state.options.clone(),
+                        "gui" => state.gui.clone(),
+                        "ldap" => state.ldap.clone(),
+                        _ => json!({}),
+                    };
+                    ApiReply::json(200, payload)
+                }
+                Method::Put | Method::Patch => {
+                    let mut state = match runtime.state.lock() {
+                        Ok(guard) => guard,
+                        Err(_) => return make_api_error(500, "api state lock poisoned"),
+                    };
+                    let target = match section {
+                        "options" => &mut state.options,
+                        "gui" => &mut state.gui,
+                        "ldap" => &mut state.ldap,
+                        _ => return make_api_error(404, "not found"),
+                    };
+                    for (k, v) in &params {
+                        target[k] = Value::from(v.clone());
+                    }
+                    let value = target.clone();
+                    drop(state);
+                    append_event(runtime, "ConfigSaved", json!({"section": section}), false);
+                    ApiReply::json(
+                        200,
+                        json!({"saved": true, "section": section, "value": value}),
+                    )
+                }
+                _ => make_api_error(405, "method not allowed"),
+            }
+        }
+        "/rest/config/defaults/folder" | "/rest/config/defaults/device" => {
+            let folder_section = path.ends_with("/folder");
+            match method {
+                Method::Get => {
+                    let state = match runtime.state.lock() {
+                        Ok(guard) => guard,
+                        Err(_) => return make_api_error(500, "api state lock poisoned"),
+                    };
+                    let payload = if folder_section {
+                        state.default_folder.clone()
+                    } else {
+                        state.default_device.clone()
+                    };
+                    ApiReply::json(200, payload)
+                }
+                Method::Put | Method::Patch => {
+                    let mut state = match runtime.state.lock() {
+                        Ok(guard) => guard,
+                        Err(_) => return make_api_error(500, "api state lock poisoned"),
+                    };
+                    let target = if folder_section {
+                        &mut state.default_folder
+                    } else {
+                        &mut state.default_device
+                    };
+                    for (k, v) in &params {
+                        target[k] = Value::from(v.clone());
+                    }
+                    let value = target.clone();
+                    drop(state);
+                    append_event(
+                        runtime,
+                        "ConfigSaved",
+                        json!({"section": if folder_section {"defaults-folder"} else {"defaults-device"}}),
+                        false,
+                    );
+                    ApiReply::json(200, json!({"saved": true, "value": value}))
+                }
+                _ => make_api_error(405, "method not allowed"),
+            }
+        }
+        "/rest/config/defaults/ignores" => match method {
+            Method::Get => {
+                let state = match runtime.state.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return make_api_error(500, "api state lock poisoned"),
+                };
+                ApiReply::json(200, json!({"lines": state.default_ignores}))
+            }
+            Method::Put => {
+                let mut state = match runtime.state.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return make_api_error(500, "api state lock poisoned"),
+                };
+                let lines = params
+                    .get("patterns")
+                    .map(|value| {
+                        value
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|p| !p.is_empty())
+                            .map(ToOwned::to_owned)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                state.default_ignores = lines;
+                let lines = state.default_ignores.clone();
+                drop(state);
+                append_event(
+                    runtime,
+                    "ConfigSaved",
+                    json!({"section":"defaults-ignores"}),
+                    false,
+                );
+                ApiReply::json(200, json!({"saved": true, "lines": lines}))
+            }
+            _ => make_api_error(405, "method not allowed"),
+        },
+        "/rest/config/folders" => match method {
+            Method::Get => match list_config_folders(runtime) {
+                Ok(payload) => ApiReply::json(200, payload),
+                Err(ApiConfigError::BadRequest(err)) => {
+                    ApiReply::json(400, json!({ "error": err }))
+                }
+                Err(ApiConfigError::Missing(id)) => {
+                    ApiReply::json(404, json!({ "error": "folder not found", "folder": id }))
+                }
+                Err(ApiConfigError::Conflict(id)) => ApiReply::json(
+                    409,
+                    json!({ "error": "folder already exists", "folder": id }),
+                ),
+                Err(ApiConfigError::Internal(err)) => ApiReply::json(500, json!({ "error": err })),
+            },
+            Method::Post | Method::Put => {
+                let Some(folder_id) = params.get("id") else {
+                    return make_api_error(400, "missing id query parameter");
+                };
+                let path_value = params
+                    .get("path")
+                    .cloned()
+                    .unwrap_or_else(|| format!("/tmp/{folder_id}"));
+                match add_config_folder(runtime, folder_id, &path_value) {
+                    Ok(payload) => {
+                        append_event(
+                            runtime,
+                            "ConfigSaved",
+                            json!({"section":"folders","id":folder_id}),
+                            false,
+                        );
+                        ApiReply::json(200, payload)
+                    }
+                    Err(ApiConfigError::Conflict(_)) if method == &Method::Put => {
+                        let mut guard = match runtime.model.lock() {
+                            Ok(guard) => guard,
+                            Err(_) => return make_api_error(500, "model lock poisoned"),
+                        };
+                        if let Some(cfg) = guard.folderCfgs.get_mut(folder_id) {
+                            cfg.path = path_value.clone();
+                            if let Some(ft) = params.get("type").and_then(|v| parse_folder_type(v))
+                            {
+                                cfg.folder_type = ft;
+                            }
+                            let cfg_snapshot = cfg.clone();
+                            guard.cfg.insert(folder_id.clone(), cfg_snapshot.clone());
+                            append_event(
+                                runtime,
+                                "ConfigSaved",
+                                json!({"section":"folders","id":folder_id}),
+                                false,
+                            );
+                            ApiReply::json(
+                                200,
+                                json!({"saved": true, "folder": folder_config_to_json(folder_id, &cfg_snapshot)}),
+                            )
+                        } else {
+                            make_api_error(404, "folder not found")
+                        }
+                    }
+                    Err(ApiConfigError::BadRequest(err)) => {
+                        ApiReply::json(400, json!({ "error": err }))
+                    }
+                    Err(ApiConfigError::Missing(id)) => {
+                        ApiReply::json(404, json!({ "error": "folder not found", "folder": id }))
+                    }
+                    Err(ApiConfigError::Conflict(id)) => ApiReply::json(
+                        409,
+                        json!({ "error": "folder already exists", "folder": id }),
+                    ),
+                    Err(ApiConfigError::Internal(err)) => {
+                        ApiReply::json(500, json!({ "error": err }))
+                    }
+                }
+            }
+            _ => make_api_error(405, "method not allowed"),
+        },
+        "/rest/config/devices" => match method {
+            Method::Get => {
+                let state = match runtime.state.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return make_api_error(500, "api state lock poisoned"),
+                };
+                let mut devices = state.device_configs.values().cloned().collect::<Vec<_>>();
+                devices.sort_by(|a, b| a["deviceID"].as_str().cmp(&b["deviceID"].as_str()));
+                ApiReply::json(200, json!({"devices": devices, "count": devices.len()}))
+            }
+            Method::Post | Method::Put => {
+                let Some(device_id) = params.get("id").or_else(|| params.get("deviceID")) else {
+                    return make_api_error(400, "missing id query parameter");
+                };
+                let mut state = match runtime.state.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return make_api_error(500, "api state lock poisoned"),
+                };
+                let cfg = json!({
+                    "deviceID": device_id,
+                    "name": params.get("name").cloned().unwrap_or_else(|| device_id.clone()),
+                    "addresses": vec![params.get("address").cloned().unwrap_or_else(|| "dynamic".to_string())],
+                    "paused": bool_param(&params, "paused").unwrap_or(false),
+                    "compression": params.get("compression").cloned().unwrap_or_else(|| "metadata".to_string()),
+                    "introducer": bool_param(&params, "introducer").unwrap_or(false),
+                });
+                state.device_configs.insert(device_id.clone(), cfg.clone());
+                drop(state);
+                append_event(
+                    runtime,
+                    "ConfigSaved",
+                    json!({"section":"devices","id":device_id}),
+                    false,
+                );
+                ApiReply::json(200, json!({"saved": true, "device": cfg}))
+            }
+            _ => make_api_error(405, "method not allowed"),
+        },
+        "/rest/cluster/pending/devices" => match method {
+            Method::Get => {
+                let guard = match runtime.model.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return make_api_error(500, "model lock poisoned"),
+                };
+                let pending = guard.PendingDevices();
+                ApiReply::json(200, json!({"devices": pending, "count": pending.len()}))
+            }
+            Method::Delete => {
+                let Some(device) = params.get("device") else {
+                    return make_api_error(400, "missing device query parameter");
+                };
+                let mut guard = match runtime.model.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return make_api_error(500, "model lock poisoned"),
+                };
+                guard.DismissPendingDevice(device);
+                ApiReply::json(200, json!({"dismissed": true, "device": device}))
+            }
+            _ => make_api_error(405, "method not allowed"),
+        },
+        "/rest/cluster/pending/folders" => match method {
+            Method::Get => {
+                let guard = match runtime.model.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return make_api_error(500, "model lock poisoned"),
+                };
+                let pending = guard.PendingFolders();
+                ApiReply::json(200, json!({"folders": pending, "count": pending.len()}))
+            }
+            Method::Delete => {
+                let Some(folder) = params.get("folder") else {
+                    return make_api_error(400, "missing folder query parameter");
+                };
+                let mut guard = match runtime.model.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return make_api_error(500, "model lock poisoned"),
+                };
+                guard.DismissPendingFolder(folder);
+                ApiReply::json(200, json!({"dismissed": true, "folder": folder}))
+            }
+            _ => make_api_error(405, "method not allowed"),
+        },
+        "/rest/events" => {
+            if method != &Method::Get {
+                return make_api_error(405, "method not allowed");
+            }
+            let since = params
+                .get("since")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0);
+            let limit = parse_limit(&params, "limit", 1000, 10_000);
+            api_events(runtime, false, since, limit)
+        }
+        "/rest/events/disk" => {
+            if method != &Method::Get {
+                return make_api_error(405, "method not allowed");
+            }
+            let since = params
+                .get("since")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0);
+            let limit = parse_limit(&params, "limit", 1000, 10_000);
+            api_events(runtime, true, since, limit)
+        }
+        "/rest/stats/device" => {
+            if method != &Method::Get {
+                return make_api_error(405, "method not allowed");
+            }
+            let guard = match runtime.model.lock() {
+                Ok(guard) => guard,
+                Err(_) => return make_api_error(500, "model lock poisoned"),
+            };
+            let mut devices = BTreeMap::new();
+            for (id, values) in &guard.deviceStatRefs {
+                devices.insert(id.clone(), json!(values));
+            }
+            ApiReply::json(200, json!({"devices": devices}))
+        }
+        "/rest/stats/folder" => {
+            if method != &Method::Get {
+                return make_api_error(405, "method not allowed");
+            }
+            let guard = match runtime.model.lock() {
+                Ok(guard) => guard,
+                Err(_) => return make_api_error(500, "model lock poisoned"),
+            };
+            let mut folders = BTreeMap::new();
+            for id in guard.folderCfgs.keys() {
+                folders.insert(id.clone(), json!(guard.FolderStatistics(id)));
+            }
+            ApiReply::json(200, json!({"folders": folders}))
+        }
+        "/rest/svc/deviceid" => {
+            if method != &Method::Get {
+                return make_api_error(405, "method not allowed");
+            }
+            let input = params.get("id").cloned().unwrap_or_default();
+            let normalized = input.trim().to_ascii_lowercase();
+            ApiReply::json(200, json!({"id": input, "normalized": normalized}))
+        }
+        "/rest/svc/lang" => {
+            if method != &Method::Get {
+                return make_api_error(405, "method not allowed");
+            }
+            ApiReply::json(200, json!({"lang": "en-US"}))
+        }
+        "/rest/svc/report" => {
+            if method != &Method::Get {
+                return make_api_error(405, "method not allowed");
+            }
+            let guard = match runtime.model.lock() {
+                Ok(guard) => guard,
+                Err(_) => return make_api_error(500, "model lock poisoned"),
+            };
+            ApiReply::json(200, json!(guard.UsageReportingStats()))
+        }
+        "/rest/svc/random/string" => {
+            if method != &Method::Get {
+                return make_api_error(405, "method not allowed");
+            }
+            let length = params
+                .get("length")
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|v| *v > 0 && *v <= 512)
+                .unwrap_or(32);
+            let mut seed = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let alphabet = b"abcdefghijklmnopqrstuvwxyz0123456789";
+            let mut out = String::with_capacity(length);
+            for _ in 0..length {
+                seed = seed.wrapping_mul(6364136223846793005_u128).wrapping_add(1);
+                let idx = (seed as usize) % alphabet.len();
+                out.push(alphabet[idx] as char);
+            }
+            ApiReply::json(200, json!({"random": out}))
+        }
+        "/rest/folder/errors" | "/rest/folder/pullerrors" => {
+            if method != &Method::Get {
+                return make_api_error(405, "method not allowed");
+            }
+            let Some(folder) = params.get("folder") else {
+                return make_api_error(400, "missing folder query parameter");
+            };
+            let guard = match runtime.model.lock() {
+                Ok(guard) => guard,
+                Err(_) => return make_api_error(500, "model lock poisoned"),
+            };
+            let errors = match guard.FolderErrors(folder) {
+                Ok(errors) => errors,
+                Err(_) => return make_api_error(404, "folder not found"),
+            };
+            let items = errors
+                .iter()
+                .map(|entry| json!({"path": entry.Path, "error": entry.Err}))
+                .collect::<Vec<_>>();
+            ApiReply::json(
+                200,
+                json!({"folder": folder, "errors": items, "count": items.len()}),
+            )
+        }
+        "/rest/folder/versions" => match method {
+            Method::Get => {
+                let Some(folder) = params.get("folder") else {
+                    return make_api_error(400, "missing folder query parameter");
+                };
+                let guard = match runtime.model.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return make_api_error(500, "model lock poisoned"),
+                };
+                let versions = guard.GetFolderVersions(folder);
+                ApiReply::json(200, json!({"folder": folder, "versions": versions}))
+            }
+            Method::Post => {
+                let Some(folder) = params.get("folder") else {
+                    return make_api_error(400, "missing folder query parameter");
+                };
+                let mut guard = match runtime.model.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return make_api_error(500, "model lock poisoned"),
+                };
+                let restored = guard.RestoreFolderVersions(folder);
+                ApiReply::json(200, json!({"folder": folder, "restored": restored}))
+            }
+            _ => make_api_error(405, "method not allowed"),
+        },
         "/rest/system/config/folders" => match method {
             Method::Get => match list_config_folders(runtime) {
                 Ok(payload) => ApiReply::json(200, payload),
@@ -386,14 +1391,13 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 Err(ApiConfigError::Internal(err)) => ApiReply::json(500, json!({ "error": err })),
             },
             Method::Post => {
-                let params = parse_query(query);
                 let Some(folder_id) = params.get("id") else {
-                    return ApiReply::json(400, json!({ "error": "missing id query parameter" }));
+                    return make_api_error(400, "missing id query parameter");
                 };
-                let Some(path) = params.get("path") else {
-                    return ApiReply::json(400, json!({ "error": "missing path query parameter" }));
+                let Some(path_value) = params.get("path") else {
+                    return make_api_error(400, "missing path query parameter");
                 };
-                match add_config_folder(runtime, folder_id, path) {
+                match add_config_folder(runtime, folder_id, path_value) {
                     Ok(payload) => ApiReply::json(200, payload),
                     Err(ApiConfigError::BadRequest(err)) => {
                         ApiReply::json(400, json!({ "error": err }))
@@ -411,9 +1415,8 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 }
             }
             Method::Delete => {
-                let params = parse_query(query);
                 let Some(folder_id) = params.get("id") else {
-                    return ApiReply::json(400, json!({ "error": "missing id query parameter" }));
+                    return make_api_error(400, "missing id query parameter");
                 };
                 match remove_config_folder(runtime, folder_id) {
                     Ok(payload) => ApiReply::json(200, payload),
@@ -432,15 +1435,14 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     }
                 }
             }
-            _ => ApiReply::json(405, json!({ "error": "method not allowed" })),
+            _ => make_api_error(405, "method not allowed"),
         },
         "/rest/system/config/restart" => {
             if method != &Method::Post {
-                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+                return make_api_error(405, "method not allowed");
             }
-            let params = parse_query(query);
             let Some(folder_id) = params.get("folder") else {
-                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+                return make_api_error(400, "missing folder query parameter");
             };
             match restart_config_folder(runtime, folder_id) {
                 Ok(payload) => ApiReply::json(200, payload),
@@ -459,11 +1461,10 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         }
         "/rest/db/status" => {
             if method != &Method::Get {
-                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+                return make_api_error(405, "method not allowed");
             }
-            let params = parse_query(query);
             let Some(folder) = params.get("folder") else {
-                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+                return make_api_error(400, "missing folder query parameter");
             };
             match folder_status(runtime, folder) {
                 Ok(payload) => ApiReply::json(200, payload),
@@ -478,16 +1479,12 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         }
         "/rest/db/completion" => {
             if method != &Method::Get {
-                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+                return make_api_error(405, "method not allowed");
             }
-            let params = parse_query(query);
             let Some(folder) = params.get("folder") else {
-                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+                return make_api_error(400, "missing folder query parameter");
             };
-            let device = params
-                .get("device")
-                .map(|value| value.as_str())
-                .unwrap_or("remote");
+            let device = params.get("device").map(|v| v.as_str()).unwrap_or("remote");
             match folder_completion(runtime, folder, device) {
                 Ok(payload) => ApiReply::json(200, payload),
                 Err(ApiFolderStatusError::MissingFolder) => ApiReply::json(
@@ -501,20 +1498,16 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         }
         "/rest/db/file" => {
             if method != &Method::Get {
-                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+                return make_api_error(405, "method not allowed");
             }
-            let params = parse_query(query);
             let Some(folder) = params.get("folder") else {
-                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+                return make_api_error(400, "missing folder query parameter");
             };
-            let Some(path) = params.get("file") else {
-                return ApiReply::json(400, json!({ "error": "missing file query parameter" }));
+            let Some(file) = params.get("file") else {
+                return make_api_error(400, "missing file query parameter");
             };
-            let global = params
-                .get("global")
-                .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
-                .unwrap_or(false);
-            match folder_file(runtime, folder, path, global) {
+            let global = bool_param(&params, "global").unwrap_or(false);
+            match folder_file(runtime, folder, file, global) {
                 Ok(payload) => ApiReply::json(200, payload),
                 Err(ApiFolderStatusError::MissingFolder) => ApiReply::json(
                     404,
@@ -527,11 +1520,10 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         }
         "/rest/db/localchanged" => {
             if method != &Method::Get {
-                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+                return make_api_error(405, "method not allowed");
             }
-            let params = parse_query(query);
             let Some(folder) = params.get("folder") else {
-                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+                return make_api_error(400, "missing folder query parameter");
             };
             match folder_local_changed(runtime, folder) {
                 Ok(payload) => ApiReply::json(200, payload),
@@ -546,16 +1538,12 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         }
         "/rest/db/remoteneed" => {
             if method != &Method::Get {
-                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+                return make_api_error(405, "method not allowed");
             }
-            let params = parse_query(query);
             let Some(folder) = params.get("folder") else {
-                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+                return make_api_error(400, "missing folder query parameter");
             };
-            let device = params
-                .get("device")
-                .map(|value| value.as_str())
-                .unwrap_or("remote");
+            let device = params.get("device").map(|v| v.as_str()).unwrap_or("remote");
             match folder_remote_need(runtime, folder, device) {
                 Ok(payload) => ApiReply::json(200, payload),
                 Err(ApiFolderStatusError::MissingFolder) => ApiReply::json(
@@ -567,32 +1555,85 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 }
             }
         }
-        "/rest/db/ignores" => {
-            if method != &Method::Get {
-                return ApiReply::json(405, json!({ "error": "method not allowed" }));
-            }
-            let params = parse_query(query);
-            let Some(folder) = params.get("folder") else {
-                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
-            };
-            match folder_ignores(runtime, folder) {
-                Ok(payload) => ApiReply::json(200, payload),
-                Err(ApiFolderStatusError::MissingFolder) => ApiReply::json(
-                    404,
-                    json!({ "error": "folder not found", "folder": folder }),
-                ),
-                Err(ApiFolderStatusError::Internal(err)) => {
-                    ApiReply::json(500, json!({ "error": err }))
+        "/rest/db/ignores" => match method {
+            Method::Get => {
+                let Some(folder) = params.get("folder") else {
+                    return make_api_error(400, "missing folder query parameter");
+                };
+                match folder_ignores(runtime, folder) {
+                    Ok(payload) => ApiReply::json(200, payload),
+                    Err(ApiFolderStatusError::MissingFolder) => ApiReply::json(
+                        404,
+                        json!({ "error": "folder not found", "folder": folder }),
+                    ),
+                    Err(ApiFolderStatusError::Internal(err)) => {
+                        ApiReply::json(500, json!({ "error": err }))
+                    }
                 }
+            }
+            Method::Post => {
+                let Some(folder) = params.get("folder") else {
+                    return make_api_error(400, "missing folder query parameter");
+                };
+                let patterns = params
+                    .get("patterns")
+                    .map(|value| {
+                        value
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|p| !p.is_empty())
+                            .map(ToOwned::to_owned)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let mut guard = match runtime.model.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return make_api_error(500, "model lock poisoned"),
+                };
+                if !guard.folderCfgs.contains_key(folder) {
+                    return make_api_error(404, "folder not found");
+                }
+                guard.SetIgnores(folder, patterns.clone());
+                append_event(
+                    runtime,
+                    "FolderSummary",
+                    json!({"folder": folder, "ignoresUpdated": true}),
+                    false,
+                );
+                ApiReply::json(
+                    200,
+                    json!({
+                        "folder": folder,
+                        "saved": true,
+                        "patterns": patterns,
+                    }),
+                )
+            }
+            _ => make_api_error(405, "method not allowed"),
+        },
+        "/rest/db/prio" => {
+            if method != &Method::Post {
+                return make_api_error(405, "method not allowed");
+            }
+            let Some(folder) = params.get("folder") else {
+                return make_api_error(400, "missing folder query parameter");
+            };
+            let file = params.get("file").cloned().unwrap_or_default();
+            match bring_to_front(runtime, folder) {
+                Ok(_) => ApiReply::json(
+                    200,
+                    json!({"folder": folder, "file": file, "prioritized": true}),
+                ),
+                Err(ApiFolderStatusError::MissingFolder) => make_api_error(404, "folder not found"),
+                Err(ApiFolderStatusError::Internal(err)) => make_api_error(500, err),
             }
         }
         "/rest/db/browse" => {
             if method != &Method::Get {
-                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+                return make_api_error(405, "method not allowed");
             }
-            let params = parse_query(query);
             let Some(folder) = params.get("folder") else {
-                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+                return make_api_error(400, "missing folder query parameter");
             };
             let cursor = params.get("cursor").map(|v| v.as_str());
             let limit = parse_limit(&params, "limit", 2000, 10_000);
@@ -609,11 +1650,10 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         }
         "/rest/db/need" => {
             if method != &Method::Get {
-                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+                return make_api_error(405, "method not allowed");
             }
-            let params = parse_query(query);
             let Some(folder) = params.get("folder") else {
-                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+                return make_api_error(400, "missing folder query parameter");
             };
             let cursor = params.get("cursor").map(|v| v.as_str());
             let limit = parse_limit(&params, "limit", 2000, 10_000);
@@ -630,11 +1670,10 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         }
         "/rest/db/jobs" => {
             if method != &Method::Get {
-                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+                return make_api_error(405, "method not allowed");
             }
-            let params = parse_query(query);
             let Some(folder) = params.get("folder") else {
-                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+                return make_api_error(400, "missing folder query parameter");
             };
             match folder_jobs(runtime, folder) {
                 Ok(payload) => ApiReply::json(200, payload),
@@ -649,15 +1688,22 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         }
         "/rest/db/scan" => {
             if method != &Method::Post {
-                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+                return make_api_error(405, "method not allowed");
             }
-            let params = parse_query(query);
             let Some(folder) = params.get("folder") else {
-                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+                return make_api_error(400, "missing folder query parameter");
             };
             let subdirs = parse_subdirs(&params);
             match scan_folder(runtime, folder, &subdirs) {
-                Ok(payload) => ApiReply::json(200, payload),
+                Ok(payload) => {
+                    append_event(
+                        runtime,
+                        "LocalIndexUpdated",
+                        json!({"folder": folder, "subdirs": subdirs}),
+                        true,
+                    );
+                    ApiReply::json(200, payload)
+                }
                 Err(ApiFolderStatusError::MissingFolder) => ApiReply::json(
                     404,
                     json!({ "error": "folder not found", "folder": folder }),
@@ -669,14 +1715,21 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         }
         "/rest/db/pull" => {
             if method != &Method::Post {
-                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+                return make_api_error(405, "method not allowed");
             }
-            let params = parse_query(query);
             let Some(folder) = params.get("folder") else {
-                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+                return make_api_error(400, "missing folder query parameter");
             };
             match pull_folder(runtime, folder) {
-                Ok(payload) => ApiReply::json(200, payload),
+                Ok(payload) => {
+                    append_event(
+                        runtime,
+                        "RemoteIndexUpdated",
+                        json!({"folder": folder}),
+                        false,
+                    );
+                    ApiReply::json(200, payload)
+                }
                 Err(ApiFolderStatusError::MissingFolder) => ApiReply::json(
                     404,
                     json!({ "error": "folder not found", "folder": folder }),
@@ -688,11 +1741,10 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         }
         "/rest/db/override" => {
             if method != &Method::Post {
-                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+                return make_api_error(405, "method not allowed");
             }
-            let params = parse_query(query);
             let Some(folder) = params.get("folder") else {
-                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+                return make_api_error(400, "missing folder query parameter");
             };
             match override_folder(runtime, folder) {
                 Ok(payload) => ApiReply::json(200, payload),
@@ -707,11 +1759,10 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         }
         "/rest/db/revert" => {
             if method != &Method::Post {
-                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+                return make_api_error(405, "method not allowed");
             }
-            let params = parse_query(query);
             let Some(folder) = params.get("folder") else {
-                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+                return make_api_error(400, "missing folder query parameter");
             };
             match revert_folder(runtime, folder) {
                 Ok(payload) => ApiReply::json(200, payload),
@@ -726,11 +1777,10 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         }
         "/rest/db/bringtofront" => {
             if method != &Method::Post {
-                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+                return make_api_error(405, "method not allowed");
             }
-            let params = parse_query(query);
             let Some(folder) = params.get("folder") else {
-                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+                return make_api_error(400, "missing folder query parameter");
             };
             match bring_to_front(runtime, folder) {
                 Ok(payload) => ApiReply::json(200, payload),
@@ -745,11 +1795,10 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         }
         "/rest/db/reset" => {
             if method != &Method::Post {
-                return ApiReply::json(405, json!({ "error": "method not allowed" }));
+                return make_api_error(405, "method not allowed");
             }
-            let params = parse_query(query);
             let Some(folder) = params.get("folder") else {
-                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+                return make_api_error(400, "missing folder query parameter");
             };
             match reset_folder(runtime, folder) {
                 Ok(payload) => ApiReply::json(200, payload),
@@ -816,6 +1865,147 @@ fn parse_limit(
         .filter(|v| *v > 0)
         .map(|v| v.min(max_limit))
         .unwrap_or(default_limit)
+}
+
+fn bool_param(params: &BTreeMap<String, String>, key: &str) -> Option<bool> {
+    params
+        .get(key)
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+}
+
+fn path_param<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    let rest = path.strip_prefix(prefix)?;
+    if rest.is_empty() {
+        return None;
+    }
+    if rest.contains('/') {
+        return None;
+    }
+    Some(rest)
+}
+
+fn folder_config_to_json(id: &str, cfg: &FolderConfiguration) -> Value {
+    json!({
+        "id": id,
+        "label": cfg.label,
+        "path": cfg.path,
+        "type": cfg.folder_type.as_str(),
+        "rescanIntervalS": cfg.rescan_interval_s,
+        "fsWatcherEnabled": cfg.fs_watcher_enabled,
+        "fsWatcherDelayS": cfg.fs_watcher_delay_s,
+        "fsWatcherTimeoutS": cfg.fs_watcher_timeout_s,
+        "ignoreDelete": cfg.ignore_delete,
+        "paused": cfg.paused,
+        "memory": {
+            "maxMB": cfg.memory_max_mb,
+            "policy": memory_policy_name(cfg.memory_policy),
+            "softPercent": cfg.memory_soft_percent,
+            "telemetryIntervalS": cfg.memory_telemetry_interval_s,
+            "pullPageItems": cfg.memory_pull_page_items,
+            "scanSpillThresholdEntries": cfg.memory_scan_spill_threshold_entries,
+        },
+    })
+}
+
+fn parse_folder_type(value: &str) -> Option<FolderType> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "sendreceive" | "sendrecv" | "readwrite" => Some(FolderType::SendReceive),
+        "sendonly" | "readonly" => Some(FolderType::SendOnly),
+        "receiveonly" | "recvonly" => Some(FolderType::ReceiveOnly),
+        "receiveencrypted" | "recvenc" => Some(FolderType::ReceiveEncrypted),
+        _ => None,
+    }
+}
+
+fn make_api_error(status: u16, message: impl Into<String>) -> ApiReply {
+    ApiReply::json(status, json!({ "error": message.into() }))
+}
+
+fn append_event(runtime: &DaemonApiRuntime, event_type: &str, data: Value, disk: bool) {
+    let Ok(mut state) = runtime.state.lock() else {
+        return;
+    };
+    let next_id = state.event_log.len() as u64 + 1;
+    let event = json!({
+        "id": next_id,
+        "type": event_type,
+        "time": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+        "data": data,
+    });
+    state.event_log.push(event.clone());
+    if disk {
+        state.disk_event_log.push(event);
+    }
+}
+
+fn api_events(runtime: &DaemonApiRuntime, disk_only: bool, since: u64, limit: usize) -> ApiReply {
+    let state = match runtime.state.lock() {
+        Ok(guard) => guard,
+        Err(_) => return make_api_error(500, "api state lock poisoned"),
+    };
+    let source = if disk_only {
+        &state.disk_event_log
+    } else {
+        &state.event_log
+    };
+    let mut items = source
+        .iter()
+        .filter(|ev| ev.get("id").and_then(Value::as_u64).unwrap_or_default() > since)
+        .take(limit)
+        .cloned()
+        .collect::<Vec<_>>();
+    items.sort_by_key(|v| v.get("id").and_then(Value::as_u64).unwrap_or_default());
+    ApiReply::json(
+        200,
+        json!({
+            "count": items.len(),
+            "events": items,
+        }),
+    )
+}
+
+fn build_config_document(runtime: &DaemonApiRuntime) -> Result<Value, String> {
+    let (folders, local_id) = {
+        let guard = runtime
+            .model
+            .lock()
+            .map_err(|_| "model lock poisoned".to_string())?;
+        let mut folders = guard
+            .folderCfgs
+            .iter()
+            .map(|(id, cfg)| folder_config_to_json(id, cfg))
+            .collect::<Vec<_>>();
+        folders.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+        (folders, guard.id.clone())
+    };
+    let state = runtime
+        .state
+        .lock()
+        .map_err(|_| "api state lock poisoned".to_string())?;
+    let mut devices = state.device_configs.values().cloned().collect::<Vec<_>>();
+    if !state.device_configs.contains_key(&local_id) {
+        devices.push(json!({
+            "deviceID": local_id,
+            "name": "Local Device",
+            "addresses": ["dynamic"],
+            "paused": false,
+            "compression": "metadata",
+            "introducer": false,
+        }));
+    }
+    devices.sort_by(|a, b| a["deviceID"].as_str().cmp(&b["deviceID"].as_str()));
+    Ok(json!({
+        "folders": folders,
+        "devices": devices,
+        "options": state.options.clone(),
+        "gui": state.gui.clone(),
+        "ldap": state.ldap.clone(),
+        "defaults": {
+            "folder": state.default_folder.clone(),
+            "device": state.default_device.clone(),
+            "ignores": state.default_ignores.clone(),
+        },
+    }))
 }
 
 fn memory_policy_name(policy: crate::config::MemoryPolicy) -> &'static str {
@@ -1640,6 +2830,7 @@ pub(crate) fn run_parity_probe(with_peer_interop: bool) -> Result<(), String> {
         }
         let runtime = DaemonApiRuntime {
             model: model.clone(),
+            state: Arc::new(Mutex::new(ApiRuntimeState::new("local-device"))),
             active_peers: Arc::new(AtomicUsize::new(0)),
             max_peers: DEFAULT_MAX_PEERS,
             start_time: SystemTime::now(),
@@ -1712,6 +2903,7 @@ pub(crate) fn run_api_surface_probe() -> Result<Vec<String>, String> {
         }
         let runtime = DaemonApiRuntime {
             model,
+            state: Arc::new(Mutex::new(ApiRuntimeState::new("local-device"))),
             active_peers: Arc::new(AtomicUsize::new(0)),
             max_peers: DEFAULT_MAX_PEERS,
             start_time: SystemTime::now(),
@@ -1722,6 +2914,12 @@ pub(crate) fn run_api_surface_probe() -> Result<Vec<String>, String> {
             (
                 "GET /rest/system/ping",
                 Method::Get,
+                "/rest/system/ping".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/system/ping",
+                Method::Post,
                 "/rest/system/ping".to_string(),
                 200,
             ),
@@ -1744,42 +2942,456 @@ pub(crate) fn run_api_surface_probe() -> Result<Vec<String>, String> {
                 200,
             ),
             (
-                "GET /rest/system/config/folders",
+                "GET /rest/system/discovery",
                 Method::Get,
-                "/rest/system/config/folders".to_string(),
+                "/rest/system/discovery".to_string(),
                 200,
             ),
             (
-                "POST /rest/system/config/folders",
+                "GET /rest/system/paths",
+                Method::Get,
+                "/rest/system/paths".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/system/browse",
+                Method::Get,
+                format!("/rest/system/browse?current={}", root.to_string_lossy()),
+                200,
+            ),
+            (
+                "GET /rest/noauth/health",
+                Method::Get,
+                "/rest/noauth/health".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/noauth/auth/password",
+                Method::Post,
+                "/rest/noauth/auth/password?user=probe".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/noauth/auth/logout",
+                Method::Post,
+                "/rest/noauth/auth/logout?user=probe".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/system/error",
+                Method::Get,
+                "/rest/system/error".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/system/error",
+                Method::Post,
+                "/rest/system/error?message=probe-error".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/system/error/clear",
+                Method::Post,
+                "/rest/system/error/clear".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/system/log",
+                Method::Get,
+                "/rest/system/log".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/system/log.txt",
+                Method::Get,
+                "/rest/system/log.txt".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/system/loglevels",
+                Method::Get,
+                "/rest/system/loglevels".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/system/loglevels",
+                Method::Post,
+                "/rest/system/loglevels?enable=bep".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/system/upgrade",
+                Method::Get,
+                "/rest/system/upgrade".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/system/upgrade",
+                Method::Post,
+                "/rest/system/upgrade".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/system/pause",
+                Method::Post,
+                "/rest/system/pause?device=local-device".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/system/resume",
+                Method::Post,
+                "/rest/system/resume?device=local-device".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/system/restart",
+                Method::Post,
+                "/rest/system/restart".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/system/shutdown",
+                Method::Post,
+                "/rest/system/shutdown".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/system/reset",
+                Method::Post,
+                "/rest/system/reset?folder=default".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/config",
+                Method::Get,
+                "/rest/config".to_string(),
+                200,
+            ),
+            (
+                "PUT /rest/config",
+                Method::Put,
+                "/rest/config".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/system/config",
+                Method::Get,
+                "/rest/system/config".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/system/config",
+                Method::Post,
+                "/rest/system/config".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/config/insync",
+                Method::Get,
+                "/rest/config/insync".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/system/config/insync",
+                Method::Get,
+                "/rest/system/config/insync".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/config/restart-required",
+                Method::Get,
+                "/rest/config/restart-required".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/config/options",
+                Method::Get,
+                "/rest/config/options".to_string(),
+                200,
+            ),
+            (
+                "PUT /rest/config/options",
+                Method::Put,
+                "/rest/config/options?maxSendKbps=1".to_string(),
+                200,
+            ),
+            (
+                "PATCH /rest/config/options",
+                Method::Patch,
+                "/rest/config/options?maxRecvKbps=2".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/config/gui",
+                Method::Get,
+                "/rest/config/gui".to_string(),
+                200,
+            ),
+            (
+                "PUT /rest/config/gui",
+                Method::Put,
+                "/rest/config/gui?theme=default".to_string(),
+                200,
+            ),
+            (
+                "PATCH /rest/config/gui",
+                Method::Patch,
+                "/rest/config/gui?insecureAdminAccess=false".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/config/ldap",
+                Method::Get,
+                "/rest/config/ldap".to_string(),
+                200,
+            ),
+            (
+                "PUT /rest/config/ldap",
+                Method::Put,
+                "/rest/config/ldap?enabled=false".to_string(),
+                200,
+            ),
+            (
+                "PATCH /rest/config/ldap",
+                Method::Patch,
+                "/rest/config/ldap?address=ldap://localhost".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/config/defaults/folder",
+                Method::Get,
+                "/rest/config/defaults/folder".to_string(),
+                200,
+            ),
+            (
+                "PUT /rest/config/defaults/folder",
+                Method::Put,
+                "/rest/config/defaults/folder?rescanIntervalS=3600".to_string(),
+                200,
+            ),
+            (
+                "PATCH /rest/config/defaults/folder",
+                Method::Patch,
+                "/rest/config/defaults/folder?paused=false".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/config/defaults/device",
+                Method::Get,
+                "/rest/config/defaults/device".to_string(),
+                200,
+            ),
+            (
+                "PUT /rest/config/defaults/device",
+                Method::Put,
+                "/rest/config/defaults/device?compression=metadata".to_string(),
+                200,
+            ),
+            (
+                "PATCH /rest/config/defaults/device",
+                Method::Patch,
+                "/rest/config/defaults/device?introducer=false".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/config/defaults/ignores",
+                Method::Get,
+                "/rest/config/defaults/ignores".to_string(),
+                200,
+            ),
+            (
+                "PUT /rest/config/defaults/ignores",
+                Method::Put,
+                "/rest/config/defaults/ignores?patterns=.git,node_modules".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/config/folders",
+                Method::Get,
+                "/rest/config/folders".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/config/folders",
                 Method::Post,
                 format!(
-                    "/rest/system/config/folders?id=docs&path={}",
+                    "/rest/config/folders?id=docs&path={}",
                     docs_path.to_string_lossy()
                 ),
                 200,
             ),
             (
-                "POST /rest/system/config/restart",
-                Method::Post,
-                "/rest/system/config/restart?folder=docs".to_string(),
+                "PUT /rest/config/folders",
+                Method::Put,
+                format!(
+                    "/rest/config/folders?id=docs&path={}",
+                    docs_path.to_string_lossy()
+                ),
                 200,
             ),
             (
-                "DELETE /rest/system/config/folders",
-                Method::Delete,
-                "/rest/system/config/folders?id=docs".to_string(),
-                200,
-            ),
-            (
-                "POST /rest/db/scan",
-                Method::Post,
-                "/rest/db/scan?folder=default".to_string(),
-                200,
-            ),
-            (
-                "GET /rest/db/status",
+                "GET /rest/config/folders/:id",
                 Method::Get,
-                "/rest/db/status?folder=default".to_string(),
+                "/rest/config/folders/docs".to_string(),
+                200,
+            ),
+            (
+                "PUT /rest/config/folders/:id",
+                Method::Put,
+                format!(
+                    "/rest/config/folders/docs?path={}",
+                    docs_path.to_string_lossy()
+                ),
+                200,
+            ),
+            (
+                "PATCH /rest/config/folders/:id",
+                Method::Patch,
+                "/rest/config/folders/docs?paused=false".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/config/devices",
+                Method::Get,
+                "/rest/config/devices".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/config/devices",
+                Method::Post,
+                "/rest/config/devices?id=peer-a&address=tcp://peer-a".to_string(),
+                200,
+            ),
+            (
+                "PUT /rest/config/devices",
+                Method::Put,
+                "/rest/config/devices?id=peer-a&address=tcp://peer-a".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/config/devices/:id",
+                Method::Get,
+                "/rest/config/devices/peer-a".to_string(),
+                200,
+            ),
+            (
+                "PUT /rest/config/devices/:id",
+                Method::Put,
+                "/rest/config/devices/peer-a?name=Peer%20A".to_string(),
+                200,
+            ),
+            (
+                "PATCH /rest/config/devices/:id",
+                Method::Patch,
+                "/rest/config/devices/peer-a?paused=false".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/cluster/pending/devices",
+                Method::Get,
+                "/rest/cluster/pending/devices".to_string(),
+                200,
+            ),
+            (
+                "DELETE /rest/cluster/pending/devices",
+                Method::Delete,
+                "/rest/cluster/pending/devices?device=peer-a".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/cluster/pending/folders",
+                Method::Get,
+                "/rest/cluster/pending/folders".to_string(),
+                200,
+            ),
+            (
+                "DELETE /rest/cluster/pending/folders",
+                Method::Delete,
+                "/rest/cluster/pending/folders?folder=docs".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/events",
+                Method::Get,
+                "/rest/events".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/events/disk",
+                Method::Get,
+                "/rest/events/disk".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/stats/device",
+                Method::Get,
+                "/rest/stats/device".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/stats/folder",
+                Method::Get,
+                "/rest/stats/folder".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/svc/deviceid",
+                Method::Get,
+                "/rest/svc/deviceid?id=peer-a".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/svc/lang",
+                Method::Get,
+                "/rest/svc/lang".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/svc/report",
+                Method::Get,
+                "/rest/svc/report".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/svc/random/string",
+                Method::Get,
+                "/rest/svc/random/string?length=12".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/folder/errors",
+                Method::Get,
+                "/rest/folder/errors?folder=default".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/folder/pullerrors",
+                Method::Get,
+                "/rest/folder/pullerrors?folder=default".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/folder/versions",
+                Method::Get,
+                "/rest/folder/versions?folder=default".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/folder/versions",
+                Method::Post,
+                "/rest/folder/versions?folder=default".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/debug/*method",
+                Method::Get,
+                "/rest/debug/support".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/db/browse",
+                Method::Get,
+                "/rest/db/browse?folder=default&limit=10".to_string(),
                 200,
             ),
             (
@@ -1795,33 +3407,15 @@ pub(crate) fn run_api_surface_probe() -> Result<Vec<String>, String> {
                 200,
             ),
             (
-                "GET /rest/db/localchanged",
-                Method::Get,
-                "/rest/db/localchanged?folder=default".to_string(),
-                200,
-            ),
-            (
-                "GET /rest/db/remoteneed",
-                Method::Get,
-                "/rest/db/remoteneed?folder=default&device=peer-a".to_string(),
-                200,
-            ),
-            (
                 "GET /rest/db/ignores",
                 Method::Get,
                 "/rest/db/ignores?folder=default".to_string(),
                 200,
             ),
             (
-                "GET /rest/db/browse",
-                Method::Get,
-                "/rest/db/browse?folder=default&limit=10".to_string(),
-                200,
-            ),
-            (
-                "GET /rest/db/need",
-                Method::Get,
-                "/rest/db/need?folder=default&limit=10".to_string(),
+                "POST /rest/db/ignores",
+                Method::Post,
+                "/rest/db/ignores?folder=default&patterns=.cache,temp".to_string(),
                 200,
             ),
             (
@@ -1831,21 +3425,15 @@ pub(crate) fn run_api_surface_probe() -> Result<Vec<String>, String> {
                 200,
             ),
             (
-                "POST /rest/db/pull",
-                Method::Post,
-                "/rest/db/pull?folder=default".to_string(),
+                "GET /rest/db/localchanged",
+                Method::Get,
+                "/rest/db/localchanged?folder=default".to_string(),
                 200,
             ),
             (
-                "POST /rest/db/override",
-                Method::Post,
-                "/rest/db/override?folder=default".to_string(),
-                200,
-            ),
-            (
-                "POST /rest/db/revert",
-                Method::Post,
-                "/rest/db/revert?folder=default".to_string(),
+                "GET /rest/db/need",
+                Method::Get,
+                "/rest/db/need?folder=default&limit=10".to_string(),
                 200,
             ),
             (
@@ -1855,9 +3443,90 @@ pub(crate) fn run_api_surface_probe() -> Result<Vec<String>, String> {
                 200,
             ),
             (
+                "POST /rest/db/override",
+                Method::Post,
+                "/rest/db/override?folder=default".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/db/prio",
+                Method::Post,
+                "/rest/db/prio?folder=default&file=a.txt".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/db/pull",
+                Method::Post,
+                "/rest/db/pull?folder=default".to_string(),
+                200,
+            ),
+            (
                 "POST /rest/db/reset",
                 Method::Post,
                 "/rest/db/reset?folder=default".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/db/remoteneed",
+                Method::Get,
+                "/rest/db/remoteneed?folder=default&device=peer-a".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/db/revert",
+                Method::Post,
+                "/rest/db/revert?folder=default".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/db/scan",
+                Method::Post,
+                "/rest/db/scan?folder=default".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/db/status",
+                Method::Get,
+                "/rest/db/status?folder=default".to_string(),
+                200,
+            ),
+            (
+                "GET /rest/system/config/folders",
+                Method::Get,
+                "/rest/system/config/folders".to_string(),
+                200,
+            ),
+            (
+                "POST /rest/system/config/folders",
+                Method::Post,
+                format!(
+                    "/rest/system/config/folders?id=docs2&path={}",
+                    docs_path.to_string_lossy()
+                ),
+                200,
+            ),
+            (
+                "POST /rest/system/config/restart",
+                Method::Post,
+                "/rest/system/config/restart?folder=docs".to_string(),
+                200,
+            ),
+            (
+                "DELETE /rest/system/config/folders",
+                Method::Delete,
+                "/rest/system/config/folders?id=docs2".to_string(),
+                200,
+            ),
+            (
+                "DELETE /rest/config/devices/:id",
+                Method::Delete,
+                "/rest/config/devices/peer-a".to_string(),
+                200,
+            ),
+            (
+                "DELETE /rest/config/folders/:id",
+                Method::Delete,
+                "/rest/config/folders/docs".to_string(),
                 200,
             ),
         ];
@@ -2150,8 +3819,10 @@ mod tests {
         _folders: Vec<FolderSpec>,
         active_peers: usize,
     ) -> DaemonApiRuntime {
+        let local_id = model.lock().expect("lock model").id.clone();
         let runtime = DaemonApiRuntime {
             model,
+            state: Arc::new(Mutex::new(ApiRuntimeState::new(&local_id))),
             active_peers: Arc::new(AtomicUsize::new(active_peers)),
             max_peers: 16,
             start_time: SystemTime::now(),
@@ -2738,7 +4409,7 @@ mod tests {
         assert_eq!(reset_get.status_code, StatusCode(405));
         let ignores_post =
             build_api_response(&Method::Post, "/rest/db/ignores?folder=default", &runtime);
-        assert_eq!(ignores_post.status_code, StatusCode(405));
+        assert_eq!(ignores_post.status_code, StatusCode(404));
         let completion_post = build_api_response(
             &Method::Post,
             "/rest/db/completion?folder=default",

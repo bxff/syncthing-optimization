@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -78,7 +79,7 @@ func runScenarioSnapshot(id string) (map[string]any, error) {
 	case "protocol-state-transition":
 		return scenarioProtocolStateTransition()
 	case "daemon-api-surface":
-		return scenarioDaemonAPISurface(), nil
+		return scenarioDaemonAPISurface()
 	case "path-order-invariant":
 		return scenarioPathOrderInvariant(), nil
 	case "memory-cap-50mb":
@@ -433,37 +434,45 @@ func scenarioProtocolStateTransition() (map[string]any, error) {
 	}), nil
 }
 
-func scenarioDaemonAPISurface() map[string]any {
-	covered := []string{
-		"DELETE /rest/system/config/folders",
-		"GET /rest/db/browse",
-		"GET /rest/db/completion",
-		"GET /rest/db/file",
-		"GET /rest/db/ignores",
-		"GET /rest/db/jobs",
-		"GET /rest/db/localchanged",
-		"GET /rest/db/need",
-		"GET /rest/db/remoteneed",
-		"GET /rest/db/status",
-		"GET /rest/system/config/folders",
-		"GET /rest/system/connections",
-		"GET /rest/system/ping",
-		"GET /rest/system/status",
-		"GET /rest/system/version",
-		"POST /rest/db/bringtofront",
-		"POST /rest/db/override",
-		"POST /rest/db/pull",
-		"POST /rest/db/reset",
-		"POST /rest/db/revert",
-		"POST /rest/db/scan",
-		"POST /rest/system/config/folders",
-		"POST /rest/system/config/restart",
+func scenarioDaemonAPISurface() (map[string]any, error) {
+	covered, err := extractRustRuntimeProbeEndpoints()
+	if err != nil {
+		return nil, err
 	}
-	sort.Strings(covered)
 	return baseScenario("daemon-api-surface", map[string]any{
 		"covered_endpoints":      covered,
 		"covered_endpoint_count": len(covered),
-	})
+	}), nil
+}
+
+func extractRustRuntimeProbeEndpoints() ([]string, error) {
+	bs, err := os.ReadFile("syncthing-rs/src/runtime.rs")
+	if err != nil {
+		return nil, fmt.Errorf("read rust runtime probe source: %w", err)
+	}
+	pattern := regexp.MustCompile(`\(\s*"([A-Z]+ /rest/[^"]+)"\s*,\s*Method::[A-Za-z]+,`)
+	matches := pattern.FindAllStringSubmatch(string(bs), -1)
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("failed to discover api probe endpoints from syncthing-rs/src/runtime.rs")
+	}
+	seen := make(map[string]struct{}, len(matches))
+	covered := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if len(match) != 2 {
+			continue
+		}
+		endpoint := strings.TrimSpace(match[1])
+		if endpoint == "" {
+			continue
+		}
+		if _, ok := seen[endpoint]; ok {
+			continue
+		}
+		seen[endpoint] = struct{}{}
+		covered = append(covered, endpoint)
+	}
+	sort.Strings(covered)
+	return covered, nil
 }
 
 func scenarioPathOrderInvariant() map[string]any {

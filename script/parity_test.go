@@ -366,6 +366,30 @@ func TestExtractGoBEPMessageTypesContainsCoreMessages(t *testing.T) {
 	}
 }
 
+func TestExtractRustBEPMessageTypesContainsCoreMessages(t *testing.T) {
+	types, err := extractRustBEPMessageTypes()
+	if err != nil {
+		t.Fatalf("extractRustBEPMessageTypes error: %v", err)
+	}
+
+	for _, expected := range []string{
+		"hello",
+		"cluster_config",
+		"index",
+		"request",
+		"response",
+		"close",
+		"file_info",
+		"block_info",
+		"platform_data",
+		"xattr",
+	} {
+		if _, ok := types[expected]; !ok {
+			t.Fatalf("expected rust bep surface to contain %q", expected)
+		}
+	}
+}
+
 func TestExtractGoFolderModesContainsCanonicalModes(t *testing.T) {
 	modes, err := extractGoFolderModes()
 	if err != nil {

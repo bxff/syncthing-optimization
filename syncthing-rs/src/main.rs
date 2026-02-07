@@ -9,10 +9,12 @@ mod index_engine;
 mod model_core;
 mod planner;
 mod protocol;
+mod runtime;
 mod scenarios;
 mod store;
 mod walker;
 
+use runtime::{parse_daemon_args, run_daemon};
 use scenarios::{run_scenario_snapshot, scenario_ids};
 use std::process;
 
@@ -48,6 +50,19 @@ fn main() {
                 println!("{id}");
             }
         }
+        "daemon" => match parse_daemon_args(&args[2..]) {
+            Ok(cfg) => {
+                if let Err(err) = run_daemon(cfg) {
+                    eprintln!("daemon failed: {err}");
+                    process::exit(1);
+                }
+            }
+            Err(err) => {
+                eprintln!("invalid daemon arguments: {err}");
+                usage();
+                process::exit(2);
+            }
+        },
         _ => {
             eprintln!("unknown command: {}", args[1]);
             usage();
@@ -60,4 +75,5 @@ fn usage() {
     eprintln!("usage:");
     eprintln!("  syncthing-rs scenario <scenario-id>");
     eprintln!("  syncthing-rs scenario-list");
+    eprintln!("  syncthing-rs daemon --folder-path <path> [--folder-id <id>] [--listen <addr>] [--once]");
 }

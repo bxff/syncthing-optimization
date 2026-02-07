@@ -76,6 +76,6 @@ fn usage() {
     eprintln!("  syncthing-rs scenario <scenario-id>");
     eprintln!("  syncthing-rs scenario-list");
     eprintln!(
-        "  syncthing-rs daemon (--folder <id>:<path> ... | --folder-path <path> [--folder-id <id>] | --config <path.json>) [--listen <addr>] [--db-root <path>] [--memory-max-mb <n>] [--max-peers <n>] [--once]"
+        "  syncthing-rs daemon (--folder <id>:<path> ... | --folder-path <path> [--folder-id <id>] | --config <path.json>) [--listen <addr>] [--api-listen <addr>] [--db-root <path>] [--memory-max-mb <n>] [--max-peers <n>] [--once]"
     );
 }

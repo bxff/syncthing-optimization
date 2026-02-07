@@ -1,6 +1,8 @@
 use crate::bep::{decode_frame, encode_frame, BepMessage};
 use crate::model_core::{model, newFolderConfiguration, NewModel, NewModelWithRuntime};
 use serde::Deserialize;
+use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -8,6 +10,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:22000";
 const DEFAULT_FOLDER_ID: &str = "default";
@@ -23,6 +27,7 @@ pub(crate) struct FolderSpec {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 struct RuntimeConfigFile {
     pub(crate) listen_addr: Option<String>,
+    pub(crate) api_listen_addr: Option<String>,
     pub(crate) db_root: Option<String>,
     pub(crate) memory_max_mb: Option<usize>,
     pub(crate) max_peers: Option<usize>,
@@ -33,6 +38,7 @@ struct RuntimeConfigFile {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DaemonConfig {
     pub(crate) listen_addr: String,
+    pub(crate) api_listen_addr: Option<String>,
     pub(crate) folders: Vec<FolderSpec>,
     pub(crate) db_root: Option<String>,
     pub(crate) memory_max_mb: Option<usize>,
@@ -43,6 +49,8 @@ pub(crate) struct DaemonConfig {
 pub(crate) fn parse_daemon_args(args: &[String]) -> Result<DaemonConfig, String> {
     let mut listen_addr = DEFAULT_LISTEN_ADDR.to_string();
     let mut listen_set = false;
+    let mut api_listen_addr: Option<String> = None;
+    let mut api_listen_set = false;
     let mut folder_id = DEFAULT_FOLDER_ID.to_string();
     let mut folder_id_set = false;
     let mut folder_path: Option<String> = None;
@@ -65,6 +73,17 @@ pub(crate) fn parse_daemon_args(args: &[String]) -> Result<DaemonConfig, String>
                     .ok_or_else(|| "--listen requires a value".to_string())?;
                 listen_addr = value.clone();
                 listen_set = true;
+            }
+            "--api-listen" => {
+                i += 1;
+                let value = args
+                    .get(i)
+                    .ok_or_else(|| "--api-listen requires a value".to_string())?;
+                if value.trim().is_empty() {
+                    return Err("--api-listen must not be empty".to_string());
+                }
+                api_listen_addr = Some(value.clone());
+                api_listen_set = true;
             }
             "--folder-id" => {
                 i += 1;
@@ -159,6 +178,9 @@ pub(crate) fn parse_daemon_args(args: &[String]) -> Result<DaemonConfig, String>
                 listen_addr = file_listen;
             }
         }
+        if !api_listen_set && api_listen_addr.is_none() {
+            api_listen_addr = file_cfg.api_listen_addr;
+        }
         if db_root.is_none() {
             db_root = file_cfg.db_root;
         }
@@ -197,6 +219,7 @@ pub(crate) fn parse_daemon_args(args: &[String]) -> Result<DaemonConfig, String>
 
     Ok(DaemonConfig {
         listen_addr,
+        api_listen_addr,
         folders,
         db_root,
         memory_max_mb,
@@ -219,9 +242,28 @@ pub(crate) fn run_daemon(config: DaemonConfig) -> Result<(), String> {
         }
     }
 
+    let active_peers = Arc::new(AtomicUsize::new(0));
+    if let Some(api_addr) = config.api_listen_addr.as_ref() {
+        let runtime = DaemonApiRuntime {
+            model: model.clone(),
+            folders: config.folders.clone(),
+            active_peers: active_peers.clone(),
+            max_peers: config.max_peers,
+            start_time: SystemTime::now(),
+            bep_listen_addr: config.listen_addr.clone(),
+        };
+        let _api_thread = start_api_server(api_addr, runtime)?;
+    }
+
     let listener = TcpListener::bind(&config.listen_addr)
         .map_err(|err| format!("listen {}: {err}", config.listen_addr))?;
-    run_daemon_with_listener(listener, model, config.once, config.max_peers)
+    run_daemon_with_listener(
+        listener,
+        model,
+        config.once,
+        config.max_peers,
+        active_peers,
+    )
 }
 
 fn load_runtime_config(path: &str) -> Result<RuntimeConfigFile, String> {
@@ -248,13 +290,197 @@ fn load_runtime_config(path: &str) -> Result<RuntimeConfigFile, String> {
     Ok(cfg)
 }
 
+#[derive(Clone)]
+struct DaemonApiRuntime {
+    model: Arc<Mutex<model>>,
+    folders: Vec<FolderSpec>,
+    active_peers: Arc<AtomicUsize>,
+    max_peers: usize,
+    start_time: SystemTime,
+    bep_listen_addr: String,
+}
+
+struct ApiReply {
+    status_code: StatusCode,
+    body: Vec<u8>,
+}
+
+impl ApiReply {
+    fn json(status_code: u16, payload: Value) -> Self {
+        let body =
+            serde_json::to_vec(&payload).unwrap_or_else(|_| b"{\"error\":\"encode error\"}".to_vec());
+        Self {
+            status_code: StatusCode(status_code),
+            body,
+        }
+    }
+}
+
+fn start_api_server(addr: &str, runtime: DaemonApiRuntime) -> Result<thread::JoinHandle<()>, String> {
+    let server = Server::http(addr).map_err(|err| format!("listen api {addr}: {err}"))?;
+    let handle = thread::spawn(move || {
+        for request in server.incoming_requests() {
+            let reply = build_api_response(request.method(), request.url(), &runtime);
+            let mut response = Response::from_data(reply.body).with_status_code(reply.status_code);
+            if let Ok(content_type) =
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+            {
+                response = response.with_header(content_type);
+            }
+            let _ = request.respond(response);
+        }
+    });
+    Ok(handle)
+}
+
+fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) -> ApiReply {
+    if method != &Method::Get {
+        return ApiReply::json(405, json!({ "error": "method not allowed" }));
+    }
+
+    let (path, query) = split_url(url);
+    match path {
+        "/rest/system/ping" => ApiReply::json(200, json!({ "ping": "pong" })),
+        "/rest/system/version" => ApiReply::json(
+            200,
+            json!({
+                "version": env!("CARGO_PKG_VERSION"),
+                "longVersion": format!("syncthing-rs {}", env!("CARGO_PKG_VERSION")),
+                "os": std::env::consts::OS,
+                "arch": std::env::consts::ARCH,
+            }),
+        ),
+        "/rest/system/status" => match system_status(runtime) {
+            Ok(payload) => ApiReply::json(200, payload),
+            Err(err) => ApiReply::json(500, json!({ "error": err })),
+        },
+        "/rest/db/status" => {
+            let params = parse_query(query);
+            let Some(folder) = params.get("folder") else {
+                return ApiReply::json(400, json!({ "error": "missing folder query parameter" }));
+            };
+            match folder_status(runtime, folder) {
+                Ok(payload) => ApiReply::json(200, payload),
+                Err(ApiFolderStatusError::MissingFolder) => {
+                    ApiReply::json(404, json!({ "error": "folder not found", "folder": folder }))
+                }
+                Err(ApiFolderStatusError::Internal(err)) => {
+                    ApiReply::json(500, json!({ "error": err }))
+                }
+            }
+        }
+        _ => ApiReply::json(404, json!({ "error": "not found" })),
+    }
+}
+
+fn split_url(url: &str) -> (&str, &str) {
+    match url.split_once('?') {
+        Some((path, query)) => (path, query),
+        None => (url, ""),
+    }
+}
+
+fn parse_query(query: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for pair in query.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (key, value) = match pair.split_once('=') {
+            Some(parts) => parts,
+            None => (pair, ""),
+        };
+        if key.is_empty() {
+            continue;
+        }
+        out.insert(key.to_string(), value.to_string());
+    }
+    out
+}
+
+fn system_status(runtime: &DaemonApiRuntime) -> Result<Value, String> {
+    let now = SystemTime::now();
+    let start_ts = runtime
+        .start_time
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let uptime = now
+        .duration_since(runtime.start_time)
+        .unwrap_or_default()
+        .as_secs();
+
+    let (my_id, db_estimated_bytes, db_budget_bytes) = {
+        let guard = runtime
+            .model
+            .lock()
+            .map_err(|_| "model lock poisoned".to_string())?;
+        let db = guard
+            .sdb
+            .lock()
+            .map_err(|_| "database lock poisoned".to_string())?;
+        (
+            guard.id.clone(),
+            db.estimated_memory_bytes() as u64,
+            db.memory_budget_bytes() as u64,
+        )
+    };
+
+    Ok(json!({
+        "myID": my_id,
+        "startTime": start_ts,
+        "uptimeS": uptime,
+        "folderCount": runtime.folders.len(),
+        "activePeers": runtime.active_peers.load(Ordering::Relaxed),
+        "maxPeers": runtime.max_peers,
+        "listenAddress": runtime.bep_listen_addr,
+        "memoryEstimatedBytes": db_estimated_bytes,
+        "memoryBudgetBytes": db_budget_bytes,
+    }))
+}
+
+enum ApiFolderStatusError {
+    MissingFolder,
+    Internal(String),
+}
+
+fn folder_status(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiFolderStatusError> {
+    let guard = runtime
+        .model
+        .lock()
+        .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
+    if !guard.folderCfgs.contains_key(folder) {
+        return Err(ApiFolderStatusError::MissingFolder);
+    }
+
+    let (global_files, global_bytes) = guard.GlobalSize(folder);
+    let (local_files, local_bytes) = guard.LocalSize(folder);
+    let (need_files, need_bytes) = guard.NeedSize(folder);
+    let (receive_only_files, receive_only_bytes) = guard.ReceiveOnlySize(folder);
+    let stats = guard.FolderStatistics(folder);
+    Ok(json!({
+        "folder": folder,
+        "state": guard.State(folder),
+        "sequence": guard.Sequence(folder),
+        "globalFiles": global_files,
+        "globalBytes": global_bytes,
+        "localFiles": local_files,
+        "localBytes": local_bytes,
+        "needFiles": need_files,
+        "needBytes": need_bytes,
+        "receiveOnlyChangedFiles": receive_only_files,
+        "receiveOnlyChangedBytes": receive_only_bytes,
+        "stats": stats,
+    }))
+}
+
 fn run_daemon_with_listener(
     listener: TcpListener,
     model: Arc<Mutex<model>>,
     once: bool,
     max_peers: usize,
+    active_peers: Arc<AtomicUsize>,
 ) -> Result<(), String> {
-    let active_peers = Arc::new(AtomicUsize::new(0));
     let mut peer_seq = 0_u64;
     loop {
         let (mut stream, addr) = listener
@@ -411,6 +637,7 @@ fn write_frame(writer: &mut impl Write, message: &BepMessage) -> Result<(), Stri
 mod tests {
     use super::*;
     use crate::bep::{default_exchange, BepMessage};
+    use serde_json::Value;
     use std::fs;
     use std::net::{Shutdown, TcpStream};
     use std::path::PathBuf;
@@ -449,6 +676,8 @@ mod tests {
         let args = vec![
             "--listen".to_string(),
             "127.0.0.1:23000".to_string(),
+            "--api-listen".to_string(),
+            "127.0.0.1:28384".to_string(),
             "--folder-id".to_string(),
             "photos".to_string(),
             "--folder-path".to_string(),
@@ -463,6 +692,7 @@ mod tests {
         ];
         let cfg = parse_daemon_args(&args).expect("parse");
         assert_eq!(cfg.listen_addr, "127.0.0.1:23000");
+        assert_eq!(cfg.api_listen_addr.as_deref(), Some("127.0.0.1:28384"));
         assert_eq!(
             cfg.folders,
             vec![FolderSpec {
@@ -508,6 +738,7 @@ mod tests {
             &config_path,
             r#"{
                 "listen_addr":"127.0.0.1:24100",
+                "api_listen_addr":"127.0.0.1:28385",
                 "db_root":"/tmp/syncthing-rs-db-config",
                 "memory_max_mb":71,
                 "max_peers":4,
@@ -527,6 +758,7 @@ mod tests {
         ];
         let cfg = parse_daemon_args(&args).expect("parse");
         assert_eq!(cfg.listen_addr, "127.0.0.1:24100");
+        assert_eq!(cfg.api_listen_addr.as_deref(), Some("127.0.0.1:28385"));
         assert_eq!(cfg.db_root.as_deref(), Some("/tmp/syncthing-rs-db-config"));
         assert_eq!(cfg.memory_max_mb, Some(71));
         assert_eq!(cfg.max_peers, 10);
@@ -543,6 +775,106 @@ mod tests {
                 }
             ]
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn test_api_runtime(
+        model: Arc<Mutex<model>>,
+        folders: Vec<FolderSpec>,
+        active_peers: usize,
+    ) -> DaemonApiRuntime {
+        let runtime = DaemonApiRuntime {
+            model,
+            folders,
+            active_peers: Arc::new(AtomicUsize::new(active_peers)),
+            max_peers: 16,
+            start_time: SystemTime::now(),
+            bep_listen_addr: "127.0.0.1:22000".to_string(),
+        };
+        runtime
+    }
+
+    #[test]
+    fn api_ping_returns_pong() {
+        let runtime = test_api_runtime(
+            Arc::new(Mutex::new(NewModel())),
+            vec![FolderSpec {
+                id: "default".to_string(),
+                path: "/tmp/default".to_string(),
+            }],
+            3,
+        );
+
+        let reply = build_api_response(&Method::Get, "/rest/system/ping", &runtime);
+        assert_eq!(reply.status_code, StatusCode(200));
+        let payload: Value = serde_json::from_slice(&reply.body).expect("decode json");
+        assert_eq!(payload["ping"], "pong");
+    }
+
+    #[test]
+    fn api_status_reports_memory_and_peer_fields() {
+        let runtime = test_api_runtime(
+            Arc::new(Mutex::new(NewModel())),
+            vec![FolderSpec {
+                id: "default".to_string(),
+                path: "/tmp/default".to_string(),
+            }],
+            2,
+        );
+        let reply = build_api_response(&Method::Get, "/rest/system/status", &runtime);
+        assert_eq!(reply.status_code, StatusCode(200));
+        let payload: Value = serde_json::from_slice(&reply.body).expect("decode json");
+        assert_eq!(payload["activePeers"], 2);
+        assert_eq!(payload["maxPeers"], 16);
+        assert_eq!(payload["folderCount"], 1);
+        assert!(payload["memoryBudgetBytes"].as_u64().is_some());
+    }
+
+    #[test]
+    fn api_db_status_requires_folder_and_rejects_unknown() {
+        let runtime = test_api_runtime(
+            Arc::new(Mutex::new(NewModel())),
+            vec![FolderSpec {
+                id: "default".to_string(),
+                path: "/tmp/default".to_string(),
+            }],
+            0,
+        );
+
+        let missing = build_api_response(&Method::Get, "/rest/db/status", &runtime);
+        assert_eq!(missing.status_code, StatusCode(400));
+
+        let unknown = build_api_response(
+            &Method::Get,
+            "/rest/db/status?folder=unknown",
+            &runtime,
+        );
+        assert_eq!(unknown.status_code, StatusCode(404));
+    }
+
+    #[test]
+    fn api_db_status_returns_folder_metrics() {
+        let root = temp_root("api-db-status");
+        let model = Arc::new(Mutex::new(NewModelWithRuntime(Some(root.clone()), Some(50))));
+        {
+            let mut guard = model.lock().expect("lock");
+            guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+        }
+
+        let runtime = test_api_runtime(
+            model,
+            vec![FolderSpec {
+                id: "default".to_string(),
+                path: root.to_string_lossy().to_string(),
+            }],
+            0,
+        );
+        let reply = build_api_response(&Method::Get, "/rest/db/status?folder=default", &runtime);
+        assert_eq!(reply.status_code, StatusCode(200));
+        let payload: Value = serde_json::from_slice(&reply.body).expect("decode json");
+        assert_eq!(payload["folder"], "default");
+        assert!(payload["stats"].is_object());
 
         let _ = fs::remove_dir_all(root);
     }

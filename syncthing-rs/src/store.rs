@@ -111,6 +111,16 @@ impl Store {
 
         let (files, deleted_tombstones, approx_memory_bytes) =
             Self::load_from_journal(&journal_path, config.max_deleted_tombstones)?;
+        let budget_bytes = config.memory_budget_bytes();
+        if budget_bytes > 0 && approx_memory_bytes > budget_bytes {
+            return Err(io::Error::new(
+                ErrorKind::Other,
+                format!(
+                    "memory budget exceeded on open: estimated={} budget={}",
+                    approx_memory_bytes, budget_bytes
+                ),
+            ));
+        }
         let tombstone_set = deleted_tombstones.iter().cloned().collect();
 
         Ok(Self {
@@ -124,6 +134,22 @@ impl Store {
     }
 
     pub(crate) fn upsert_file(&mut self, file: FileMetadata) -> io::Result<()> {
+        let key = composite_key(&file.folder, &file.device, &file.path);
+        let next_bytes = projected_upsert_memory_bytes(
+            self.approx_memory_bytes,
+            self.files.get(&key),
+            &file,
+        );
+        let budget_bytes = self.config.memory_budget_bytes();
+        if budget_bytes > 0 && next_bytes > budget_bytes {
+            return Err(io::Error::new(
+                ErrorKind::Other,
+                format!(
+                    "memory budget exceeded on upsert: projected={} budget={}",
+                    next_bytes, budget_bytes
+                ),
+            ));
+        }
         self.append_op(&JournalOp::Upsert(file.clone()))?;
         self.apply_upsert(file);
         Ok(())
@@ -798,6 +824,15 @@ fn estimate_file_bytes(file: &FileMetadata) -> usize {
     file.folder.len() + file.path.len() + hash_bytes + 64
 }
 
+fn projected_upsert_memory_bytes(
+    current_bytes: usize,
+    current_file: Option<&FileMetadata>,
+    next_file: &FileMetadata,
+) -> usize {
+    let without_current = current_bytes.saturating_sub(current_file.map(estimate_file_bytes).unwrap_or(0));
+    without_current.saturating_add(estimate_file_bytes(next_file))
+}
+
 fn sync_dir(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
 }
@@ -952,6 +987,51 @@ mod tests {
         assert_eq!(stats.memory_budget_bytes, 50 * 1024 * 1024);
         assert_eq!(stats.deleted_tombstone_count, 0);
         assert!(stats.estimated_memory_bytes < stats.memory_budget_bytes);
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn rejects_upsert_when_budget_would_be_exceeded() {
+        let root = temp_root("budget-overflow");
+        let cfg = StoreConfig::new(&root).with_memory_cap_mb(1);
+        let mut store = Store::open(cfg).expect("open");
+
+        let mut inserted = 0_u64;
+        for i in 0_u64..200_000 {
+            let result = store.upsert_file(meta("alpha", &format!("f-{i:06}.bin"), i + 1));
+            if result.is_err() {
+                let err = result.expect_err("must fail");
+                assert!(err.to_string().contains("memory budget exceeded"));
+                break;
+            }
+            inserted += 1;
+        }
+        assert!(inserted > 0, "should insert at least one entry before capping");
+        assert!(
+            store.stats().estimated_memory_bytes <= store.stats().memory_budget_bytes,
+            "store should stay at or under budget"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn rejects_open_when_journal_exceeds_budget() {
+        let root = temp_root("budget-open-reject");
+        {
+            let cfg = StoreConfig::new(&root).with_memory_cap_mb(8);
+            let mut store = Store::open(cfg).expect("open writer");
+            for i in 0_u64..20_000 {
+                store
+                    .upsert_file(meta("alpha", &format!("seed-{i:05}.bin"), i + 1))
+                    .expect("seed upsert");
+            }
+        }
+
+        let tiny_cfg = StoreConfig::new(&root).with_memory_cap_mb(1);
+        let err = Store::open(tiny_cfg).expect_err("must reject over-budget open");
+        assert!(err.to_string().contains("memory budget exceeded on open"));
 
         fs::remove_dir_all(root).expect("cleanup");
     }

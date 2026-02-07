@@ -6,6 +6,6 @@
   "scanned_entries": 10000,
   "scenario": "memory-cap-50mb",
   "source": "rust",
-  "status": "prototype",
+  "status": "validated",
   "under_budget": true
 }

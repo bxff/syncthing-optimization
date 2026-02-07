@@ -7,5 +7,5 @@
   ],
   "scenario": "crash-recovery",
   "source": "rust",
-  "status": "prototype"
+  "status": "validated"
 }

@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
-  "durability": "failed",
-  "crash_recovery": "failed"
+  "durability": "passed",
+  "crash_recovery": "passed"
 }

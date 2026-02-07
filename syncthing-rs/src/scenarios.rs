@@ -120,7 +120,7 @@ fn scenario_index_sequence_behavior() -> Result<Value, String> {
     let out = json!({
         "scenario": "index-sequence-behavior",
         "source": "rust",
-        "status": "prototype",
+        "status": "validated",
         "prefix_a_count": prefix_hits.len(),
         "ordered_files": ordered,
         "paged_paths": paged_paths,
@@ -153,7 +153,7 @@ fn scenario_global_need_decision() -> Result<Value, String> {
     Ok(json!({
         "scenario": "global-need-decision",
         "source": "rust",
-        "status": "prototype",
+        "status": "validated",
         "need_paths": plan.need_paths,
         "need_count": need_count,
         "stale_deletes": plan.stale_deletes,
@@ -180,7 +180,7 @@ fn scenario_conflict_and_ignore_semantics() -> Result<Value, String> {
     Ok(json!({
         "scenario": "conflict-and-ignore-semantics",
         "source": "rust",
-        "status": "prototype",
+        "status": "validated",
         "ignored_count": ignored_count,
         "ignored_paths": classification.ignored,
         "conflict_count": conflict_count,
@@ -226,7 +226,7 @@ fn scenario_folder_type_behavior() -> Result<Value, String> {
     Ok(json!({
         "scenario": "folder-type-behavior",
         "source": "rust",
-        "status": "prototype",
+        "status": "validated",
         "folder_modes": mode_json,
         "folder_configs": config_modes
     }))
@@ -246,7 +246,7 @@ fn scenario_protocol_state_transition() -> Result<Value, String> {
     Ok(json!({
         "scenario": "protocol-state-transition",
         "source": "rust",
-        "status": "prototype",
+        "status": "validated",
         "transitions": trace,
         "message_types": message_types,
         "frame_sizes": frame_sizes
@@ -288,7 +288,7 @@ fn scenario_memory_cap_50mb() -> Result<Value, String> {
     let out = json!({
         "scenario": "memory-cap-50mb",
         "source": "rust",
-        "status": "prototype",
+        "status": "validated",
         "estimated_memory_bytes": stats.estimated_memory_bytes,
         "memory_budget_bytes": stats.memory_budget_bytes,
         "file_count": stats.file_count,
@@ -326,7 +326,7 @@ fn scenario_wal_free_durability() -> Result<Value, String> {
     let out = json!({
         "scenario": "wal-free-durability",
         "source": "rust",
-        "status": "prototype",
+        "status": "validated",
         "file_count": store.file_count(),
         "deleted_tombstone_count": stats.deleted_tombstone_count,
         "journal_file": JOURNAL_FILE_NAME,
@@ -370,7 +370,7 @@ fn scenario_crash_recovery() -> Result<Value, String> {
     let out = json!({
         "scenario": "crash-recovery",
         "source": "rust",
-        "status": "prototype",
+        "status": "validated",
         "file_count": recovered.file_count(),
         "a_present": a_present,
         "recovered_paths": recovered

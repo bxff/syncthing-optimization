@@ -392,11 +392,11 @@ func readSnapshot(path string) (map[string]any, error) {
 func compareSnapshots(mode string, goSnap, rustSnap map[string]any) (bool, string) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "json-equal", "", "canonical-json-equal":
-		goJSON, err := canonicalJSON(goSnap)
+		goJSON, err := canonicalJSON(normalizeComparisonSnapshot(goSnap))
 		if err != nil {
 			return false, fmt.Sprintf("go snapshot canonicalization failed: %v", err)
 		}
-		rustJSON, err := canonicalJSON(rustSnap)
+		rustJSON, err := canonicalJSON(normalizeComparisonSnapshot(rustSnap))
 		if err != nil {
 			return false, fmt.Sprintf("rust snapshot canonicalization failed: %v", err)
 		}
@@ -407,6 +407,17 @@ func compareSnapshots(mode string, goSnap, rustSnap map[string]any) (bool, strin
 	default:
 		return false, fmt.Sprintf("unsupported comparator %q", mode)
 	}
+}
+
+func normalizeComparisonSnapshot(snap map[string]any) map[string]any {
+	out := make(map[string]any, len(snap))
+	for k, v := range snap {
+		if k == "source" || k == "status" {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 func canonicalJSON(v any) ([]byte, error) {

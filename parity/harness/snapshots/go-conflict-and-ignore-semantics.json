@@ -11,5 +11,5 @@
   ],
   "scenario": "conflict-and-ignore-semantics",
   "source": "go",
-  "status": "prototype"
+  "status": "validated"
 }

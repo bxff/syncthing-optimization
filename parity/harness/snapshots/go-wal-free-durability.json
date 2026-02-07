@@ -8,5 +8,5 @@
   ],
   "scenario": "wal-free-durability",
   "source": "go",
-  "status": "prototype"
+  "status": "validated"
 }

@@ -104,7 +104,9 @@ impl Store {
         fs::create_dir_all(&config.root)?;
         let journal_path = config.root.join(JOURNAL_FILE_NAME);
         if !journal_path.exists() {
-            File::create(&journal_path)?;
+            let file = File::create(&journal_path)?;
+            file.sync_all()?;
+            sync_dir(&config.root)?;
         }
 
         let (files, deleted_tombstones, approx_memory_bytes) =
@@ -328,6 +330,7 @@ impl Store {
             fs::remove_file(&self.journal_path)?;
         }
         fs::rename(&tmp, &self.journal_path)?;
+        sync_dir(&self.config.root)?;
 
         Ok(())
     }
@@ -793,6 +796,10 @@ fn finalize_page(mut items: Vec<FileMetadata>, limit: usize) -> FilePage {
 fn estimate_file_bytes(file: &FileMetadata) -> usize {
     let hash_bytes: usize = file.block_hashes.iter().map(String::len).sum();
     file.folder.len() + file.path.len() + hash_bytes + 64
+}
+
+fn sync_dir(path: &Path) -> io::Result<()> {
+    File::open(path)?.sync_all()
 }
 
 #[cfg(test)]

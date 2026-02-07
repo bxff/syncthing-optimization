@@ -8,5 +8,5 @@
   ],
   "scenario": "wal-free-durability",
   "source": "rust",
-  "status": "prototype"
+  "status": "validated"
 }

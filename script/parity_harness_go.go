@@ -311,7 +311,11 @@ func scenarioProtocolStateTransition() (map[string]any, error) {
 		"cluster_config",
 		"index",
 		"index_update",
+		"request",
+		"response",
+		"download_progress",
 		"ping",
+		"close",
 	}
 
 	type msg = map[string]any
@@ -344,7 +348,36 @@ func scenarioProtocolStateTransition() (map[string]any, error) {
 				},
 			},
 		},
+		{
+			"type":   "request",
+			"id":     1,
+			"folder": "default",
+			"name":   "a.txt",
+			"offset": 0,
+			"size":   110,
+			"hash":   "h2",
+		},
+		{
+			"type":     "response",
+			"id":       1,
+			"code":     0,
+			"data_len": 110,
+		},
+		{
+			"type":   "download_progress",
+			"folder": "default",
+			"updates": []any{
+				map[string]any{
+					"name":          "a.txt",
+					"version":       2,
+					"block_indexes": []int{0},
+					"block_size":    131072,
+					"update_type":   "append",
+				},
+			},
+		},
 		{"type": "ping", "timestamp_ms": 1738958400000},
+		{"type": "close", "reason": "normal shutdown"},
 	}
 
 	frameSizes := make([]int, 0, len(exchange))
@@ -404,7 +437,7 @@ func baseScenario(id string, fields map[string]any) map[string]any {
 	out := map[string]any{
 		"scenario": id,
 		stSource:   "go",
-		stScenario: "prototype",
+		stScenario: "validated",
 	}
 	for k, v := range fields {
 		out[k] = v

@@ -11,5 +11,5 @@
   ],
   "scenario": "conflict-and-ignore-semantics",
   "source": "rust",
-  "status": "prototype"
+  "status": "validated"
 }

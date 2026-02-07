@@ -1,5 +1,8 @@
 use crate::store::{FileMetadata as StoreFileMetadata, Store, StoreConfig};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::fs;
+use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -102,6 +105,16 @@ pub(crate) struct KeyValue {
 pub(crate) struct LocalFilePage {
     pub(crate) items: Vec<FileInfo>,
     pub(crate) next_cursor: Option<String>,
+}
+
+const RUNTIME_META_FILE: &str = "runtime-meta.json";
+const META_KEY_SEP: char = '\u{001f}';
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct RuntimeMetadata {
+    index_ids: BTreeMap<String, IndexId>,
+    mtimes: BTreeMap<String, [i64; 2]>,
+    kv: BTreeMap<String, Vec<u8>>,
 }
 
 pub(crate) trait Kv {
@@ -242,12 +255,13 @@ impl WalFreeDb {
     pub(crate) fn open(config: StoreConfig) -> Result<Self, String> {
         let root = config.root.clone();
         let store = Store::open(config).map_err(|e| format!("open wal-free store: {e}"))?;
+        let runtime_meta = load_runtime_metadata(&root)?;
         Ok(Self {
             store,
             runtime_root: root,
-            index_ids: BTreeMap::new(),
-            mtimes: BTreeMap::new(),
-            kv: BTreeMap::new(),
+            index_ids: runtime_meta_index_ids(&runtime_meta),
+            mtimes: runtime_meta_mtimes(&runtime_meta),
+            kv: runtime_meta.kv,
             closed: false,
         })
     }
@@ -307,6 +321,42 @@ impl WalFreeDb {
     fn ensure_open(&self) -> Result<(), String> {
         if self.closed {
             return Err("database is closed".to_string());
+        }
+        Ok(())
+    }
+
+    fn persist_runtime_metadata(&self) -> Result<(), String> {
+        let path = runtime_metadata_path(&self.runtime_root);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("create runtime meta dir: {e}"))?;
+        }
+        let temp_path = path.with_extension("json.tmp");
+        let payload = RuntimeMetadata {
+            index_ids: self
+                .index_ids
+                .iter()
+                .map(|((folder, device), id)| (join_meta_key(folder, device), *id))
+                .collect(),
+            mtimes: self
+                .mtimes
+                .iter()
+                .map(|((folder, name), (ondisk_ns, virtual_ns))| {
+                    (join_meta_key(folder, name), [*ondisk_ns, *virtual_ns])
+                })
+                .collect(),
+            kv: self.kv.clone(),
+        };
+        let bytes = serde_json::to_vec_pretty(&payload)
+            .map_err(|e| format!("serialize runtime metadata: {e}"))?;
+        fs::write(&temp_path, bytes).map_err(|e| format!("write runtime metadata tmp: {e}"))?;
+        fs::File::open(&temp_path)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| format!("sync runtime metadata tmp: {e}"))?;
+        fs::rename(&temp_path, &path).map_err(|e| format!("rename runtime metadata: {e}"))?;
+        if let Some(parent) = path.parent() {
+            fs::File::open(parent)
+                .and_then(|f| f.sync_all())
+                .map_err(|e| format!("sync runtime metadata dir: {e}"))?;
         }
         Ok(())
     }
@@ -388,6 +438,7 @@ impl Db for WalFreeDb {
         self.store
             .compact()
             .map_err(|e| format!("compact on close: {e}"))?;
+        self.persist_runtime_metadata()?;
         self.closed = true;
         Ok(())
     }
@@ -615,6 +666,7 @@ impl Db for WalFreeDb {
                 .map_err(|e| format!("drop device: {e}"))?;
         }
         self.index_ids.retain(|(_, d), _| d != device);
+        self.persist_runtime_metadata()?;
         Ok(())
     }
 
@@ -649,6 +701,7 @@ impl Db for WalFreeDb {
         }
         self.index_ids.retain(|(f, _), _| f != folder);
         self.mtimes.retain(|(f, _), _| f != folder);
+        self.persist_runtime_metadata()?;
         Ok(())
     }
 
@@ -731,6 +784,7 @@ impl Db for WalFreeDb {
     fn drop_all_index_ids(&mut self) -> Result<(), String> {
         self.ensure_open()?;
         self.index_ids.clear();
+        self.persist_runtime_metadata()?;
         Ok(())
     }
 
@@ -746,12 +800,14 @@ impl Db for WalFreeDb {
         self.ensure_open()?;
         self.index_ids
             .insert((folder.to_string(), device.to_string()), id);
+        self.persist_runtime_metadata()?;
         Ok(())
     }
 
     fn delete_mtime(&mut self, folder: &str, name: &str) -> Result<(), String> {
         self.ensure_open()?;
         self.mtimes.remove(&(folder.to_string(), name.to_string()));
+        self.persist_runtime_metadata()?;
         Ok(())
     }
 
@@ -775,6 +831,7 @@ impl Db for WalFreeDb {
             (folder.to_string(), name.to_string()),
             (ondisk_ns, virtual_ns),
         );
+        self.persist_runtime_metadata()?;
         Ok(())
     }
 
@@ -786,12 +843,14 @@ impl Db for WalFreeDb {
     fn put_kv(&mut self, key: &str, val: &[u8]) -> Result<(), String> {
         self.ensure_open()?;
         self.kv.insert(key.to_string(), val.to_vec());
+        self.persist_runtime_metadata()?;
         Ok(())
     }
 
     fn delete_kv(&mut self, key: &str) -> Result<(), String> {
         self.ensure_open()?;
         self.kv.remove(key);
+        self.persist_runtime_metadata()?;
         Ok(())
     }
 
@@ -881,6 +940,50 @@ fn u64_to_i64(v: u64) -> i64 {
     v.min(i64::MAX as u64) as i64
 }
 
+fn runtime_metadata_path(root: &PathBuf) -> PathBuf {
+    root.join(RUNTIME_META_FILE)
+}
+
+fn join_meta_key(a: &str, b: &str) -> String {
+    format!("{a}{META_KEY_SEP}{b}")
+}
+
+fn split_meta_key(key: &str) -> Option<(String, String)> {
+    let (a, b) = key.split_once(META_KEY_SEP)?;
+    Some((a.to_string(), b.to_string()))
+}
+
+fn load_runtime_metadata(root: &PathBuf) -> Result<RuntimeMetadata, String> {
+    let path = runtime_metadata_path(root);
+    let bytes = match fs::read(&path) {
+        Ok(v) => v,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(RuntimeMetadata::default()),
+        Err(err) => return Err(format!("read runtime metadata {}: {err}", path.display())),
+    };
+    serde_json::from_slice(&bytes)
+        .map_err(|e| format!("decode runtime metadata {}: {e}", path.display()))
+}
+
+fn runtime_meta_index_ids(meta: &RuntimeMetadata) -> BTreeMap<(String, DeviceId), IndexId> {
+    let mut out = BTreeMap::new();
+    for (k, id) in &meta.index_ids {
+        if let Some((folder, device)) = split_meta_key(k) {
+            out.insert((folder, device), *id);
+        }
+    }
+    out
+}
+
+fn runtime_meta_mtimes(meta: &RuntimeMetadata) -> BTreeMap<(String, String), (i64, i64)> {
+    let mut out = BTreeMap::new();
+    for (k, pair) in &meta.mtimes {
+        if let Some((folder, name)) = split_meta_key(k) {
+            out.insert((folder, name), (pair[0], pair[1]));
+        }
+    }
+    out
+}
+
 fn file_metadata_from_info(info: FileInfo) -> FileMetadata {
     FileMetadata {
         name: info.path,
@@ -958,6 +1061,9 @@ fn count_files(iter: impl Iterator<Item = FileInfo>) -> Counts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn file(path: &str, seq: i64, size: i64) -> FileInfo {
         FileInfo {
@@ -972,6 +1078,20 @@ mod tests {
             file_type: FileInfoType::File,
             block_hashes: vec!["h1".to_string(), "h2".to_string()],
         }
+    }
+
+    fn temp_root(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        path.push(format!(
+            "syncthing-rs-db-{name}-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).expect("create temp root");
+        path
     }
 
     #[test]
@@ -1160,5 +1280,29 @@ mod tests {
         db.close().expect("close");
         let err = <WalFreeDb as Kv>::put_kv(&mut db, "k", b"v").expect_err("must fail after close");
         assert!(err.contains("closed"));
+    }
+
+    #[test]
+    fn runtime_metadata_persists_across_reopen() {
+        let root = temp_root("runtime-meta");
+        {
+            let mut db = WalFreeDb::open_runtime(&root, 50).expect("open runtime");
+            db.set_index_id("default", "local", 77)
+                .expect("set index id");
+            db.put_mtime("default", "a.txt", 11, 22)
+                .expect("put mtime");
+            <WalFreeDb as Kv>::put_kv(&mut db, "alpha/key", b"value").expect("put kv");
+            db.close().expect("close");
+        }
+        {
+            let db = WalFreeDb::open_runtime(&root, 50).expect("reopen runtime");
+            assert_eq!(db.get_index_id("default", "local").expect("get index"), 77);
+            assert_eq!(db.get_mtime("default", "a.txt").expect("get mtime"), (11, 22));
+            assert_eq!(
+                <WalFreeDb as Kv>::get_kv(&db, "alpha/key").expect("get kv"),
+                Some(b"value".to_vec())
+            );
+        }
+        let _ = fs::remove_dir_all(root);
     }
 }

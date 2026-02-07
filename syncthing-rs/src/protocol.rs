@@ -5,7 +5,11 @@ pub(crate) enum ProtocolEvent {
     ClusterConfig,
     Index,
     IndexUpdate,
+    Request,
+    Response,
+    DownloadProgress,
     Ping,
+    Close,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,6 +20,8 @@ enum ProtocolState {
     ClusterConfigured,
     IndexSent,
     Live,
+    AwaitingResponse,
+    Closed,
 }
 
 impl ProtocolEvent {
@@ -26,7 +32,11 @@ impl ProtocolEvent {
             Self::ClusterConfig => "cluster_config",
             Self::Index => "index",
             Self::IndexUpdate => "index_update",
+            Self::Request => "request",
+            Self::Response => "response",
+            Self::DownloadProgress => "download_progress",
             Self::Ping => "ping",
+            Self::Close => "close",
         }
     }
 }
@@ -53,22 +63,34 @@ fn advance(state: ProtocolState, event: ProtocolEvent) -> Result<ProtocolState, 
         (S::HelloDone, E::ClusterConfig) => Ok(S::ClusterConfigured),
         (S::ClusterConfigured, E::Index) => Ok(S::IndexSent),
         (S::IndexSent, E::IndexUpdate) => Ok(S::Live),
+        (S::Live, E::Request) => Ok(S::AwaitingResponse),
+        (S::AwaitingResponse, E::Response) => Ok(S::Live),
+        (S::Live, E::DownloadProgress) => Ok(S::Live),
+        (S::AwaitingResponse, E::DownloadProgress) => Ok(S::AwaitingResponse),
         (S::Live, E::Ping) => Ok(S::Live),
         (S::Live, E::IndexUpdate) => Ok(S::Live),
+        (S::AwaitingResponse, E::Ping) => Ok(S::AwaitingResponse),
+        (S::AwaitingResponse, E::IndexUpdate) => Ok(S::AwaitingResponse),
+        (S::Live, E::Close) => Ok(S::Closed),
+        (S::AwaitingResponse, E::Close) => Ok(S::Closed),
         _ => Err(format!(
             "invalid protocol transition: {state:?} + {event:?}"
         )),
     }
 }
 
-pub(crate) fn default_sequence() -> [ProtocolEvent; 6] {
+pub(crate) fn default_sequence() -> [ProtocolEvent; 10] {
     [
         ProtocolEvent::Dial,
         ProtocolEvent::Hello,
         ProtocolEvent::ClusterConfig,
         ProtocolEvent::Index,
         ProtocolEvent::IndexUpdate,
+        ProtocolEvent::Request,
+        ProtocolEvent::Response,
+        ProtocolEvent::DownloadProgress,
         ProtocolEvent::Ping,
+        ProtocolEvent::Close,
     ]
 }
 
@@ -87,7 +109,11 @@ mod tests {
                 "cluster_config",
                 "index",
                 "index_update",
-                "ping"
+                "request",
+                "response",
+                "download_progress",
+                "ping",
+                "close",
             ]
         );
     }
@@ -95,6 +121,20 @@ mod tests {
     #[test]
     fn invalid_transition_fails() {
         let err = run_events(&[ProtocolEvent::Hello]).expect_err("must fail");
+        assert!(err.contains("invalid protocol transition"));
+    }
+
+    #[test]
+    fn response_without_request_fails() {
+        let err = run_events(&[
+            ProtocolEvent::Dial,
+            ProtocolEvent::Hello,
+            ProtocolEvent::ClusterConfig,
+            ProtocolEvent::Index,
+            ProtocolEvent::IndexUpdate,
+            ProtocolEvent::Response,
+        ])
+        .expect_err("must fail");
         assert!(err.contains("invalid protocol transition"));
     }
 }

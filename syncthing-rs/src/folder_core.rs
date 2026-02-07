@@ -493,7 +493,7 @@ impl folder {
         self.pullBasePause();
         self.pullScheduled = false;
 
-        let db = self.db.lock().map_err(|_| "db lock poisoned".to_string())?;
+        let mut db = self.db.lock().map_err(|_| "db lock poisoned".to_string())?;
         let estimated = db.estimated_memory_bytes();
         let budget = db.memory_budget_bytes();
         let soft_limit = if budget == 0 {
@@ -545,6 +545,7 @@ impl folder {
 
         let mut total_blocks = 0_usize;
         let mut reused_same_path_blocks = 0_usize;
+        let mut local_updates = Vec::with_capacity(needed.len());
         for global in &needed {
             total_blocks = total_blocks.saturating_add(global.block_hashes.len());
             if let Ok(Some(local_prev)) = db.get_device_file(&self.config.id, "local", &global.path)
@@ -552,6 +553,18 @@ impl folder {
                 reused_same_path_blocks = reused_same_path_blocks
                     .saturating_add(count_same_path_reuse_blocks(&local_prev, global));
             }
+            let mut applied = global.clone();
+            applied.folder = self.config.id.clone();
+            applied.local_flags = 0;
+            if applied.deleted {
+                applied.block_hashes.clear();
+            }
+            local_updates.push(applied);
+        }
+
+        if !local_updates.is_empty() {
+            db.update(&self.config.id, "local", local_updates)
+                .map_err(|e| format!("pull apply update: {e}"))?;
         }
         let fetched_blocks = total_blocks.saturating_sub(reused_same_path_blocks);
 
@@ -1526,6 +1539,15 @@ mod tests {
         assert_eq!(stats.reused_same_path_blocks, 2);
         assert_eq!(stats.fetched_blocks, 1);
         assert!(!stats.hard_blocked);
+        let guard = f.db.lock().expect("db lock");
+        let synced = guard
+            .get_device_file("default", "local", "same.txt")
+            .expect("lookup")
+            .expect("local same.txt");
+        assert_eq!(synced.sequence, 2);
+        assert_eq!(synced.block_hashes, vec!["h1", "h2", "h3"]);
+        let need = guard.count_need("default", "local").expect("count need after pull");
+        assert_eq!(need.files, 0);
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1558,6 +1580,44 @@ mod tests {
         assert!(err.contains("memory cap exceeded"));
         assert_eq!(f.memoryHardBlockEvents, 1);
         assert!(f.PullStats().hard_blocked);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pull_propagates_remote_delete_to_local() {
+        let root = temp_root("pull-delete");
+        let mut dbv = db::WalFreeDb::open_runtime(&root, 50).expect("open runtime db");
+        dbv.update(
+            "default",
+            "local",
+            vec![file("gone.txt", 1, &["h1"])],
+        )
+        .expect("update local");
+        let mut deleted = file("gone.txt", 2, &[]);
+        deleted.deleted = true;
+        dbv.update("default", "remote", vec![deleted])
+            .expect("update remote delete");
+
+        let db = Arc::new(Mutex::new(dbv));
+        let mut cfg = FolderConfiguration::default();
+        cfg.id = "default".to_string();
+        cfg.path = root.to_string_lossy().to_string();
+        let mut f = newFolder(cfg, db);
+
+        let pulled = f.pull().expect("pull");
+        assert_eq!(pulled, 1);
+
+        let guard = f.db.lock().expect("db lock");
+        let local = guard
+            .get_device_file("default", "local", "gone.txt")
+            .expect("lookup")
+            .expect("local file");
+        assert!(local.deleted);
+        assert!(local.block_hashes.is_empty());
+        let need = guard.count_need("default", "local").expect("need");
+        assert_eq!(need.files, 0);
+        assert_eq!(need.deleted, 0);
 
         let _ = fs::remove_dir_all(root);
     }

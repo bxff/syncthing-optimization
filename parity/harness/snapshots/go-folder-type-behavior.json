@@ -58,5 +58,5 @@
   },
   "scenario": "folder-type-behavior",
   "source": "go",
-  "status": "prototype"
+  "status": "validated"
 }

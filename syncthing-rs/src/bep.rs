@@ -19,8 +19,28 @@ pub(crate) enum BepMessage {
         folder: String,
         files: Vec<IndexEntry>,
     },
+    Request {
+        id: u32,
+        folder: String,
+        name: String,
+        offset: u64,
+        size: u32,
+        hash: String,
+    },
+    Response {
+        id: u32,
+        code: u32,
+        data_len: u32,
+    },
+    DownloadProgress {
+        folder: String,
+        updates: Vec<DownloadProgressEntry>,
+    },
     Ping {
         timestamp_ms: u64,
+    },
+    Close {
+        reason: String,
     },
 }
 
@@ -31,6 +51,15 @@ pub(crate) struct IndexEntry {
     pub(crate) deleted: bool,
     pub(crate) size: u64,
     pub(crate) block_hashes: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DownloadProgressEntry {
+    pub(crate) name: String,
+    pub(crate) version: u64,
+    pub(crate) block_indexes: Vec<u32>,
+    pub(crate) block_size: u32,
+    pub(crate) update_type: String,
 }
 
 pub(crate) fn encode_frame(message: &BepMessage) -> Result<Vec<u8>, String> {
@@ -107,8 +136,34 @@ pub(crate) fn default_exchange() -> Vec<BepMessage> {
                 block_hashes: vec!["h2".to_string()],
             }],
         },
+        BepMessage::Request {
+            id: 1,
+            folder: "default".to_string(),
+            name: "a.txt".to_string(),
+            offset: 0,
+            size: 110,
+            hash: "h2".to_string(),
+        },
+        BepMessage::Response {
+            id: 1,
+            code: 0,
+            data_len: 110,
+        },
+        BepMessage::DownloadProgress {
+            folder: "default".to_string(),
+            updates: vec![DownloadProgressEntry {
+                name: "a.txt".to_string(),
+                version: 2,
+                block_indexes: vec![0],
+                block_size: 131_072,
+                update_type: "append".to_string(),
+            }],
+        },
         BepMessage::Ping {
             timestamp_ms: 1_738_958_400_000,
+        },
+        BepMessage::Close {
+            reason: "normal shutdown".to_string(),
         },
     ]
 }
@@ -119,7 +174,11 @@ pub(crate) fn message_name(message: &BepMessage) -> &'static str {
         BepMessage::ClusterConfig { .. } => "cluster_config",
         BepMessage::Index { .. } => "index",
         BepMessage::IndexUpdate { .. } => "index_update",
+        BepMessage::Request { .. } => "request",
+        BepMessage::Response { .. } => "response",
+        BepMessage::DownloadProgress { .. } => "download_progress",
         BepMessage::Ping { .. } => "ping",
+        BepMessage::Close { .. } => "close",
     }
 }
 

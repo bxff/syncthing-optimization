@@ -4,24 +4,36 @@
     55,
     132,
     139,
-    52
+    101,
+    58,
+    159,
+    52,
+    51
   ],
   "message_types": [
     "hello",
     "cluster_config",
     "index",
     "index_update",
-    "ping"
+    "request",
+    "response",
+    "download_progress",
+    "ping",
+    "close"
   ],
   "scenario": "protocol-state-transition",
   "source": "rust",
-  "status": "prototype",
+  "status": "validated",
   "transitions": [
     "dial",
     "hello",
     "cluster_config",
     "index",
     "index_update",
-    "ping"
+    "request",
+    "response",
+    "download_progress",
+    "ping",
+    "close"
   ]
 }

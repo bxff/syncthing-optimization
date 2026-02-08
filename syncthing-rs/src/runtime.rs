@@ -1879,6 +1879,14 @@ fn build_gui_response(method: &Method, path: &str, runtime: &DaemonApiRuntime) -
         return make_api_error(405, "method not allowed");
     }
 
+    if path == "/meta.js" {
+        let body = match build_gui_metadata_js(runtime) {
+            Ok(body) => body,
+            Err(err) => return make_api_error(500, err),
+        };
+        return ApiReply::bytes(200, body, "application/javascript; charset=utf-8");
+    }
+
     let Some(gui_root) = runtime.gui_root.as_ref() else {
         return make_api_error(404, "gui not found");
     };
@@ -1934,6 +1942,23 @@ fn mime_type_for_path(path: &Path) -> &'static str {
         Some("txt") => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
     }
+}
+
+fn build_gui_metadata_js(runtime: &DaemonApiRuntime) -> Result<Vec<u8>, String> {
+    let device_id = runtime
+        .model
+        .read()
+        .map_err(|_| "model lock poisoned".to_string())?
+        .id
+        .clone();
+    let device_id_short = device_id.chars().take(7).collect::<String>();
+    serde_json::to_vec(&json!({
+        "deviceID": device_id,
+        "deviceIDShort": device_id_short,
+        "authenticated": true,
+    }))
+    .map(|meta| format!("var metadata = {};\n", String::from_utf8_lossy(&meta)).into_bytes())
+    .map_err(|err| format!("encode gui metadata: {err}"))
 }
 
 fn split_url(url: &str) -> (&str, &str) {
@@ -4114,6 +4139,18 @@ mod tests {
         assert_eq!(reply.status_code, StatusCode(200));
         let payload: Value = serde_json::from_slice(&reply.body).expect("decode json");
         assert_eq!(payload["ping"], "pong");
+    }
+
+    #[test]
+    fn gui_meta_js_returns_authenticated_metadata() {
+        let runtime = test_api_runtime(Arc::new(RwLock::new(NewModel())), Vec::new(), 0);
+        let reply = build_api_response(&Method::Get, "/meta.js", &runtime);
+        assert_eq!(reply.status_code, StatusCode(200));
+        assert_eq!(reply.content_type, "application/javascript; charset=utf-8");
+        let body = String::from_utf8(reply.body).expect("meta js utf8");
+        assert!(body.starts_with("var metadata = "));
+        assert!(body.contains("\"authenticated\":true"));
+        assert!(body.contains("\"deviceIDShort\""));
     }
 
     #[test]

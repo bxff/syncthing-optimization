@@ -1,5 +1,5 @@
 use crate::bep::{decode_frame, encode_frame, BepMessage};
-use crate::config::{FolderConfiguration, FolderType};
+use crate::config::{FolderConfiguration, FolderDeviceConfiguration, FolderType};
 use crate::db::Db;
 use crate::model_core::{model, newFolderConfiguration, NewModelWithRuntime};
 use serde::Deserialize;
@@ -46,6 +46,23 @@ pub(crate) struct DaemonConfig {
     pub(crate) memory_max_mb: Option<usize>,
     pub(crate) max_peers: usize,
     pub(crate) once: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SyncthingConfigBootstrap {
+    local_device_id: Option<String>,
+    folder_labels: BTreeMap<String, String>,
+    folder_devices: BTreeMap<String, Vec<String>>,
+    device_configs: BTreeMap<String, Value>,
+    listen_addresses: Vec<String>,
+    global_announce_servers: Vec<String>,
+    ur_accepted: Option<i32>,
+    ur_seen: Option<i32>,
+    progress_update_interval_s: Option<i32>,
+    crash_reporting_enabled: Option<bool>,
+    gui_address: Option<String>,
+    gui_theme: Option<String>,
+    gui_use_tls: Option<bool>,
 }
 
 pub(crate) fn parse_daemon_args(args: &[String]) -> Result<DaemonConfig, String> {
@@ -231,6 +248,7 @@ pub(crate) fn parse_daemon_args(args: &[String]) -> Result<DaemonConfig, String>
 }
 
 pub(crate) fn run_daemon(config: DaemonConfig) -> Result<(), String> {
+    let bootstrap = load_syncthing_config_bootstrap();
     let model = Arc::new(RwLock::new(NewModelWithRuntime(
         config.db_root.as_ref().map(PathBuf::from),
         config.memory_max_mb,
@@ -239,8 +257,41 @@ pub(crate) fn run_daemon(config: DaemonConfig) -> Result<(), String> {
         let mut guard = model
             .write()
             .map_err(|_| "model lock poisoned".to_string())?;
+        if let Some(local_id) = bootstrap
+            .as_ref()
+            .and_then(|cfg| cfg.local_device_id.as_ref())
+            .map(|id| id.trim())
+            .filter(|id| !id.is_empty())
+        {
+            guard.id = local_id.to_string();
+            guard.shortID = local_id.chars().take(7).collect::<String>();
+        }
         for folder in &config.folders {
-            guard.newFolder(newFolderConfiguration(&folder.id, &folder.path));
+            let mut cfg = newFolderConfiguration(&folder.id, &folder.path);
+            if let Some(bootstrap_cfg) = bootstrap.as_ref() {
+                if let Some(label) = bootstrap_cfg.folder_labels.get(&folder.id) {
+                    cfg.label = label.clone();
+                }
+                if let Some(device_ids) = bootstrap_cfg.folder_devices.get(&folder.id) {
+                    cfg.devices = device_ids
+                        .iter()
+                        .filter(|id| !id.trim().is_empty())
+                        .map(|device_id| FolderDeviceConfiguration {
+                            device_id: device_id.clone(),
+                            introduced_by: String::new(),
+                            encryption_password: String::new(),
+                        })
+                        .collect();
+                }
+            }
+            if cfg.devices.is_empty() {
+                cfg.devices.push(FolderDeviceConfiguration {
+                    device_id: guard.id.clone(),
+                    introduced_by: String::new(),
+                    encryption_password: String::new(),
+                });
+            }
+            guard.newFolder(cfg);
         }
     }
 
@@ -252,13 +303,25 @@ pub(crate) fn run_daemon(config: DaemonConfig) -> Result<(), String> {
             .map_err(|_| "model lock poisoned".to_string())?
             .id
             .clone();
+        let state = Arc::new(RwLock::new(ApiRuntimeState::new(&local_id)));
+        if let Some(bootstrap_cfg) = bootstrap.as_ref() {
+            if let Ok(mut guard) = state.write() {
+                apply_syncthing_bootstrap_to_api_state(
+                    &mut guard,
+                    bootstrap_cfg,
+                    &local_id,
+                    api_addr,
+                );
+            }
+        }
         let runtime = DaemonApiRuntime {
             model: model.clone(),
-            state: Arc::new(RwLock::new(ApiRuntimeState::new(&local_id))),
+            state,
             active_peers: active_peers.clone(),
             max_peers: config.max_peers,
             start_time: SystemTime::now(),
             bep_listen_addr: config.listen_addr.clone(),
+            gui_listen_addr: api_addr.clone(),
             shutdown_requested: shutdown_requested.clone(),
             gui_root: resolve_gui_root(),
         };
@@ -301,6 +364,501 @@ fn load_runtime_config(path: &str) -> Result<RuntimeConfigFile, String> {
     Ok(cfg)
 }
 
+fn load_syncthing_config_bootstrap() -> Option<SyncthingConfigBootstrap> {
+    let path = std::env::var("SYNCTHING_CONFIG_XML")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(default_syncthing_config_xml_path)?;
+    let raw = fs::read_to_string(path).ok()?;
+    Some(parse_syncthing_config_bootstrap(&raw))
+}
+
+fn default_syncthing_config_xml_path() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(
+        PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("Syncthing")
+            .join("config.xml"),
+    )
+}
+
+fn parse_syncthing_config_bootstrap(raw: &str) -> SyncthingConfigBootstrap {
+    let mut out = SyncthingConfigBootstrap::default();
+    let mut in_folder = false;
+    let mut in_options = false;
+    let mut in_gui = false;
+    let mut in_defaults = false;
+    let mut in_defaults_folder = false;
+    let mut current_folder_id = String::new();
+
+    let mut current_device_id: Option<String> = None;
+    let mut current_device_name = String::new();
+    let mut current_device_addresses: Vec<String> = Vec::new();
+    let mut current_device_paused = false;
+    let mut current_device_compression = "metadata".to_string();
+    let mut current_device_introducer = false;
+
+    let finish_device = |out: &mut SyncthingConfigBootstrap,
+                         id: &mut Option<String>,
+                         name: &mut String,
+                         addresses: &mut Vec<String>,
+                         paused: &mut bool,
+                         compression: &mut String,
+                         introducer: &mut bool| {
+        let Some(device_id) = id.take() else {
+            return;
+        };
+        if device_id.trim().is_empty() {
+            return;
+        }
+        if addresses.is_empty() {
+            addresses.push("dynamic".to_string());
+        }
+        let display_name = if name.trim().is_empty() {
+            device_id.clone()
+        } else {
+            name.trim().to_string()
+        };
+        out.device_configs.insert(
+            device_id.clone(),
+            json!({
+                "deviceID": device_id,
+                "name": display_name,
+                "addresses": addresses.clone(),
+                "paused": *paused,
+                "compression": compression.clone(),
+                "introducer": *introducer,
+            }),
+        );
+        *name = String::new();
+        addresses.clear();
+        *paused = false;
+        *compression = "metadata".to_string();
+        *introducer = false;
+    };
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed.starts_with("<defaults") {
+            in_defaults = true;
+        } else if trimmed.starts_with("</defaults") {
+            in_defaults = false;
+            in_defaults_folder = false;
+        }
+
+        if in_defaults && trimmed.starts_with("<folder ") {
+            in_defaults_folder = true;
+        } else if in_defaults_folder && trimmed.starts_with("</folder") {
+            in_defaults_folder = false;
+        }
+
+        if in_defaults_folder && out.local_device_id.is_none() && trimmed.starts_with("<device ") {
+            if let Some(device_id) = extract_xml_attr(trimmed, "id") {
+                let decoded = decode_xml_value(device_id.trim());
+                if !decoded.is_empty() {
+                    out.local_device_id = Some(decoded);
+                }
+            }
+        }
+
+        if trimmed.starts_with("<folder ") && !in_defaults {
+            in_folder = true;
+            current_folder_id = extract_xml_attr(trimmed, "id")
+                .map(|v| decode_xml_value(v.trim()))
+                .unwrap_or_default();
+            if !current_folder_id.is_empty() {
+                let label = extract_xml_attr(trimmed, "label")
+                    .map(|v| decode_xml_value(v.trim()))
+                    .unwrap_or_default();
+                out.folder_labels.insert(current_folder_id.clone(), label);
+                out.folder_devices
+                    .entry(current_folder_id.clone())
+                    .or_default();
+            }
+        } else if in_folder && trimmed.starts_with("</folder") {
+            in_folder = false;
+            current_folder_id.clear();
+        }
+
+        if in_folder && !current_folder_id.is_empty() && trimmed.starts_with("<device ") {
+            if let Some(device_id) = extract_xml_attr(trimmed, "id") {
+                let decoded = decode_xml_value(device_id.trim());
+                if !decoded.is_empty() {
+                    let entry = out
+                        .folder_devices
+                        .entry(current_folder_id.clone())
+                        .or_default();
+                    if !entry.iter().any(|existing| existing == &decoded) {
+                        entry.push(decoded);
+                    }
+                }
+            }
+            continue;
+        }
+
+        if trimmed.starts_with("<options") {
+            in_options = true;
+            continue;
+        }
+        if trimmed.starts_with("</options") {
+            in_options = false;
+            continue;
+        }
+        if in_options {
+            if let Some(value) = extract_xml_tag_value(trimmed, "listenAddress") {
+                let decoded = decode_xml_value(value.trim());
+                if !decoded.is_empty() {
+                    out.listen_addresses.push(decoded);
+                }
+            }
+            if let Some(value) = extract_xml_tag_value(trimmed, "globalAnnounceServer") {
+                let decoded = decode_xml_value(value.trim());
+                if !decoded.is_empty() {
+                    out.global_announce_servers.push(decoded);
+                }
+            }
+            if let Some(value) = extract_xml_tag_value(trimmed, "urAccepted") {
+                if let Ok(parsed) = value.trim().parse::<i32>() {
+                    out.ur_accepted = Some(parsed);
+                }
+            }
+            if let Some(value) = extract_xml_tag_value(trimmed, "urSeen") {
+                if let Ok(parsed) = value.trim().parse::<i32>() {
+                    out.ur_seen = Some(parsed);
+                }
+            }
+            if let Some(value) = extract_xml_tag_value(trimmed, "progressUpdateIntervalS") {
+                if let Ok(parsed) = value.trim().parse::<i32>() {
+                    out.progress_update_interval_s = Some(parsed);
+                }
+            }
+            if let Some(value) = extract_xml_tag_value(trimmed, "crashReportingEnabled") {
+                out.crash_reporting_enabled = Some(parse_xml_bool(value.trim()));
+            }
+            continue;
+        }
+
+        if trimmed.starts_with("<gui ") {
+            in_gui = true;
+            if let Some(value) = extract_xml_attr(trimmed, "tls") {
+                out.gui_use_tls = Some(parse_xml_bool(value.trim()));
+            }
+            continue;
+        }
+        if trimmed.starts_with("</gui") {
+            in_gui = false;
+            continue;
+        }
+        if in_gui {
+            if let Some(value) = extract_xml_tag_value(trimmed, "address") {
+                let decoded = decode_xml_value(value.trim());
+                if !decoded.is_empty() {
+                    out.gui_address = Some(decoded);
+                }
+            }
+            if let Some(value) = extract_xml_tag_value(trimmed, "theme") {
+                let decoded = decode_xml_value(value.trim());
+                if !decoded.is_empty() {
+                    out.gui_theme = Some(decoded);
+                }
+            }
+            continue;
+        }
+
+        if !in_folder && !in_defaults && trimmed.starts_with("<device ") {
+            if current_device_id.is_some() {
+                finish_device(
+                    &mut out,
+                    &mut current_device_id,
+                    &mut current_device_name,
+                    &mut current_device_addresses,
+                    &mut current_device_paused,
+                    &mut current_device_compression,
+                    &mut current_device_introducer,
+                );
+            }
+            current_device_id = extract_xml_attr(trimmed, "id")
+                .map(|value| decode_xml_value(value.trim()))
+                .filter(|value| !value.is_empty());
+            current_device_name = extract_xml_attr(trimmed, "name")
+                .map(|value| decode_xml_value(value.trim()))
+                .unwrap_or_default();
+            current_device_compression = extract_xml_attr(trimmed, "compression")
+                .map(|value| decode_xml_value(value.trim()))
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "metadata".to_string());
+            current_device_introducer = extract_xml_attr(trimmed, "introducer")
+                .map(|value| parse_xml_bool(value.trim()))
+                .unwrap_or(false);
+            if trimmed.ends_with("/>") {
+                finish_device(
+                    &mut out,
+                    &mut current_device_id,
+                    &mut current_device_name,
+                    &mut current_device_addresses,
+                    &mut current_device_paused,
+                    &mut current_device_compression,
+                    &mut current_device_introducer,
+                );
+            }
+            continue;
+        }
+
+        if current_device_id.is_some() {
+            if let Some(value) = extract_xml_tag_value(trimmed, "address") {
+                let decoded = decode_xml_value(value.trim());
+                if !decoded.is_empty() {
+                    current_device_addresses.push(decoded);
+                }
+            }
+            if let Some(value) = extract_xml_tag_value(trimmed, "paused") {
+                current_device_paused = parse_xml_bool(value.trim());
+            }
+            if trimmed.starts_with("</device") {
+                finish_device(
+                    &mut out,
+                    &mut current_device_id,
+                    &mut current_device_name,
+                    &mut current_device_addresses,
+                    &mut current_device_paused,
+                    &mut current_device_compression,
+                    &mut current_device_introducer,
+                );
+            }
+        }
+    }
+
+    if current_device_id.is_some() {
+        finish_device(
+            &mut out,
+            &mut current_device_id,
+            &mut current_device_name,
+            &mut current_device_addresses,
+            &mut current_device_paused,
+            &mut current_device_compression,
+            &mut current_device_introducer,
+        );
+    }
+
+    if out.local_device_id.is_none() {
+        out.local_device_id = out
+            .device_configs
+            .keys()
+            .next()
+            .map(ToOwned::to_owned)
+            .filter(|id| !id.trim().is_empty());
+    }
+
+    out
+}
+
+fn apply_syncthing_bootstrap_to_api_state(
+    state: &mut ApiRuntimeState,
+    bootstrap: &SyncthingConfigBootstrap,
+    local_device_id: &str,
+    api_addr: &str,
+) {
+    if !bootstrap.device_configs.is_empty() {
+        state.device_configs = bootstrap.device_configs.clone();
+    }
+    if !state.device_configs.contains_key(local_device_id) {
+        state.device_configs.insert(
+            local_device_id.to_string(),
+            json!({
+                "deviceID": local_device_id,
+                "name": local_device_id,
+                "addresses": ["dynamic"],
+                "paused": false,
+                "compression": "metadata",
+                "introducer": false,
+            }),
+        );
+    }
+
+    ensure_api_options_defaults(&mut state.options);
+    if !bootstrap.listen_addresses.is_empty() {
+        state.options["listenAddresses"] = json!(bootstrap.listen_addresses.clone());
+    }
+    if !bootstrap.global_announce_servers.is_empty() {
+        state.options["globalAnnounceServers"] = json!(bootstrap.global_announce_servers.clone());
+    }
+    if let Some(value) = bootstrap.ur_accepted {
+        state.options["urAccepted"] = json!(value);
+    }
+    if let Some(value) = bootstrap.ur_seen {
+        state.options["urSeen"] = json!(value);
+    }
+    if let Some(value) = bootstrap.progress_update_interval_s {
+        state.options["progressUpdateIntervalS"] = json!(value);
+    }
+    if let Some(value) = bootstrap.crash_reporting_enabled {
+        state.options["crashReportingEnabled"] = json!(value);
+    }
+    if let Some(local_name) = state
+        .device_configs
+        .get(local_device_id)
+        .and_then(|cfg| cfg.get("name"))
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+    {
+        state.options["deviceName"] = json!(local_name);
+    }
+
+    ensure_api_gui_defaults(&mut state.gui);
+    if let Some(theme) = bootstrap.gui_theme.as_ref().filter(|theme| !theme.is_empty()) {
+        state.gui["theme"] = json!(theme);
+    }
+    if let Some(use_tls) = bootstrap.gui_use_tls {
+        state.gui["useTLS"] = json!(use_tls);
+    }
+    let gui_address = bootstrap
+        .gui_address
+        .as_ref()
+        .filter(|addr| !addr.trim().is_empty())
+        .cloned()
+        .unwrap_or_else(|| api_addr.to_string());
+    state.gui["address"] = json!(gui_address);
+
+    if state
+        .default_folder
+        .get("devices")
+        .and_then(Value::as_array)
+        .map(|devices| devices.is_empty())
+        .unwrap_or(true)
+    {
+        state.default_folder["devices"] = json!([{
+            "deviceID": local_device_id,
+            "introducedBy": "",
+            "encryptionPassword": "",
+        }]);
+    }
+}
+
+fn ensure_api_options_defaults(options: &mut Value) {
+    if !options.is_object() {
+        *options = json!({});
+    }
+    if !options
+        .get("listenAddresses")
+        .and_then(Value::as_array)
+        .is_some()
+    {
+        options["listenAddresses"] = json!(["default"]);
+    }
+    if !options
+        .get("globalAnnounceServers")
+        .and_then(Value::as_array)
+        .is_some()
+    {
+        options["globalAnnounceServers"] = json!(["default"]);
+    }
+    if options.get("urAccepted").and_then(Value::as_i64).is_none() {
+        options["urAccepted"] = json!(0);
+    }
+    if options.get("urSeen").and_then(Value::as_i64).is_none() {
+        options["urSeen"] = json!(3);
+    }
+    if options
+        .get("progressUpdateIntervalS")
+        .and_then(Value::as_i64)
+        .is_none()
+    {
+        options["progressUpdateIntervalS"] = json!(5);
+    }
+    if options
+        .get("crashReportingEnabled")
+        .and_then(Value::as_bool)
+        .is_none()
+    {
+        options["crashReportingEnabled"] = json!(false);
+    }
+    if !options
+        .get("unackedNotificationIDs")
+        .and_then(Value::as_array)
+        .is_some()
+    {
+        options["unackedNotificationIDs"] = json!([]);
+    }
+    if options.get("deviceName").and_then(Value::as_str).is_none() {
+        options["deviceName"] = json!("Local Device");
+    }
+}
+
+fn ensure_api_gui_defaults(gui: &mut Value) {
+    if !gui.is_object() {
+        *gui = json!({});
+    }
+    if gui.get("enabled").and_then(Value::as_bool).is_none() {
+        gui["enabled"] = json!(true);
+    }
+    if gui.get("theme").and_then(Value::as_str).is_none() {
+        gui["theme"] = json!("default");
+    }
+    if gui
+        .get("insecureAdminAccess")
+        .and_then(Value::as_bool)
+        .is_none()
+    {
+        gui["insecureAdminAccess"] = json!(false);
+    }
+    if gui.get("debugging").and_then(Value::as_bool).is_none() {
+        gui["debugging"] = json!(false);
+    }
+    if gui.get("useTLS").and_then(Value::as_bool).is_none() {
+        gui["useTLS"] = json!(false);
+    }
+    if gui.get("authMode").and_then(Value::as_str).is_none() {
+        gui["authMode"] = json!("static");
+    }
+    if gui.get("user").and_then(Value::as_str).is_none() {
+        gui["user"] = json!("");
+    }
+    if gui.get("password").and_then(Value::as_str).is_none() {
+        gui["password"] = json!("");
+    }
+}
+
+fn parse_xml_bool(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "true" | "1" | "yes" | "on"
+    )
+}
+
+fn extract_xml_attr(line: &str, key: &str) -> Option<String> {
+    let needle = format!("{key}=\"");
+    let start = line.find(&needle)? + needle.len();
+    let tail = &line[start..];
+    let end = tail.find('"')?;
+    Some(tail[..end].to_string())
+}
+
+fn extract_xml_tag_value<'a>(line: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = line.find(&open)? + open.len();
+    let end = line[start..].find(&close)? + start;
+    Some(&line[start..end])
+}
+
+fn decode_xml_value(value: &str) -> String {
+    value
+        .replace("&#34;", "\"")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
 #[derive(Clone)]
 struct DaemonApiRuntime {
     model: Arc<RwLock<model>>,
@@ -309,6 +867,7 @@ struct DaemonApiRuntime {
     max_peers: usize,
     start_time: SystemTime,
     bep_listen_addr: String,
+    gui_listen_addr: String,
     shutdown_requested: Arc<AtomicBool>,
     gui_root: Option<PathBuf>,
 }
@@ -333,6 +892,15 @@ struct ApiRuntimeState {
 impl ApiRuntimeState {
     fn new(local_device: &str) -> Self {
         let default_folder_cfg = FolderConfiguration::default();
+        let default_folder = {
+            let mut value = folder_config_to_json("default", &default_folder_cfg);
+            value["devices"] = json!([{
+                "deviceID": local_device,
+                "introducedBy": "",
+                "encryptionPassword": "",
+            }]);
+            value
+        };
         let local_device_cfg = json!({
             "deviceID": local_device,
             "name": "Local Device",
@@ -349,8 +917,15 @@ impl ApiRuntimeState {
                 "maxSendKbps": 0,
                 "maxRecvKbps": 0,
                 "urAccepted": 0,
+                "urSeen": 3,
                 "globalAnnounceEnabled": true,
                 "localAnnounceEnabled": true,
+                "listenAddresses": ["default"],
+                "globalAnnounceServers": ["default"],
+                "progressUpdateIntervalS": 5,
+                "crashReportingEnabled": false,
+                "unackedNotificationIDs": [],
+                "deviceName": "Local Device",
                 "releasesURL": "https://upgrades.syncthing.net/meta.json",
             }),
             gui: json!({
@@ -358,6 +933,11 @@ impl ApiRuntimeState {
                 "theme": "default",
                 "insecureAdminAccess": false,
                 "debugging": false,
+                "useTLS": false,
+                "authMode": "static",
+                "user": "",
+                "password": "",
+                "address": "127.0.0.1:8384",
             }),
             ldap: json!({
                 "address": "",
@@ -365,7 +945,7 @@ impl ApiRuntimeState {
                 "searchBaseDN": "",
                 "enabled": false,
             }),
-            default_folder: folder_config_to_json("default", &default_folder_cfg),
+            default_folder,
             default_device: json!({
                 "deviceID": "",
                 "name": "",
@@ -713,7 +1293,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     }),
                 );
             }
-            ApiReply::json(200, json!({ "devices": discovered }))
+            ApiReply::json(200, json!(discovered))
         }
         "/rest/system/paths" => {
             if method != &Method::Get {
@@ -1221,7 +1801,26 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     Err(_) => return make_api_error(500, "model lock poisoned"),
                 };
                 let pending = guard.PendingDevices();
-                ApiReply::json(200, json!({"devices": pending, "count": pending.len()}))
+                let now_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let mut payload = serde_json::Map::new();
+                for device_id in pending
+                    .into_iter()
+                    .map(|id| id.trim().to_string())
+                    .filter(|id| !id.is_empty())
+                {
+                    payload.insert(
+                        device_id.clone(),
+                        json!({
+                            "name": device_id,
+                            "address": "unknown",
+                            "time": now_ms,
+                        }),
+                    );
+                }
+                ApiReply::json(200, Value::Object(payload))
             }
             Method::Delete => {
                 let Some(device) = params.get("device") else {
@@ -1243,7 +1842,15 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     Err(_) => return make_api_error(500, "model lock poisoned"),
                 };
                 let pending = guard.PendingFolders();
-                ApiReply::json(200, json!({"folders": pending, "count": pending.len()}))
+                let mut payload = serde_json::Map::new();
+                for folder_id in pending
+                    .into_iter()
+                    .map(|id| id.trim().to_string())
+                    .filter(|id| !id.is_empty())
+                {
+                    payload.insert(folder_id, json!({"offeredBy": {}}));
+                }
+                ApiReply::json(200, Value::Object(payload))
             }
             Method::Delete => {
                 let Some(folder) = params.get("folder") else {
@@ -2072,10 +2679,22 @@ fn path_param<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
 }
 
 fn folder_config_to_json(id: &str, cfg: &FolderConfiguration) -> Value {
+    let devices = cfg
+        .devices
+        .iter()
+        .map(|dev| {
+            json!({
+                "deviceID": dev.device_id,
+                "introducedBy": dev.introduced_by,
+                "encryptionPassword": dev.encryption_password,
+            })
+        })
+        .collect::<Vec<_>>();
     json!({
         "id": id,
         "label": cfg.label,
         "path": cfg.path,
+        "filesystemType": "basic",
         "type": cfg.folder_type.as_str(),
         "rescanIntervalS": cfg.rescan_interval_s,
         "fsWatcherEnabled": cfg.fs_watcher_enabled,
@@ -2083,6 +2702,22 @@ fn folder_config_to_json(id: &str, cfg: &FolderConfiguration) -> Value {
         "fsWatcherTimeoutS": cfg.fs_watcher_timeout_s,
         "ignoreDelete": cfg.ignore_delete,
         "paused": cfg.paused,
+        "order": "random",
+        "maxConflicts": cfg.max_conflicts,
+        "scanProgressIntervalS": cfg.scan_progress_interval_s,
+        "pullerPauseS": cfg.puller_pause_s,
+        "pullerDelayS": cfg.puller_delay_s,
+        "copiers": cfg.copiers,
+        "hashers": cfg.hashers,
+        "pullerMaxPendingKiB": cfg.puller_max_pending_kib,
+        "devices": devices,
+        "versioning": {
+            "type": cfg.versioning.versioning_type,
+            "params": cfg.versioning.params,
+            "cleanupIntervalS": cfg.versioning.cleanup_interval_s,
+            "fsPath": cfg.versioning.fs_path,
+            "fsType": cfg.versioning.fs_type,
+        },
         "memory": {
             "maxMB": cfg.memory_max_mb,
             "policy": memory_policy_name(cfg.memory_policy),
@@ -2142,13 +2777,7 @@ fn api_events(runtime: &DaemonApiRuntime, disk_only: bool, since: u64, limit: us
         .cloned()
         .collect::<Vec<_>>();
     items.sort_by_key(|v| v.get("id").and_then(Value::as_u64).unwrap_or_default());
-    ApiReply::json(
-        200,
-        json!({
-            "count": items.len(),
-            "events": items,
-        }),
-    )
+    ApiReply::json(200, Value::Array(items))
 }
 
 fn build_config_document(runtime: &DaemonApiRuntime) -> Result<Value, String> {
@@ -2160,7 +2789,21 @@ fn build_config_document(runtime: &DaemonApiRuntime) -> Result<Value, String> {
         let mut folders = guard
             .folderCfgs
             .iter()
-            .map(|(id, cfg)| folder_config_to_json(id, cfg))
+            .map(|(id, cfg)| {
+                let mut value = folder_config_to_json(id, cfg);
+                if value["devices"]
+                    .as_array()
+                    .map(|devices| devices.is_empty())
+                    .unwrap_or(true)
+                {
+                    value["devices"] = json!([{
+                        "deviceID": guard.id.clone(),
+                        "introducedBy": "",
+                        "encryptionPassword": "",
+                    }]);
+                }
+                value
+            })
             .collect::<Vec<_>>();
         folders.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
         (folders, guard.id.clone())
@@ -2181,16 +2824,21 @@ fn build_config_document(runtime: &DaemonApiRuntime) -> Result<Value, String> {
         }));
     }
     devices.sort_by(|a, b| a["deviceID"].as_str().cmp(&b["deviceID"].as_str()));
+    let mut options = state.options.clone();
+    ensure_api_options_defaults(&mut options);
+    let mut gui = state.gui.clone();
+    ensure_api_gui_defaults(&mut gui);
     Ok(json!({
         "folders": folders,
         "devices": devices,
-        "options": state.options.clone(),
-        "gui": state.gui.clone(),
+        "options": options,
+        "gui": gui,
         "ldap": state.ldap.clone(),
+        "remoteIgnoredDevices": [],
         "defaults": {
             "folder": state.default_folder.clone(),
             "device": state.default_device.clone(),
-            "ignores": state.default_ignores.clone(),
+            "ignores": {"lines": state.default_ignores.clone()},
         },
     }))
 }
@@ -2215,7 +2863,7 @@ fn system_status(runtime: &DaemonApiRuntime) -> Result<Value, String> {
         .unwrap_or_default()
         .as_secs();
 
-    let (my_id, db_estimated_bytes, db_budget_bytes, folder_count) = {
+    let (my_id, db_estimated_bytes, db_budget_bytes, folder_count, connection_count) = {
         let guard = runtime
             .model
             .read()
@@ -2229,17 +2877,33 @@ fn system_status(runtime: &DaemonApiRuntime) -> Result<Value, String> {
             db.estimated_memory_bytes() as u64,
             db.memory_budget_bytes() as u64,
             guard.folderCfgs.len(),
+            guard.connections.len(),
         )
     };
+
+    let connection_service_status = json!({
+        runtime.bep_listen_addr.clone(): {"error": Value::Null}
+    });
+    let discovery_status = json!({
+        "local": {"error": Value::Null},
+        "global": {"error": Value::Null}
+    });
 
     Ok(json!({
         "myID": my_id,
         "startTime": start_ts,
         "uptimeS": uptime,
         "folderCount": folder_count,
+        "deviceCount": connection_count,
         "activePeers": runtime.active_peers.load(Ordering::Relaxed),
         "maxPeers": runtime.max_peers,
         "listenAddress": runtime.bep_listen_addr,
+        "guiAddressUsed": runtime.gui_listen_addr,
+        "connectionServiceStatus": connection_service_status,
+        "discoveryStatus": discovery_status,
+        "lastDialStatus": {},
+        "pathSeparator": std::path::MAIN_SEPARATOR.to_string(),
+        "urVersionMax": 3,
         "memoryEstimatedBytes": db_estimated_bytes,
         "memoryBudgetBytes": db_budget_bytes,
     }))
@@ -3039,6 +3703,7 @@ pub(crate) fn run_parity_probe(with_peer_interop: bool) -> Result<(), String> {
             max_peers: DEFAULT_MAX_PEERS,
             start_time: SystemTime::now(),
             bep_listen_addr: DEFAULT_LISTEN_ADDR.to_string(),
+            gui_listen_addr: "127.0.0.1:8384".to_string(),
             shutdown_requested: Arc::new(AtomicBool::new(false)),
             gui_root: None,
         };
@@ -3128,6 +3793,7 @@ pub(crate) fn run_api_surface_probe() -> Result<ApiSurfaceProbeResult, String> {
             max_peers: DEFAULT_MAX_PEERS,
             start_time: SystemTime::now(),
             bep_listen_addr: DEFAULT_LISTEN_ADDR.to_string(),
+            gui_listen_addr: "127.0.0.1:8384".to_string(),
             shutdown_requested: Arc::new(AtomicBool::new(false)),
             gui_root: None,
         };
@@ -3765,6 +4431,13 @@ pub(crate) fn run_api_surface_probe() -> Result<ApiSurfaceProbeResult, String> {
                 ));
             }
             let (response_kind, present_keys) = response_shape(&reply.body)?;
+            if let Some(expected_kind) = expected_api_probe_response_kind(key) {
+                if response_kind != expected_kind {
+                    return Err(format!(
+                        "api probe {key} expected response kind {expected_kind} got {response_kind}"
+                    ));
+                }
+            }
             let required_keys = required_api_probe_keys(key)
                 .iter()
                 .map(|entry| (*entry).to_string())
@@ -3773,6 +4446,13 @@ pub(crate) fn run_api_surface_probe() -> Result<ApiSurfaceProbeResult, String> {
                 if !present_keys.iter().any(|present| present == required_key) {
                     return Err(format!(
                         "api probe {key} missing required response key {required_key}"
+                    ));
+                }
+            }
+            for forbidden_key in forbidden_api_probe_keys(key) {
+                if present_keys.iter().any(|present| present == forbidden_key) {
+                    return Err(format!(
+                        "api probe {key} returned forbidden wrapper key {forbidden_key}"
                     ));
                 }
             }
@@ -3798,6 +4478,18 @@ pub(crate) fn run_api_surface_probe() -> Result<ApiSurfaceProbeResult, String> {
     result
 }
 
+fn expected_api_probe_response_kind(endpoint: &str) -> Option<&'static str> {
+    match endpoint {
+        "GET /rest/events" | "GET /rest/events/disk" => Some("array"),
+        "GET /rest/system/discovery"
+        | "GET /rest/cluster/pending/devices"
+        | "GET /rest/cluster/pending/folders"
+        | "GET /rest/system/status"
+        | "GET /rest/config" => Some("object"),
+        _ => None,
+    }
+}
+
 fn required_api_probe_keys(endpoint: &str) -> &'static [&'static str] {
     match endpoint {
         "GET /rest/system/version" => &["version", "longVersion", "os", "arch"],
@@ -3806,7 +4498,24 @@ fn required_api_probe_keys(endpoint: &str) -> &'static [&'static str] {
             "uptimeS",
             "memoryEstimatedBytes",
             "memoryBudgetBytes",
+            "guiAddressUsed",
+            "connectionServiceStatus",
+            "discoveryStatus",
+            "urVersionMax",
         ],
+        "GET /rest/config" => &[
+            "devices",
+            "folders",
+            "options",
+            "gui",
+            "defaults",
+            "remoteIgnoredDevices",
+        ],
+        "GET /rest/config/options" => {
+            &["listenAddresses", "globalAnnounceServers", "progressUpdateIntervalS"]
+        }
+        "GET /rest/config/gui" => &["address", "theme", "useTLS"],
+        "GET /rest/config/defaults/ignores" => &["lines"],
         "GET /rest/system/connections" => &["total", "connections"],
         "GET /rest/system/config/folders" => &["count", "folders"],
         "GET /rest/db/status" => &["folder", "state", "localFiles", "needFiles"],
@@ -3827,6 +4536,15 @@ fn required_api_probe_keys(endpoint: &str) -> &'static [&'static str] {
         "POST /rest/system/config/folders" => &["added", "folder"],
         "POST /rest/system/config/restart" => &["restarted", "folder"],
         "DELETE /rest/system/config/folders" => &["removed", "folder"],
+        _ => &[],
+    }
+}
+
+fn forbidden_api_probe_keys(endpoint: &str) -> &'static [&'static str] {
+    match endpoint {
+        "GET /rest/system/discovery" => &["devices"],
+        "GET /rest/cluster/pending/devices" => &["count", "devices"],
+        "GET /rest/cluster/pending/folders" => &["count", "folders"],
         _ => &[],
     }
 }
@@ -4112,6 +4830,80 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn parse_syncthing_config_bootstrap_extracts_devices_and_options() {
+        let xml = r#"
+<configuration version="51">
+    <folder id="main" label="Main" path="~/Sync" type="sendreceive">
+        <device id="LOCAL-DEVICE" introducedBy="">
+        </device>
+        <device id="PEER-DEVICE" introducedBy="">
+        </device>
+    </folder>
+    <device id="LOCAL-DEVICE" name="Mac&#34;Book" compression="always" introducer="false">
+        <address>dynamic</address>
+        <paused>false</paused>
+    </device>
+    <device id="PEER-DEVICE" name="Peer Device" compression="metadata" introducer="true">
+        <address>tcp://192.168.1.10:22000</address>
+    </device>
+    <gui enabled="true" tls="true">
+        <address>127.0.0.1:8384</address>
+        <theme>black</theme>
+    </gui>
+    <options>
+        <listenAddress>default</listenAddress>
+        <globalAnnounceServer>default</globalAnnounceServer>
+        <urAccepted>-1</urAccepted>
+        <urSeen>3</urSeen>
+        <progressUpdateIntervalS>5</progressUpdateIntervalS>
+        <crashReportingEnabled>true</crashReportingEnabled>
+    </options>
+    <defaults>
+        <folder id="" label="" path="" type="sendreceive">
+            <device id="LOCAL-DEVICE" introducedBy="">
+            </device>
+        </folder>
+    </defaults>
+</configuration>
+"#;
+
+        let parsed = parse_syncthing_config_bootstrap(xml);
+        assert_eq!(parsed.local_device_id.as_deref(), Some("LOCAL-DEVICE"));
+        assert_eq!(
+            parsed.folder_labels.get("main").map(String::as_str),
+            Some("Main")
+        );
+        assert_eq!(
+            parsed
+                .folder_devices
+                .get("main")
+                .cloned()
+                .unwrap_or_default(),
+            vec!["LOCAL-DEVICE".to_string(), "PEER-DEVICE".to_string()]
+        );
+        assert_eq!(
+            parsed.device_configs["LOCAL-DEVICE"]["name"].as_str(),
+            Some("Mac\"Book")
+        );
+        assert_eq!(
+            parsed.device_configs["PEER-DEVICE"]["addresses"]
+                .as_array()
+                .and_then(|entries| entries.first())
+                .and_then(Value::as_str),
+            Some("tcp://192.168.1.10:22000")
+        );
+        assert_eq!(parsed.listen_addresses, vec!["default".to_string()]);
+        assert_eq!(parsed.global_announce_servers, vec!["default".to_string()]);
+        assert_eq!(parsed.ur_accepted, Some(-1));
+        assert_eq!(parsed.ur_seen, Some(3));
+        assert_eq!(parsed.progress_update_interval_s, Some(5));
+        assert_eq!(parsed.crash_reporting_enabled, Some(true));
+        assert_eq!(parsed.gui_address.as_deref(), Some("127.0.0.1:8384"));
+        assert_eq!(parsed.gui_theme.as_deref(), Some("black"));
+        assert_eq!(parsed.gui_use_tls, Some(true));
+    }
+
     fn test_api_runtime(
         model: Arc<RwLock<model>>,
         _folders: Vec<FolderSpec>,
@@ -4125,6 +4917,7 @@ mod tests {
             max_peers: 16,
             start_time: SystemTime::now(),
             bep_listen_addr: "127.0.0.1:22000".to_string(),
+            gui_listen_addr: "127.0.0.1:8384".to_string(),
             shutdown_requested: Arc::new(AtomicBool::new(false)),
             gui_root: None,
         };
@@ -4244,6 +5037,147 @@ mod tests {
         let payload: Value = serde_json::from_slice(&reply.body).expect("decode json");
         assert_eq!(payload["total"], 0);
         assert!(payload["connections"].is_object());
+    }
+
+    #[test]
+    fn api_gui_contract_endpoints_return_expected_shapes() {
+        let root = temp_root("api-gui-contract");
+        let model = Arc::new(RwLock::new(NewModel()));
+        {
+            let mut guard = model.write().expect("lock");
+            guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+            guard.foldersRunning.insert("default".to_string(), false);
+            guard.connections.insert(
+                "PEER-A".to_string(),
+                crate::model_core::ConnectionStats {
+                    Address: "tcp://peer-a:22000".to_string(),
+                    Connected: false,
+                    ..Default::default()
+                },
+            );
+        }
+        let runtime = test_api_runtime(model, Vec::new(), 0);
+        append_event(
+            &runtime,
+            "ConfigSaved",
+            json!({"section":"devices","id":"PEER-A"}),
+            false,
+        );
+        append_event(
+            &runtime,
+            "LocalIndexUpdated",
+            json!({"folder":"default"}),
+            true,
+        );
+
+        let events = build_api_response(&Method::Get, "/rest/events?since=0&limit=10", &runtime);
+        assert_eq!(events.status_code, StatusCode(200));
+        let events_payload: Value = serde_json::from_slice(&events.body).expect("decode json");
+        assert!(events_payload.is_array());
+        assert!(events_payload.as_array().map_or(0, Vec::len) >= 1);
+
+        let events_disk =
+            build_api_response(&Method::Get, "/rest/events/disk?since=0&limit=10", &runtime);
+        assert_eq!(events_disk.status_code, StatusCode(200));
+        let events_disk_payload: Value =
+            serde_json::from_slice(&events_disk.body).expect("decode json");
+        assert!(events_disk_payload.is_array());
+        assert_eq!(events_disk_payload.as_array().map_or(0, Vec::len), 1);
+
+        let discovery = build_api_response(&Method::Get, "/rest/system/discovery", &runtime);
+        assert_eq!(discovery.status_code, StatusCode(200));
+        let discovery_payload: Value = serde_json::from_slice(&discovery.body).expect("decode json");
+        assert!(discovery_payload.is_object());
+        assert!(discovery_payload.get("devices").is_none());
+        assert_eq!(
+            discovery_payload["PEER-A"]["addresses"]
+                .as_array()
+                .and_then(|addresses| addresses.first())
+                .and_then(Value::as_str),
+            Some("tcp://peer-a:22000")
+        );
+
+        let pending_devices =
+            build_api_response(&Method::Get, "/rest/cluster/pending/devices", &runtime);
+        assert_eq!(pending_devices.status_code, StatusCode(200));
+        let pending_devices_payload: Value =
+            serde_json::from_slice(&pending_devices.body).expect("decode json");
+        assert!(pending_devices_payload.is_object());
+        assert!(pending_devices_payload.get("count").is_none());
+        assert!(pending_devices_payload.get("devices").is_none());
+        assert_eq!(
+            pending_devices_payload["PEER-A"]["name"].as_str(),
+            Some("PEER-A")
+        );
+        assert!(pending_devices_payload["PEER-A"]["time"].as_u64().is_some());
+
+        let pending_folders =
+            build_api_response(&Method::Get, "/rest/cluster/pending/folders", &runtime);
+        assert_eq!(pending_folders.status_code, StatusCode(200));
+        let pending_folders_payload: Value =
+            serde_json::from_slice(&pending_folders.body).expect("decode json");
+        assert!(pending_folders_payload.is_object());
+        assert!(pending_folders_payload.get("count").is_none());
+        assert!(pending_folders_payload.get("folders").is_none());
+        assert!(pending_folders_payload["default"]["offeredBy"].is_object());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn api_config_and_status_include_gui_required_fields() {
+        let root = temp_root("api-config-status-shape");
+        let model = Arc::new(RwLock::new(NewModel()));
+        {
+            let mut guard = model.write().expect("lock");
+            guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+        }
+        let runtime = test_api_runtime(model, Vec::new(), 0);
+
+        let config = build_api_response(&Method::Get, "/rest/config", &runtime);
+        assert_eq!(config.status_code, StatusCode(200));
+        let config_payload: Value = serde_json::from_slice(&config.body).expect("decode json");
+        assert!(config_payload["devices"].is_array());
+        assert!(config_payload["folders"].is_array());
+        assert!(config_payload["options"]["listenAddresses"].is_array());
+        assert!(config_payload["options"]["globalAnnounceServers"].is_array());
+        assert!(config_payload["gui"]["address"].is_string());
+        assert!(config_payload["gui"]["theme"].is_string());
+        assert!(config_payload["gui"]["useTLS"].is_boolean());
+        assert!(config_payload["defaults"]["ignores"]["lines"].is_array());
+        assert!(config_payload["remoteIgnoredDevices"].is_array());
+        assert!(
+            config_payload["folders"][0]["devices"]
+                .as_array()
+                .map_or(false, |devices| !devices.is_empty())
+        );
+        assert!(
+            config_payload["folders"][0]["devices"][0]["deviceID"]
+                .as_str()
+                .is_some()
+        );
+
+        let status = build_api_response(&Method::Get, "/rest/system/status", &runtime);
+        assert_eq!(status.status_code, StatusCode(200));
+        let status_payload: Value = serde_json::from_slice(&status.body).expect("decode json");
+        assert!(status_payload["myID"].as_str().is_some());
+        assert!(status_payload["guiAddressUsed"].is_string());
+        assert!(status_payload["connectionServiceStatus"].is_object());
+        assert!(status_payload["discoveryStatus"].is_object());
+        assert!(status_payload["urVersionMax"].as_i64().is_some());
+        assert!(
+            config_payload["devices"]
+                .as_array()
+                .map(|devices| {
+                    devices.iter().any(|dev| {
+                        dev.get("deviceID").and_then(Value::as_str)
+                            == status_payload["myID"].as_str()
+                    })
+                })
+                .unwrap_or(false)
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

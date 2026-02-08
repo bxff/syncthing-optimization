@@ -42,6 +42,9 @@
     "recvonly",
     "recvenc"
   ],
+  "required_external_soak_scenarios": [
+    "external-soak-replacement"
+  ],
   "required_memory_diagnostic_fields": [
     "folder",
     "subsystem",

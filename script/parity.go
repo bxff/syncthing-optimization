@@ -189,6 +189,7 @@ type replacementGates struct {
 	RequiredAPIEndpoints           []string `json:"required_api_endpoints"`
 	RequiredBEPMessageTypes        []string `json:"required_bep_message_types"`
 	RequiredFolderModes            []string `json:"required_folder_modes"`
+	RequiredExternalSoakScenarios  []string `json:"required_external_soak_scenarios"`
 	RequiredMemoryDiagnosticFields []string `json:"required_memory_diagnostic_fields"`
 	RequiredDurabilityFields       []string `json:"required_durability_fields"`
 }
@@ -1155,7 +1156,9 @@ func validateReplacementScenarioEvidence(report *guardrailReport, ev requiredTes
 			observed = "synthetic"
 		}
 		required := "daemon"
-		if scenarioHasTag(ev, id, "interop") {
+		if scenarioHasTag(ev, id, "external-soak") {
+			required = "external-soak"
+		} else if scenarioHasTag(ev, id, "interop") {
 			required = "peer-interop"
 		}
 
@@ -1192,11 +1195,74 @@ func validateReplacementCapabilityCoverage(report *guardrailReport) {
 	validateReplacementAPIEndpointCoverage(report, gates.RequiredAPIEndpoints)
 	validateReplacementProtocolCoverage(report, gates.RequiredBEPMessageTypes)
 	validateReplacementFolderModeCoverage(report, gates.RequiredFolderModes)
+	validateReplacementExternalSoak(report, gates.RequiredExternalSoakScenarios)
 	validateReplacementMemoryDiagnosticsCoverage(report, gates.RequiredMemoryDiagnosticFields)
 	validateReplacementDurabilityCoverage(report, gates.RequiredDurabilityFields)
 	validateGoVsRustRESTSurface(report)
 	validateGoVsRustProtocolSurface(report)
 	validateGoVsRustFolderModeSurface(report)
+}
+
+func validateReplacementExternalSoak(report *guardrailReport, required []string) {
+	if len(required) == 0 {
+		return
+	}
+
+	for _, id := range required {
+		scenarioID := strings.TrimSpace(id)
+		if scenarioID == "" {
+			continue
+		}
+
+		outcome, found, err := readScenarioOutcome(scenarioID)
+		if err != nil {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "replacement-external-soak",
+				Path:    "parity/diff-reports/latest.json",
+				Message: fmt.Sprintf("failed to read latest differential report for %q", scenarioID),
+			})
+			continue
+		}
+		if !found {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "replacement-external-soak",
+				Path:    "parity/diff-reports/latest.json",
+				Message: fmt.Sprintf("required external soak scenario %q missing from latest differential report", scenarioID),
+			})
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(outcome.Status)) != "pass" {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "replacement-external-soak",
+				Path:    "parity/diff-reports/latest.json",
+				Message: fmt.Sprintf("external soak scenario %q must pass for replacement readiness (status=%q)", scenarioID, outcome.Status),
+			})
+			continue
+		}
+
+		goEvidence := normalizeScenarioEvidence(outcome.GoEvidence)
+		rustEvidence := normalizeScenarioEvidence(outcome.RustEvidence)
+		if goEvidence == "" {
+			goEvidence = normalizeScenarioEvidence(outcome.Evidence)
+		}
+		if rustEvidence == "" {
+			rustEvidence = normalizeScenarioEvidence(outcome.Evidence)
+		}
+		if goEvidence == "" {
+			goEvidence = "synthetic"
+		}
+		if rustEvidence == "" {
+			rustEvidence = "synthetic"
+		}
+		requiredRank := scenarioEvidenceRank("external-soak")
+		if scenarioEvidenceRank(goEvidence) < requiredRank || scenarioEvidenceRank(rustEvidence) < requiredRank {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "replacement-external-soak",
+				Path:    "parity/diff-reports/latest.json",
+				Message: fmt.Sprintf("external soak scenario %q requires external-soak evidence for both sides (go=%q rust=%q)", scenarioID, goEvidence, rustEvidence),
+			})
+		}
+	}
 }
 
 func validateReplacementAPIEndpointCoverage(report *guardrailReport, required []string) {
@@ -2249,6 +2315,8 @@ func normalizeScenarioEvidence(evidence string) string {
 		return "daemon"
 	case "peer-interop", "interop":
 		return "peer-interop"
+	case "external-soak", "soak":
+		return "external-soak"
 	default:
 		return ""
 	}
@@ -2264,6 +2332,8 @@ func scenarioEvidenceRank(evidence string) int {
 		return 2
 	case "peer-interop":
 		return 3
+	case "external-soak":
+		return 4
 	default:
 		return 0
 	}

@@ -907,8 +907,9 @@ impl folder {
             return Err(format!("scan root not a directory: {}", root.display()));
         }
 
-        let mut spill_dir = root.join(".stfolder");
-        spill_dir.push("scan-spill");
+        // `.stfolder` is a marker file in Syncthing folders, so spill files must live elsewhere.
+        let mut spill_dir = root.join(".stscan-spill");
+        spill_dir.push("walk");
         fs::create_dir_all(&spill_dir).map_err(|e| format!("create spill dir: {e}"))?;
         let spill_threshold = self.config.memory_scan_spill_threshold_entries.max(1) as usize;
         let walk_cfg = WalkConfig::new(&spill_dir).with_spill_threshold_entries(spill_threshold);
@@ -1133,6 +1134,8 @@ fn path_in_scopes(path: &str, subdirs: &[String]) -> bool {
 fn should_skip_scan_path(path: &str) -> bool {
     path.starts_with(".stfolder/")
         || path == ".stfolder"
+        || path.starts_with(".stscan-spill/")
+        || path == ".stscan-spill"
         || path.starts_with(".syncthing.")
         || path.ends_with("/.DS_Store")
         || path.ends_with(".tmp")

@@ -1,6 +1,9 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -300,6 +303,96 @@ func TestValidateReplacementScenarioEvidenceAllowsStrongEvidence(t *testing.T) {
 	}
 }
 
+func TestValidateReplacementScenarioEvidenceRequiresExternalSoakWhenTagged(t *testing.T) {
+	report := &guardrailReport{}
+	ev := requiredTestEvidence{
+		RequiredScenarioIDs: map[string]struct{}{
+			"external-soak-replacement": {},
+		},
+		ScenarioOutcome: map[string]string{
+			"external-soak-replacement": "pass",
+		},
+		ScenarioEvidence: map[string]string{
+			"external-soak-replacement": "daemon",
+		},
+		ScenarioTags: map[string]map[string]struct{}{
+			"external-soak-replacement": {
+				"external-soak": {},
+			},
+		},
+	}
+
+	validateReplacementScenarioEvidence(report, ev)
+
+	if len(report.Failures) != 1 {
+		t.Fatalf("expected 1 failure, got %#v", report.Failures)
+	}
+	if report.Failures[0].Rule != "replacement-scenario-evidence" {
+		t.Fatalf("unexpected rule: %s", report.Failures[0].Rule)
+	}
+	if !strings.Contains(report.Failures[0].Message, "external-soak") {
+		t.Fatalf("unexpected message: %s", report.Failures[0].Message)
+	}
+}
+
+func TestNormalizeScenarioEvidenceSupportsExternalSoak(t *testing.T) {
+	if got := normalizeScenarioEvidence("soak"); got != "external-soak" {
+		t.Fatalf("expected soak to normalize to external-soak, got %q", got)
+	}
+	if rank := scenarioEvidenceRank("external-soak"); rank <= scenarioEvidenceRank("peer-interop") {
+		t.Fatalf("expected external-soak rank to be above peer-interop, got %d", rank)
+	}
+}
+
+func TestValidateReplacementExternalSoakRejectsWeakEvidence(t *testing.T) {
+	withTempRepoLayout(t, func() {
+		writeLatestDiffReport(t, differentialReport{
+			SchemaVersion: schemaVersion,
+			GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+			Scenarios: []diffScenario{
+				{
+					ID:           "external-soak-replacement",
+					Status:       "pass",
+					GoEvidence:   "daemon",
+					RustEvidence: "external-soak",
+				},
+			},
+		})
+
+		report := &guardrailReport{}
+		validateReplacementExternalSoak(report, []string{"external-soak-replacement"})
+		if len(report.Failures) != 1 {
+			t.Fatalf("expected 1 failure, got %#v", report.Failures)
+		}
+		if report.Failures[0].Rule != "replacement-external-soak" {
+			t.Fatalf("unexpected rule: %s", report.Failures[0].Rule)
+		}
+	})
+}
+
+func TestValidateReplacementExternalSoakAcceptsBothSidesSoakEvidence(t *testing.T) {
+	withTempRepoLayout(t, func() {
+		writeLatestDiffReport(t, differentialReport{
+			SchemaVersion: schemaVersion,
+			GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+			Scenarios: []diffScenario{
+				{
+					ID:           "external-soak-replacement",
+					Status:       "pass",
+					GoEvidence:   "external-soak",
+					RustEvidence: "external-soak",
+				},
+			},
+		})
+
+		report := &guardrailReport{}
+		validateReplacementExternalSoak(report, []string{"external-soak-replacement"})
+		if len(report.Failures) != 0 {
+			t.Fatalf("expected no failures, got %#v", report.Failures)
+		}
+	})
+}
+
 func TestToStringSetHandlesStringSlicesAndAnySlices(t *testing.T) {
 	fromStrings := toStringSet([]string{"a", " ", "b"})
 	if _, ok := fromStrings["a"]; !ok {
@@ -410,5 +503,38 @@ func TestExtractGoRESTSurfaceContainsKnownEndpoint(t *testing.T) {
 	}
 	if _, ok := surface["GET /rest/system/version"]; !ok {
 		t.Fatalf("expected go rest surface to contain GET /rest/system/version")
+	}
+}
+
+func withTempRepoLayout(t *testing.T, fn func()) {
+	t.Helper()
+	dir := t.TempDir()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir temp dir: %v", err)
+	}
+	t.Cleanup(func() {
+		if chdirErr := os.Chdir(wd); chdirErr != nil {
+			t.Fatalf("restore wd: %v", chdirErr)
+		}
+	})
+	if err := os.MkdirAll(filepath.Join("parity", "diff-reports"), 0o755); err != nil {
+		t.Fatalf("mkdir diff reports: %v", err)
+	}
+	fn()
+}
+
+func writeLatestDiffReport(t *testing.T, report differentialReport) {
+	t.Helper()
+	bs, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal report: %v", err)
+	}
+	path := filepath.Join("parity", "diff-reports", "latest.json")
+	if err := os.WriteFile(path, bs, 0o644); err != nil {
+		t.Fatalf("write report: %v", err)
 	}
 }

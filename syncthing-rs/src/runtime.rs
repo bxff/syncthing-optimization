@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -245,6 +245,7 @@ pub(crate) fn run_daemon(config: DaemonConfig) -> Result<(), String> {
     }
 
     let active_peers = Arc::new(AtomicUsize::new(0));
+    let shutdown_requested = Arc::new(AtomicBool::new(false));
     if let Some(api_addr) = config.api_listen_addr.as_ref() {
         let local_id = model
             .lock()
@@ -258,13 +259,21 @@ pub(crate) fn run_daemon(config: DaemonConfig) -> Result<(), String> {
             max_peers: config.max_peers,
             start_time: SystemTime::now(),
             bep_listen_addr: config.listen_addr.clone(),
+            shutdown_requested: shutdown_requested.clone(),
         };
         let _api_thread = start_api_server(api_addr, runtime)?;
     }
 
     let listener = TcpListener::bind(&config.listen_addr)
         .map_err(|err| format!("listen {}: {err}", config.listen_addr))?;
-    run_daemon_with_listener(listener, model, config.once, config.max_peers, active_peers)
+    run_daemon_with_listener(
+        listener,
+        model,
+        config.once,
+        config.max_peers,
+        active_peers,
+        shutdown_requested,
+    )
 }
 
 fn load_runtime_config(path: &str) -> Result<RuntimeConfigFile, String> {
@@ -299,6 +308,7 @@ struct DaemonApiRuntime {
     max_peers: usize,
     start_time: SystemTime,
     bep_listen_addr: String,
+    shutdown_requested: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Debug)]
@@ -880,6 +890,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             if method != &Method::Post {
                 return make_api_error(405, "method not allowed");
             }
+            runtime.shutdown_requested.store(true, Ordering::Release);
             append_event(
                 runtime,
                 "ConfigSaved",
@@ -2645,12 +2656,24 @@ fn run_daemon_with_listener(
     once: bool,
     max_peers: usize,
     active_peers: Arc<AtomicUsize>,
+    shutdown_requested: Arc<AtomicBool>,
 ) -> Result<(), String> {
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| format!("set listener nonblocking: {err}"))?;
     let mut peer_seq = 0_u64;
     loop {
-        let (mut stream, addr) = listener
-            .accept()
-            .map_err(|err| format!("accept connection: {err}"))?;
+        if shutdown_requested.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let (mut stream, addr) = match listener.accept() {
+            Ok(conn) => conn,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            Err(err) => return Err(format!("accept connection: {err}")),
+        };
         if once {
             let peer_id = addr.to_string();
             handle_peer_connection(&mut stream, &peer_id, &model)?;
@@ -2835,6 +2858,7 @@ pub(crate) fn run_parity_probe(with_peer_interop: bool) -> Result<(), String> {
             max_peers: DEFAULT_MAX_PEERS,
             start_time: SystemTime::now(),
             bep_listen_addr: DEFAULT_LISTEN_ADDR.to_string(),
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
         };
 
         ensure_api_ok(&build_api_response(
@@ -2908,6 +2932,7 @@ pub(crate) fn run_api_surface_probe() -> Result<Vec<String>, String> {
             max_peers: DEFAULT_MAX_PEERS,
             start_time: SystemTime::now(),
             bep_listen_addr: DEFAULT_LISTEN_ADDR.to_string(),
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
         };
 
         let cases: Vec<(&str, Method, String, u16)> = vec![
@@ -3827,6 +3852,7 @@ mod tests {
             max_peers: 16,
             start_time: SystemTime::now(),
             bep_listen_addr: "127.0.0.1:22000".to_string(),
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
         };
         runtime
     }
@@ -3839,6 +3865,16 @@ mod tests {
         assert_eq!(reply.status_code, StatusCode(200));
         let payload: Value = serde_json::from_slice(&reply.body).expect("decode json");
         assert_eq!(payload["ping"], "pong");
+    }
+
+    #[test]
+    fn api_shutdown_endpoint_sets_shutdown_flag() {
+        let runtime = test_api_runtime(Arc::new(Mutex::new(NewModel())), Vec::new(), 0);
+        assert!(!runtime.shutdown_requested.load(Ordering::Acquire));
+
+        let reply = build_api_response(&Method::Post, "/rest/system/shutdown", &runtime);
+        assert_eq!(reply.status_code, StatusCode(200));
+        assert!(runtime.shutdown_requested.load(Ordering::Acquire));
     }
 
     #[test]

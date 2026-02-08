@@ -203,6 +203,41 @@
       }
     },
     {
+      "id": "external-soak-replacement",
+      "description": "Run real daemon processes (Go and Rust), configure a folder, scan, verify status and shutdown semantics.",
+      "severity": "P0",
+      "required": false,
+      "tags": [
+        "core",
+        "external-soak"
+      ],
+      "comparator": "json-equal",
+      "go": {
+        "command": [
+          "go",
+          "run",
+          "./script/parity_external_soak.go",
+          "scenario",
+          "external-soak-replacement",
+          "--impl",
+          "go"
+        ],
+        "snapshot_path": "parity/harness/snapshots/go-external-soak-replacement.json"
+      },
+      "rust": {
+        "command": [
+          "go",
+          "run",
+          "./script/parity_external_soak.go",
+          "scenario",
+          "external-soak-replacement",
+          "--impl",
+          "rust"
+        ],
+        "snapshot_path": "parity/harness/snapshots/rust-external-soak-replacement.json"
+      }
+    },
+    {
       "id": "path-order-invariant",
       "description": "Validate deterministic filesystem walk order matches ordered DB cursor scans.",
       "severity": "P0",

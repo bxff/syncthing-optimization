@@ -458,6 +458,8 @@ func inferSideEvidence(side sideConfig) string {
 
 	cmd := strings.ToLower(strings.Join(side.Command, " "))
 	switch {
+	case strings.Contains(cmd, "parity_external_soak.go"):
+		return "external-soak"
 	case strings.Contains(cmd, "interop-scenario") || strings.Contains(cmd, "peer-interop"):
 		return "peer-interop"
 	case strings.Contains(cmd, "daemon-scenario"):
@@ -485,6 +487,8 @@ func normalizeScenarioEvidence(evidence string) string {
 		return "daemon"
 	case "peer-interop", "interop":
 		return "peer-interop"
+	case "external-soak", "soak":
+		return "external-soak"
 	default:
 		return ""
 	}
@@ -500,6 +504,8 @@ func scenarioEvidenceRank(evidence string) int {
 		return 2
 	case "peer-interop":
 		return 3
+	case "external-soak":
+		return 4
 	default:
 		return 0
 	}

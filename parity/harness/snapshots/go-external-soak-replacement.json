@@ -1,0 +1,24 @@
+{
+  "checks": {
+    "daemon_boot_ok": true,
+    "folder_configured": true,
+    "global_files_at_least_expected": true,
+    "local_files_at_least_expected": true,
+    "need_files_zero": true,
+    "scan_ok": true,
+    "shutdown_requested": true,
+    "status_ok": true,
+    "status_state_valid": true
+  },
+  "metrics": {
+    "expected_local_files": 2,
+    "global_files": 2,
+    "local_files": 2,
+    "need_files": 0,
+    "scan_attempts": 1,
+    "status_poll_attempts": 1
+  },
+  "scenario": "external-soak-replacement",
+  "source": "go",
+  "status": "validated"
+}

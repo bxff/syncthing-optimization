@@ -79,3 +79,20 @@ func TestInferSideEvidenceDetectsInteropScenarioCommand(t *testing.T) {
 		t.Fatalf("expected peer-interop evidence, got %q", evidence)
 	}
 }
+
+func TestInferSideEvidenceDetectsExternalSoakScenarioCommand(t *testing.T) {
+	evidence := inferSideEvidence(sideConfig{
+		Command: []string{
+			"go",
+			"run",
+			"./script/parity_external_soak.go",
+			"scenario",
+			"external-soak-replacement",
+			"--impl",
+			"rust",
+		},
+	})
+	if evidence != "external-soak" {
+		t.Fatalf("expected external-soak evidence, got %q", evidence)
+	}
+}

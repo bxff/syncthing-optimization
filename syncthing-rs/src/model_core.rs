@@ -14,7 +14,7 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 pub(crate) static ErrFolderMissing: &str = "folder missing";
 pub(crate) static ErrFolderNotRunning: &str = "folder not running";
@@ -297,7 +297,7 @@ pub(crate) struct model {
     pub(crate) indexHandlers: BTreeMap<String, String>,
     pub(crate) globalRequestLimiter: usize,
     pub(crate) mut_count: usize,
-    pub(crate) sdb: Arc<Mutex<db::WalFreeDb>>,
+    pub(crate) sdb: Arc<RwLock<db::WalFreeDb>>,
     pub(crate) evLogger: Vec<String>,
     pub(crate) fatalChan: Option<String>,
 }
@@ -354,7 +354,7 @@ fn model_with_runtime(db_root: PathBuf, db_memory_cap_mb: usize) -> model {
         indexHandlers: BTreeMap::new(),
         globalRequestLimiter: 4,
         mut_count: 0,
-        sdb: Arc::new(Mutex::new(sdb)),
+        sdb: Arc::new(RwLock::new(sdb)),
         evLogger: Vec::new(),
         fatalChan: None,
     }
@@ -552,7 +552,7 @@ impl model {
 
     pub(crate) fn CurrentFolderFile(&self, folder_id: &str, path: &str) -> Option<db::FileInfo> {
         self.sdb
-            .lock()
+            .read()
             .ok()?
             .get_device_file(folder_id, "local", path)
             .ok()
@@ -561,7 +561,7 @@ impl model {
 
     pub(crate) fn CurrentGlobalFile(&self, folder_id: &str, path: &str) -> Option<db::FileInfo> {
         self.sdb
-            .lock()
+            .read()
             .ok()?
             .get_global_file(folder_id, path)
             .ok()
@@ -592,7 +592,7 @@ impl model {
 
     pub(crate) fn LocalFiles(&self, folder_id: &str) -> Vec<db::FileInfo> {
         self.sdb
-            .lock()
+            .read()
             .ok()
             .and_then(|db| db.all_local_files(folder_id, "local").ok())
             .unwrap_or_default()
@@ -605,7 +605,7 @@ impl model {
         limit: usize,
     ) -> Vec<db::FileInfo> {
         self.sdb
-            .lock()
+            .read()
             .ok()
             .and_then(|db| {
                 db.all_local_files_by_sequence(folder_id, "local", from, limit)
@@ -624,7 +624,7 @@ impl model {
 
     pub(crate) fn AllGlobalFiles(&self, folder_id: &str) -> Vec<db::FileMetadata> {
         self.sdb
-            .lock()
+            .read()
             .ok()
             .and_then(|db| db.all_global_files(folder_id).ok())
             .unwrap_or_default()
@@ -632,7 +632,7 @@ impl model {
 
     pub(crate) fn AllForBlocksHash(&self, folder_id: &str, hash: &[u8]) -> Vec<db::FileMetadata> {
         self.sdb
-            .lock()
+            .read()
             .ok()
             .and_then(|db| db.all_local_files_with_blocks_hash(folder_id, hash).ok())
             .unwrap_or_default()
@@ -640,7 +640,7 @@ impl model {
 
     pub(crate) fn Availability(&self, folder_id: &str, path: &str) -> Vec<Availability> {
         self.sdb
-            .lock()
+            .read()
             .ok()
             .and_then(|db| db.get_global_availability(folder_id, path).ok())
             .unwrap_or_default()
@@ -668,7 +668,7 @@ impl model {
 
     pub(crate) fn NeedFolderFiles(&self, folder_id: &str) -> Vec<db::FileInfo> {
         self.sdb
-            .lock()
+            .read()
             .ok()
             .and_then(|db| {
                 db.all_needed_global_files(folder_id, "local", db::PullOrder::Alphabetic, 10_000, 0)
@@ -698,7 +698,7 @@ impl model {
 
     pub(crate) fn RemoteSequences(&self, folder_id: &str) -> BTreeMap<String, i64> {
         self.sdb
-            .lock()
+            .read()
             .ok()
             .and_then(|db| db.remote_sequences(folder_id).ok())
             .unwrap_or_default()
@@ -876,7 +876,7 @@ impl model {
 
     pub(crate) fn Sequence(&self, folder_id: &str) -> i64 {
         self.sdb
-            .lock()
+            .read()
             .ok()
             .and_then(|db| db.get_device_sequence(folder_id, "local").ok())
             .unwrap_or(0)
@@ -1039,7 +1039,7 @@ impl model {
     pub(crate) fn Index(&mut self, folder_id: &str, files: &[db::FileInfo]) -> Result<(), String> {
         let mut db = self
             .sdb
-            .lock()
+            .write()
             .map_err(|_| "db lock poisoned".to_string())?;
         db.update(folder_id, "remote", files.to_vec())
     }
@@ -1619,7 +1619,7 @@ mod tests {
         fs::create_dir_all(&root).expect("mkdir");
 
         let m = NewModelWithRuntime(Some(root.clone()), Some(7));
-        let db = m.sdb.lock().expect("lock db");
+        let db = m.sdb.read().expect("lock db");
         assert_eq!(db.runtime_root(), &root);
         assert_eq!(db.memory_budget_bytes(), 7 * 1024 * 1024);
 

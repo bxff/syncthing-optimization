@@ -14,7 +14,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::UNIX_EPOCH;
 
 pub(crate) const deletedBatchSize: usize = 1000;
@@ -355,7 +355,7 @@ impl streamingCFiler {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct folder {
     pub(crate) config: FolderConfiguration,
-    pub(crate) db: Arc<Mutex<db::WalFreeDb>>,
+    pub(crate) db: Arc<RwLock<db::WalFreeDb>>,
     pub(crate) runtimeMemoryBudget: Arc<RuntimeMemoryBudget>,
     pub(crate) forcedRescanPaths: BTreeSet<String>,
     pub(crate) scanScheduled: bool,
@@ -432,16 +432,16 @@ fn runtime_memory_budget_registry() -> &'static Mutex<BTreeMap<String, Arc<Runti
     REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-fn runtime_budget_key(db: &Arc<Mutex<db::WalFreeDb>>, cfg: &FolderConfiguration) -> String {
+fn runtime_budget_key(db: &Arc<RwLock<db::WalFreeDb>>, cfg: &FolderConfiguration) -> String {
     let runtime_root = db
-        .lock()
+        .read()
         .map(|guard| guard.runtime_root().to_string_lossy().to_string())
         .unwrap_or_else(|_| "unknown-runtime".to_string());
     format!("{runtime_root}:{}MB", cfg.memory_max_mb.max(1))
 }
 
 fn runtime_budget_for_folder(
-    db: &Arc<Mutex<db::WalFreeDb>>,
+    db: &Arc<RwLock<db::WalFreeDb>>,
     cfg: &FolderConfiguration,
 ) -> Arc<RuntimeMemoryBudget> {
     let key = runtime_budget_key(db, cfg);
@@ -630,7 +630,7 @@ impl folder {
         }
 
         let (estimated, budget) = {
-            let db = self.db.lock().map_err(|_| "db lock poisoned".to_string())?;
+            let db = self.db.read().map_err(|_| "db lock poisoned".to_string())?;
             let estimated = db.estimated_memory_bytes();
             let budget = db.memory_budget_bytes();
             (estimated, budget)
@@ -690,7 +690,7 @@ impl folder {
         let folder_root = PathBuf::from(&self.config.path);
         loop {
             let (needed_batch, next_cursor, batch_total_blocks, batch_reused_blocks) = {
-                let db = self.db.lock().map_err(|_| "db lock poisoned".to_string())?;
+                let db = self.db.read().map_err(|_| "db lock poisoned".to_string())?;
                 let page = db
                     .all_needed_global_files_ordered_page(
                         &self.config.id,
@@ -797,7 +797,10 @@ impl folder {
 
             if !local_updates.is_empty() {
                 pulled_count = pulled_count.saturating_add(local_updates.len());
-                let mut db = self.db.lock().map_err(|_| "db lock poisoned".to_string())?;
+                let mut db = self
+                    .db
+                    .write()
+                    .map_err(|_| "db lock poisoned".to_string())?;
                 db.update(&self.config.id, LOCAL_DEVICE_ID, local_updates)
                     .map_err(|e| format!("pull apply update: {e}"))?;
             }
@@ -830,7 +833,7 @@ impl folder {
     pub(crate) fn MemoryTelemetry(&self) -> MemoryTelemetry {
         let (estimated_bytes, budget_bytes) = self
             .db
-            .lock()
+            .read()
             .map(|db| (db.estimated_memory_bytes(), db.memory_budget_bytes()))
             .unwrap_or((0, 0));
         let soft_limit_bytes = if budget_bytes == 0 {
@@ -915,7 +918,10 @@ impl folder {
         let walk_cfg = WalkConfig::new(&spill_dir).with_spill_threshold_entries(spill_threshold);
         let scopes = resolve_scan_scopes(&root, subdirs)?;
 
-        let mut db = self.db.lock().map_err(|_| "db lock poisoned".to_string())?;
+        let mut db = self
+            .db
+            .write()
+            .map_err(|_| "db lock poisoned".to_string())?;
         let mut cursor = LocalFileCursor::default();
         let mut current_local = cursor.next(&db, &self.config.id, LOCAL_DEVICE_ID)?;
         let mut next_sequence = db
@@ -1839,7 +1845,7 @@ impl receiveEncryptedFolder {
     }
 }
 
-pub(crate) fn newFolder(config: FolderConfiguration, db: Arc<Mutex<db::WalFreeDb>>) -> folder {
+pub(crate) fn newFolder(config: FolderConfiguration, db: Arc<RwLock<db::WalFreeDb>>) -> folder {
     let runtimeMemoryBudget = runtime_budget_for_folder(&db, &config);
     folder {
         config,
@@ -1851,7 +1857,7 @@ pub(crate) fn newFolder(config: FolderConfiguration, db: Arc<Mutex<db::WalFreeDb
 
 pub(crate) fn newSendReceiveFolder(
     config: FolderConfiguration,
-    db: Arc<Mutex<db::WalFreeDb>>,
+    db: Arc<RwLock<db::WalFreeDb>>,
 ) -> sendReceiveFolder {
     sendReceiveFolder {
         folder: newFolder(config, db),
@@ -1862,7 +1868,7 @@ pub(crate) fn newSendReceiveFolder(
 
 pub(crate) fn newReceiveOnlyFolder(
     config: FolderConfiguration,
-    db: Arc<Mutex<db::WalFreeDb>>,
+    db: Arc<RwLock<db::WalFreeDb>>,
 ) -> receiveOnlyFolder {
     receiveOnlyFolder {
         sendReceiveFolder: newSendReceiveFolder(config, db),
@@ -1871,7 +1877,7 @@ pub(crate) fn newReceiveOnlyFolder(
 
 pub(crate) fn newReceiveEncryptedFolder(
     config: FolderConfiguration,
-    db: Arc<Mutex<db::WalFreeDb>>,
+    db: Arc<RwLock<db::WalFreeDb>>,
 ) -> receiveEncryptedFolder {
     let mut f = newSendReceiveFolder(config, db);
     f.folder.localFlags |= FlagMode::Encrypted as u32;
@@ -2001,7 +2007,7 @@ mod tests {
     #[test]
     fn sendrecv_handles_queue() {
         let cfg = FolderConfiguration::default();
-        let db = Arc::new(Mutex::new(db::WalFreeDb::default()));
+        let db = Arc::new(RwLock::new(db::WalFreeDb::default()));
         let mut f = newSendReceiveFolder(cfg, db);
         f.pullBlock("a.txt").expect("queue");
         let copied = f.pullerRoutine().expect("puller");
@@ -2011,7 +2017,7 @@ mod tests {
     #[test]
     fn sendrecv_applies_disk_mutations_for_file_and_dir_paths() {
         let root = temp_root("sendrecv-disk-mutations");
-        let db = Arc::new(Mutex::new(db::WalFreeDb::default()));
+        let db = Arc::new(RwLock::new(db::WalFreeDb::default()));
         let mut f = newSendReceiveFolder(scan_cfg(&root), db);
 
         f.handleDir("dir/sub").expect("create dir");
@@ -2043,7 +2049,7 @@ mod tests {
     #[test]
     fn sendrecv_rename_file_updates_disk_state() {
         let root = temp_root("sendrecv-rename");
-        let db = Arc::new(Mutex::new(db::WalFreeDb::default()));
+        let db = Arc::new(RwLock::new(db::WalFreeDb::default()));
         let f = newSendReceiveFolder(scan_cfg(&root), db);
 
         let old_path = root.join("old.txt");
@@ -2062,7 +2068,7 @@ mod tests {
     #[test]
     fn sendrecv_records_copy_errors_when_disk_target_is_directory() {
         let root = temp_root("sendrecv-copy-errors");
-        let db = Arc::new(Mutex::new(db::WalFreeDb::default()));
+        let db = Arc::new(RwLock::new(db::WalFreeDb::default()));
         let mut f = newSendReceiveFolder(scan_cfg(&root), db);
 
         fs::create_dir_all(root.join("dir")).expect("mkdir dir");
@@ -2107,7 +2113,7 @@ mod tests {
         )
         .expect("update remote");
 
-        let db = Arc::new(Mutex::new(dbv));
+        let db = Arc::new(RwLock::new(dbv));
         let mut cfg = FolderConfiguration::default();
         cfg.id = "default".to_string();
         cfg.path = root.to_string_lossy().to_string();
@@ -2121,7 +2127,7 @@ mod tests {
         assert_eq!(stats.reused_same_path_blocks, 2);
         assert_eq!(stats.fetched_blocks, 1);
         assert!(!stats.hard_blocked);
-        let guard = f.db.lock().expect("db lock");
+        let guard = f.db.read().expect("db lock");
         let synced = guard
             .get_device_file("default", "local", "same.txt")
             .expect("lookup")
@@ -2156,7 +2162,7 @@ mod tests {
         )
         .expect("update remote");
 
-        let db = Arc::new(Mutex::new(dbv));
+        let db = Arc::new(RwLock::new(dbv));
         let mut cfg = FolderConfiguration::default();
         cfg.id = "default".to_string();
         cfg.path = root.to_string_lossy().to_string();
@@ -2183,7 +2189,7 @@ mod tests {
             .expect("update local");
         dbv.update("default", "remote", vec![file("remote.txt", 2, &["h2"])])
             .expect("update remote");
-        let db = Arc::new(Mutex::new(dbv));
+        let db = Arc::new(RwLock::new(dbv));
 
         let mut cfg = scan_cfg(&root);
         cfg.folder_type = crate::config::FolderType::SendOnly;
@@ -2191,7 +2197,7 @@ mod tests {
         let pulled = f.pull().expect("pull");
         assert_eq!(pulled, 0);
 
-        let guard = db.lock().expect("db lock");
+        let guard = db.read().expect("db lock");
         assert!(
             guard
                 .get_device_file("default", "local", "remote.txt")
@@ -2209,7 +2215,7 @@ mod tests {
         let root_a = temp_root("shared-budget-a");
         let root_b = temp_root("shared-budget-b");
         let db_root = temp_root("shared-budget-db");
-        let db = Arc::new(Mutex::new(
+        let db = Arc::new(RwLock::new(
             db::WalFreeDb::open_runtime(&db_root, 64).expect("open runtime db"),
         ));
 
@@ -2246,7 +2252,7 @@ mod tests {
         )
         .expect("update remote");
 
-        let db = Arc::new(Mutex::new(dbv));
+        let db = Arc::new(RwLock::new(dbv));
         let mut cfg = FolderConfiguration::default();
         cfg.id = "default".to_string();
         cfg.path = root.to_string_lossy().to_string();
@@ -2293,7 +2299,7 @@ mod tests {
         dbv.update("default", "remote", vec![remote])
             .expect("update remote");
 
-        let db = Arc::new(Mutex::new(dbv));
+        let db = Arc::new(RwLock::new(dbv));
         let mut cfg = FolderConfiguration::default();
         cfg.id = "default".to_string();
         cfg.path = root.to_string_lossy().to_string();
@@ -2330,7 +2336,7 @@ mod tests {
         dbv.update("default", "remote", vec![deleted])
             .expect("update remote delete");
 
-        let db = Arc::new(Mutex::new(dbv));
+        let db = Arc::new(RwLock::new(dbv));
         let mut cfg = FolderConfiguration::default();
         cfg.id = "default".to_string();
         cfg.path = root.to_string_lossy().to_string();
@@ -2340,7 +2346,7 @@ mod tests {
         let pulled = f.pull().expect("pull");
         assert_eq!(pulled, 1);
 
-        let guard = f.db.lock().expect("db lock");
+        let guard = f.db.read().expect("db lock");
         let local = guard
             .get_device_file("default", "local", "gone.txt")
             .expect("lookup")
@@ -2370,7 +2376,7 @@ mod tests {
         )
         .expect("update remote");
 
-        let db = Arc::new(Mutex::new(dbv));
+        let db = Arc::new(RwLock::new(dbv));
         let mut cfg = FolderConfiguration::default();
         cfg.id = "default".to_string();
         cfg.path = root.to_string_lossy().to_string();
@@ -2398,7 +2404,7 @@ mod tests {
         dbv.update("default", "remote", vec![remote.clone()])
             .expect("update remote");
 
-        let db = Arc::new(Mutex::new(dbv));
+        let db = Arc::new(RwLock::new(dbv));
         let mut cfg = FolderConfiguration::default();
         cfg.id = "default".to_string();
         cfg.path = root.to_string_lossy().to_string();
@@ -2411,7 +2417,7 @@ mod tests {
         assert!(on_disk.exists());
         assert_eq!(fs::metadata(&on_disk).expect("meta").len(), 4096);
 
-        let guard = f.db.lock().expect("db lock");
+        let guard = f.db.read().expect("db lock");
         let local = guard
             .get_device_file("default", "local", "dir/new.bin")
             .expect("lookup")
@@ -2436,7 +2442,7 @@ mod tests {
         let outside = root.parent().expect("parent").join("outside.txt");
         let _ = fs::remove_file(&outside);
 
-        let db = Arc::new(Mutex::new(dbv));
+        let db = Arc::new(RwLock::new(dbv));
         let mut cfg = FolderConfiguration::default();
         cfg.id = "default".to_string();
         cfg.path = root.to_string_lossy().to_string();
@@ -2461,14 +2467,14 @@ mod tests {
         fs::write(root.join("b.txt"), b"b").expect("write");
 
         let db_root = temp_root("scan-order-db");
-        let db = Arc::new(Mutex::new(
+        let db = Arc::new(RwLock::new(
             db::WalFreeDb::open_runtime(&db_root, 50).expect("open runtime db"),
         ));
         let mut f = newFolder(scan_cfg(&root), db.clone());
         f.Scan(&[]);
 
         let ordered = db
-            .lock()
+            .read()
             .expect("db lock")
             .all_local_files_ordered("default", "local")
             .expect("all local ordered")
@@ -2488,7 +2494,7 @@ mod tests {
         fs::write(root.join("foo").join("a.txt"), b"a").expect("write foo/a");
 
         let db_root = temp_root("scan-ignore-delete-db");
-        let db = Arc::new(Mutex::new(
+        let db = Arc::new(RwLock::new(
             db::WalFreeDb::open_runtime(&db_root, 50).expect("open runtime db"),
         ));
         let mut cfg = scan_cfg(&root);
@@ -2500,7 +2506,7 @@ mod tests {
         f.Scan(&[String::from("foo")]);
 
         let fi = db
-            .lock()
+            .read()
             .expect("db lock")
             .get_device_file("default", "local", "foo/a.txt")
             .expect("lookup")
@@ -2520,7 +2526,7 @@ mod tests {
         fs::write(root.join("bar").join("b.txt"), b"b").expect("write bar/b");
 
         let db_root = temp_root("scan-scope-db");
-        let db = Arc::new(Mutex::new(
+        let db = Arc::new(RwLock::new(
             db::WalFreeDb::open_runtime(&db_root, 50).expect("open runtime db"),
         ));
         let mut f = newFolder(scan_cfg(&root), db.clone());
@@ -2529,7 +2535,7 @@ mod tests {
         fs::remove_file(root.join("foo").join("a.txt")).expect("remove foo/a");
         f.Scan(&[String::from("foo")]);
 
-        let guard = db.lock().expect("db lock");
+        let guard = db.read().expect("db lock");
         let foo = guard
             .get_device_file("default", "local", "foo/a.txt")
             .expect("lookup foo")
@@ -2555,14 +2561,14 @@ mod tests {
         fs::write(root.join("bar").join("b.txt"), b"b-v1").expect("write bar/b");
 
         let db_root = temp_root("scan-file-scope-db");
-        let db = Arc::new(Mutex::new(
+        let db = Arc::new(RwLock::new(
             db::WalFreeDb::open_runtime(&db_root, 50).expect("open runtime db"),
         ));
         let mut f = newFolder(scan_cfg(&root), db.clone());
         f.Scan(&[]);
 
         let (foo_seq_before, bar_seq_before) = {
-            let guard = db.lock().expect("db lock before");
+            let guard = db.read().expect("db lock before");
             let foo = guard
                 .get_device_file("default", "local", "foo/a.txt")
                 .expect("foo lookup")
@@ -2577,7 +2583,7 @@ mod tests {
         fs::write(root.join("bar").join("b.txt"), b"b-v2").expect("rewrite bar/b");
         f.Scan(&[String::from("bar/b.txt")]);
 
-        let guard = db.lock().expect("db lock after");
+        let guard = db.read().expect("db lock after");
         let foo = guard
             .get_device_file("default", "local", "foo/a.txt")
             .expect("foo lookup")

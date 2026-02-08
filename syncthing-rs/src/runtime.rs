@@ -2046,7 +2046,7 @@ fn system_status(runtime: &DaemonApiRuntime) -> Result<Value, String> {
             .map_err(|_| "model lock poisoned".to_string())?;
         let db = guard
             .sdb
-            .lock()
+            .read()
             .map_err(|_| "database lock poisoned".to_string())?;
         (
             guard.id.clone(),
@@ -2455,7 +2455,7 @@ fn reset_folder(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiFo
     guard.ResetFolder(folder);
     let mut db = guard
         .sdb
-        .lock()
+        .write()
         .map_err(|_| ApiFolderStatusError::Internal("database lock poisoned".to_string()))?;
     db.drop_folder(folder)
         .map_err(ApiFolderStatusError::Internal)?;
@@ -2481,7 +2481,7 @@ fn browse_local_files(
     }
     let db = guard
         .sdb
-        .lock()
+        .read()
         .map_err(|_| ApiFolderStatusError::Internal("database lock poisoned".to_string()))?;
     let page = db
         .all_local_files_ordered_page(folder, "local", cursor, limit)
@@ -2523,7 +2523,7 @@ fn browse_needed_files(
     }
     let db = guard
         .sdb
-        .lock()
+        .read()
         .map_err(|_| ApiFolderStatusError::Internal("database lock poisoned".to_string()))?;
     let page = db
         .all_needed_global_files_ordered_page(folder, "local", cursor, limit)
@@ -4047,7 +4047,7 @@ mod tests {
         {
             let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
-            let mut db = guard.sdb.lock().expect("db lock");
+            let mut db = guard.sdb.write().expect("db lock");
             db.update(
                 "default",
                 "local",
@@ -4099,7 +4099,7 @@ mod tests {
             let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
             {
-                let mut db = guard.sdb.lock().expect("db lock");
+                let mut db = guard.sdb.write().expect("db lock");
                 db.update("default", "local", vec![file_info("a.txt", 1, 10)])
                     .expect("update local");
             }
@@ -4160,7 +4160,7 @@ mod tests {
             let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
             {
-                let mut db = guard.sdb.lock().expect("db lock");
+                let mut db = guard.sdb.write().expect("db lock");
                 db.update("default", "local", vec![file_info("a.txt", 1, 10)])
                     .expect("update local");
             }
@@ -4320,7 +4320,7 @@ mod tests {
                 vec!["*.tmp".to_string(), ".DS_Store".to_string()],
             );
             {
-                let mut db = guard.sdb.lock().expect("db lock");
+                let mut db = guard.sdb.write().expect("db lock");
                 db.update("default", "local", vec![file_info("a.txt", 1, 10)])
                     .expect("update local");
             }
@@ -4376,7 +4376,7 @@ mod tests {
             let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
             {
-                let mut db = guard.sdb.lock().expect("db lock");
+                let mut db = guard.sdb.write().expect("db lock");
                 db.update("default", "local", vec![file_info("a.txt", 1, 1)])
                     .expect("update local");
             }

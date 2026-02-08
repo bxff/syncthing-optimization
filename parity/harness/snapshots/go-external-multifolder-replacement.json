@@ -1,5 +1,6 @@
 {
   "checks": {
+    "browse_order_ok": true,
     "default_folder_configured": true,
     "default_global_files_at_least_expected": true,
     "default_local_files_at_least_expected": true,
@@ -15,12 +16,22 @@
     "shutdown_requested": true
   },
   "metrics": {
-    "default_global_files": 2,
-    "default_local_files": 2,
+    "default_browse_paths": 6,
+    "default_global_files": 6,
+    "default_local_files": 6,
     "default_need_files": 0,
-    "expected_local_files": 2,
-    "media_global_files": 2,
-    "media_local_files": 2,
+    "expected_local_files": 6,
+    "expected_ordered_paths": [
+      "a/x.txt",
+      "a/z.txt",
+      "a.d/x.txt",
+      "a.d/y.txt",
+      "a.txt",
+      "nested/b.txt"
+    ],
+    "media_browse_paths": 6,
+    "media_global_files": 6,
+    "media_local_files": 6,
     "media_need_files": 0,
     "scan_attempts": 2,
     "status_poll_attempts": 2

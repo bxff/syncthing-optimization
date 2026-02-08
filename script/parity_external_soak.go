@@ -36,7 +36,17 @@ const (
 	statusTimeout                 = 30 * time.Second
 	shutdownTimeout               = 10 * time.Second
 	expectedLocalFiles            = 2
+	expectedMultiFolderFiles      = 6
 )
+
+var expectedOrderedPaths = []string{
+	"a/x.txt",
+	"a/z.txt",
+	"a.d/x.txt",
+	"a.d/y.txt",
+	"a.txt",
+	"nested/b.txt",
+}
 
 func main() {
 	if len(os.Args) < 3 || os.Args[1] != "scenario" {
@@ -161,26 +171,30 @@ func runScenarioExternalMultiFolder(impl string) (map[string]any, map[string]any
 		"media_folder_configured":                metrics.MediaFolderConfigured,
 		"scan_ok":                                metrics.ScanOK,
 		"default_status_ok":                      metrics.StatusOK,
+		"browse_order_ok":                        metrics.BrowseOrderOK,
 		"default_status_state_valid":             stateIsRunnable(metrics.DefaultState),
 		"media_status_state_valid":               stateIsRunnable(metrics.MediaState),
-		"default_local_files_at_least_expected":  metrics.DefaultLocalFiles >= expectedLocalFiles,
-		"default_global_files_at_least_expected": metrics.DefaultGlobalFiles >= expectedLocalFiles,
+		"default_local_files_at_least_expected":  metrics.DefaultLocalFiles >= expectedMultiFolderFiles,
+		"default_global_files_at_least_expected": metrics.DefaultGlobalFiles >= expectedMultiFolderFiles,
 		"default_need_files_zero":                metrics.DefaultNeedFiles == 0,
-		"media_local_files_at_least_expected":    metrics.MediaLocalFiles >= expectedLocalFiles,
-		"media_global_files_at_least_expected":   metrics.MediaGlobalFiles >= expectedLocalFiles,
+		"media_local_files_at_least_expected":    metrics.MediaLocalFiles >= expectedMultiFolderFiles,
+		"media_global_files_at_least_expected":   metrics.MediaGlobalFiles >= expectedMultiFolderFiles,
 		"media_need_files_zero":                  metrics.MediaNeedFiles == 0,
 		"shutdown_requested":                     metrics.ShutdownRequested,
 	}
 	m := map[string]any{
-		"default_local_files":  metrics.DefaultLocalFiles,
-		"default_global_files": metrics.DefaultGlobalFiles,
-		"default_need_files":   metrics.DefaultNeedFiles,
-		"media_local_files":    metrics.MediaLocalFiles,
-		"media_global_files":   metrics.MediaGlobalFiles,
-		"media_need_files":     metrics.MediaNeedFiles,
-		"expected_local_files": expectedLocalFiles,
-		"scan_attempts":        metrics.ScanAttempts,
-		"status_poll_attempts": metrics.StatusPollAttempts,
+		"default_local_files":    metrics.DefaultLocalFiles,
+		"default_global_files":   metrics.DefaultGlobalFiles,
+		"default_need_files":     metrics.DefaultNeedFiles,
+		"media_local_files":      metrics.MediaLocalFiles,
+		"media_global_files":     metrics.MediaGlobalFiles,
+		"media_need_files":       metrics.MediaNeedFiles,
+		"default_browse_paths":   metrics.DefaultBrowsePaths,
+		"media_browse_paths":     metrics.MediaBrowsePaths,
+		"expected_local_files":   expectedMultiFolderFiles,
+		"expected_ordered_paths": expectedOrderedPaths,
+		"scan_attempts":          metrics.ScanAttempts,
+		"status_poll_attempts":   metrics.StatusPollAttempts,
 	}
 	return checks, m, nil
 }
@@ -281,6 +295,7 @@ type multiFolderMetrics struct {
 	MediaFolderConfigured   bool
 	ScanOK                  bool
 	StatusOK                bool
+	BrowseOrderOK           bool
 	ShutdownRequested       bool
 	DefaultLocalFiles       int
 	DefaultGlobalFiles      int
@@ -290,6 +305,8 @@ type multiFolderMetrics struct {
 	MediaGlobalFiles        int
 	MediaNeedFiles          int
 	MediaState              string
+	DefaultBrowsePaths      int
+	MediaBrowsePaths        int
 	ScanAttempts            int
 	StatusPollAttempts      int
 }
@@ -567,10 +584,10 @@ func runGoExternalMultiFolderSoak() (multiFolderMetrics, error) {
 	homeDir := filepath.Join(root, "home")
 	defaultFolderDir := filepath.Join(root, "default-folder")
 	mediaFolderDir := filepath.Join(root, "media-folder")
-	if err := prepareSoakFolder(defaultFolderDir); err != nil {
+	if err := prepareMultiFolderSoakFolder(defaultFolderDir); err != nil {
 		return metrics, fmt.Errorf("prepare default folder: %w", err)
 	}
-	if err := prepareSoakFolder(mediaFolderDir); err != nil {
+	if err := prepareMultiFolderSoakFolder(mediaFolderDir); err != nil {
 		return metrics, fmt.Errorf("prepare media folder: %w", err)
 	}
 
@@ -661,7 +678,7 @@ func runGoExternalMultiFolderSoak() (multiFolderMetrics, error) {
 	metrics.DefaultGlobalFiles = intField(defaultStatus, "globalFiles")
 	metrics.DefaultNeedFiles = intField(defaultStatus, "needFiles")
 	metrics.DefaultState = stringField(defaultStatus, "state")
-	if metrics.DefaultLocalFiles < expectedLocalFiles || metrics.DefaultGlobalFiles < expectedLocalFiles {
+	if metrics.DefaultLocalFiles < expectedMultiFolderFiles || metrics.DefaultGlobalFiles < expectedMultiFolderFiles {
 		return metrics, fmt.Errorf("go default status did not observe expected files (local=%d global=%d need=%d)",
 			metrics.DefaultLocalFiles, metrics.DefaultGlobalFiles, metrics.DefaultNeedFiles)
 	}
@@ -676,7 +693,7 @@ func runGoExternalMultiFolderSoak() (multiFolderMetrics, error) {
 	metrics.MediaGlobalFiles = intField(mediaStatus, "globalFiles")
 	metrics.MediaNeedFiles = intField(mediaStatus, "needFiles")
 	metrics.MediaState = stringField(mediaStatus, "state")
-	if metrics.MediaLocalFiles < expectedLocalFiles || metrics.MediaGlobalFiles < expectedLocalFiles {
+	if metrics.MediaLocalFiles < expectedMultiFolderFiles || metrics.MediaGlobalFiles < expectedMultiFolderFiles {
 		return metrics, fmt.Errorf("go media status did not observe expected files (local=%d global=%d need=%d)",
 			metrics.MediaLocalFiles, metrics.MediaGlobalFiles, metrics.MediaNeedFiles)
 	}
@@ -693,6 +710,23 @@ func runGoExternalMultiFolderSoak() (multiFolderMetrics, error) {
 	if err := verifyIndexedFiles(baseURL, apiKey, "media", []string{"a.txt", "nested/b.txt"}); err != nil {
 		return metrics, fmt.Errorf("go media file verification: %w", err)
 	}
+	defaultPaths, err := browseOrderedPaths(baseURL, apiKey, "default", 128)
+	if err != nil {
+		return metrics, fmt.Errorf("go default browse order: %w", err)
+	}
+	metrics.DefaultBrowsePaths = len(defaultPaths)
+	if !equalStringSlices(defaultPaths, expectedOrderedPaths) {
+		return metrics, fmt.Errorf("go default browse order mismatch: got=%v want=%v", defaultPaths, expectedOrderedPaths)
+	}
+	mediaPaths, err := browseOrderedPaths(baseURL, apiKey, "media", 128)
+	if err != nil {
+		return metrics, fmt.Errorf("go media browse order: %w", err)
+	}
+	metrics.MediaBrowsePaths = len(mediaPaths)
+	if !equalStringSlices(mediaPaths, expectedOrderedPaths) {
+		return metrics, fmt.Errorf("go media browse order mismatch: got=%v want=%v", mediaPaths, expectedOrderedPaths)
+	}
+	metrics.BrowseOrderOK = true
 
 	if _, _, err := requestJSON(http.MethodPost, baseURL+"/rest/system/shutdown", apiKey); err != nil {
 		return metrics, fmt.Errorf("go shutdown request: %w", err)
@@ -715,10 +749,10 @@ func runRustExternalMultiFolderSoak() (multiFolderMetrics, error) {
 	defaultFolderDir := filepath.Join(root, "default-folder")
 	mediaFolderDir := filepath.Join(root, "media-folder")
 	dbRoot := filepath.Join(root, "db")
-	if err := prepareSoakFolder(defaultFolderDir); err != nil {
+	if err := prepareMultiFolderSoakFolder(defaultFolderDir); err != nil {
 		return metrics, fmt.Errorf("prepare default folder: %w", err)
 	}
-	if err := prepareSoakFolder(mediaFolderDir); err != nil {
+	if err := prepareMultiFolderSoakFolder(mediaFolderDir); err != nil {
 		return metrics, fmt.Errorf("prepare media folder: %w", err)
 	}
 	if err := os.MkdirAll(dbRoot, 0o755); err != nil {
@@ -782,7 +816,7 @@ func runRustExternalMultiFolderSoak() (multiFolderMetrics, error) {
 	metrics.DefaultGlobalFiles = intField(defaultStatus, "globalFiles")
 	metrics.DefaultNeedFiles = intField(defaultStatus, "needFiles")
 	metrics.DefaultState = stringField(defaultStatus, "state")
-	if metrics.DefaultLocalFiles < expectedLocalFiles || metrics.DefaultGlobalFiles < expectedLocalFiles {
+	if metrics.DefaultLocalFiles < expectedMultiFolderFiles || metrics.DefaultGlobalFiles < expectedMultiFolderFiles {
 		return metrics, fmt.Errorf("rust default status did not observe expected files (local=%d global=%d need=%d)",
 			metrics.DefaultLocalFiles, metrics.DefaultGlobalFiles, metrics.DefaultNeedFiles)
 	}
@@ -797,7 +831,7 @@ func runRustExternalMultiFolderSoak() (multiFolderMetrics, error) {
 	metrics.MediaGlobalFiles = intField(mediaStatus, "globalFiles")
 	metrics.MediaNeedFiles = intField(mediaStatus, "needFiles")
 	metrics.MediaState = stringField(mediaStatus, "state")
-	if metrics.MediaLocalFiles < expectedLocalFiles || metrics.MediaGlobalFiles < expectedLocalFiles {
+	if metrics.MediaLocalFiles < expectedMultiFolderFiles || metrics.MediaGlobalFiles < expectedMultiFolderFiles {
 		return metrics, fmt.Errorf("rust media status did not observe expected files (local=%d global=%d need=%d)",
 			metrics.MediaLocalFiles, metrics.MediaGlobalFiles, metrics.MediaNeedFiles)
 	}
@@ -814,6 +848,23 @@ func runRustExternalMultiFolderSoak() (multiFolderMetrics, error) {
 	if err := verifyIndexedFiles(baseURL, "", "media", []string{"a.txt", "nested/b.txt"}); err != nil {
 		return metrics, fmt.Errorf("rust media file verification: %w", err)
 	}
+	defaultPaths, err := browseOrderedPaths(baseURL, "", "default", 128)
+	if err != nil {
+		return metrics, fmt.Errorf("rust default browse order: %w", err)
+	}
+	metrics.DefaultBrowsePaths = len(defaultPaths)
+	if !equalStringSlices(defaultPaths, expectedOrderedPaths) {
+		return metrics, fmt.Errorf("rust default browse order mismatch: got=%v want=%v", defaultPaths, expectedOrderedPaths)
+	}
+	mediaPaths, err := browseOrderedPaths(baseURL, "", "media", 128)
+	if err != nil {
+		return metrics, fmt.Errorf("rust media browse order: %w", err)
+	}
+	metrics.MediaBrowsePaths = len(mediaPaths)
+	if !equalStringSlices(mediaPaths, expectedOrderedPaths) {
+		return metrics, fmt.Errorf("rust media browse order mismatch: got=%v want=%v", mediaPaths, expectedOrderedPaths)
+	}
+	metrics.BrowseOrderOK = true
 
 	if _, _, err := requestJSON(http.MethodPost, baseURL+"/rest/system/shutdown", ""); err != nil {
 		return metrics, fmt.Errorf("rust shutdown request: %w", err)
@@ -1370,6 +1421,29 @@ func prepareSoakFolder(folderDir string) error {
 	return nil
 }
 
+func prepareMultiFolderSoakFolder(folderDir string) error {
+	if err := prepareSoakFolder(folderDir); err != nil {
+		return err
+	}
+	for _, dir := range []string{"a", "a.d"} {
+		if err := os.MkdirAll(filepath.Join(folderDir, dir), 0o755); err != nil {
+			return fmt.Errorf("create %s: %w", dir, err)
+		}
+	}
+	files := map[string]string{
+		"a/x.txt":   "ax",
+		"a/z.txt":   "az",
+		"a.d/x.txt": "adx",
+		"a.d/y.txt": "ady",
+	}
+	for rel, content := range files {
+		if err := os.WriteFile(filepath.Join(folderDir, rel), []byte(content), 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", rel, err)
+		}
+	}
+	return nil
+}
+
 func parseAPIKey(configPath string) (string, error) {
 	bs, err := os.ReadFile(configPath)
 	if err != nil {
@@ -1478,7 +1552,96 @@ func verifyIndexedFiles(baseURL, apiKey, folder string, files []string) error {
 	return nil
 }
 
+func browseOrderedPaths(baseURL, apiKey, folder string, limit int) ([]string, error) {
+	query := url.Values{}
+	query.Set("folder", folder)
+	query.Set("limit", strconv.Itoa(limit))
+	target := encodeURLQuery(baseURL+"/rest/db/browse", query)
+	payloadAny, status, err := requestJSONAny(http.MethodGet, target, apiKey)
+	if err != nil {
+		return nil, fmt.Errorf("request %s: %w", target, err)
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("request %s returned status %d", target, status)
+	}
+	paths := make([]string, 0, 16)
+	if err := appendBrowsePaths(&paths, "", payloadAny); err != nil {
+		return nil, err
+	}
+	filtered := make([]string, 0, len(paths))
+	for _, p := range paths {
+		p = strings.Trim(strings.ReplaceAll(p, "\\", "/"), "/")
+		if p == "" || strings.HasSuffix(p, "/.stfolder") || p == ".stfolder" {
+			continue
+		}
+		filtered = append(filtered, p)
+	}
+	return filtered, nil
+}
+
+func appendBrowsePaths(out *[]string, parent string, payload any) error {
+	switch typed := payload.(type) {
+	case []any:
+		for _, item := range typed {
+			if err := appendBrowsePaths(out, parent, item); err != nil {
+				return err
+			}
+		}
+		return nil
+	case map[string]any:
+		if items, ok := typed["items"]; ok {
+			return appendBrowsePaths(out, parent, items)
+		}
+		if path := stringField(typed, "path"); strings.TrimSpace(path) != "" {
+			*out = append(*out, path)
+			return nil
+		}
+		name := stringField(typed, "name")
+		if strings.TrimSpace(name) == "" {
+			return nil
+		}
+		current := name
+		if parent != "" {
+			current = parent + "/" + name
+		}
+		if children, ok := typed["children"]; ok {
+			return appendBrowsePaths(out, current, children)
+		}
+		*out = append(*out, current)
+		return nil
+	default:
+		return fmt.Errorf("unsupported /rest/db/browse payload shape %T", payload)
+	}
+}
+
+func equalStringSlices(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func requestJSON(method, rawURL, apiKey string) (map[string]any, int, error) {
+	payloadAny, status, err := requestJSONAny(method, rawURL, apiKey)
+	if err != nil {
+		if payload, ok := payloadAny.(map[string]any); ok {
+			return payload, status, err
+		}
+		return nil, status, err
+	}
+	payload, ok := payloadAny.(map[string]any)
+	if !ok {
+		return nil, status, fmt.Errorf("expected object json response from %s %s", method, rawURL)
+	}
+	return payload, status, nil
+}
+
+func requestJSONAny(method, rawURL, apiKey string) (any, int, error) {
 	client := &http.Client{Timeout: httpTimeout}
 	req, err := http.NewRequest(method, rawURL, nil)
 	if err != nil {
@@ -1497,7 +1660,7 @@ func requestJSON(method, rawURL, apiKey string) (map[string]any, int, error) {
 	if err != nil {
 		return nil, resp.StatusCode, err
 	}
-	payload := map[string]any{}
+	var payload any = map[string]any{}
 	if len(bytes.TrimSpace(body)) > 0 {
 		if err := json.Unmarshal(body, &payload); err != nil {
 			return nil, resp.StatusCode, fmt.Errorf("decode json response from %s: %w", rawURL, err)

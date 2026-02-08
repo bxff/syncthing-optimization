@@ -25,7 +25,7 @@
   "source": "go",
   "state_projection": {
     "device_ids": [
-      "3E7CQNM-WTOPP65-NUYGJ5I-VIRXQZT-LDIB3W2-YUE7IJ6-34X2Y3F-R4W6IQC"
+      "QKHSSXR-B6U5F5R-FODBXQX-TTAHT3I-LARG5QO-LSGZJEJ-MSDTFJH-SLY3XQM"
     ],
     "folder_summaries": [
       {
@@ -39,13 +39,13 @@
     ],
     "invalid_pending_device_ids": [],
     "invalid_pending_folder_ids": [],
-    "my_id": "3E7CQNM-WTOPP65-NUYGJ5I-VIRXQZT-LDIB3W2-YUE7IJ6-34X2Y3F-R4W6IQC",
+    "my_id": "QKHSSXR-B6U5F5R-FODBXQX-TTAHT3I-LARG5QO-LSGZJEJ-MSDTFJH-SLY3XQM",
     "pending_device_ids": [],
     "pending_folder_ids": [],
     "phase_projection": {
       "post_restart": {
         "device_ids": [
-          "3E7CQNM-WTOPP65-NUYGJ5I-VIRXQZT-LDIB3W2-YUE7IJ6-34X2Y3F-R4W6IQC"
+          "QKHSSXR-B6U5F5R-FODBXQX-TTAHT3I-LARG5QO-LSGZJEJ-MSDTFJH-SLY3XQM"
         ],
         "folder_summaries": [
           {
@@ -59,13 +59,13 @@
         ],
         "invalid_pending_device_ids": [],
         "invalid_pending_folder_ids": [],
-        "my_id": "3E7CQNM-WTOPP65-NUYGJ5I-VIRXQZT-LDIB3W2-YUE7IJ6-34X2Y3F-R4W6IQC",
+        "my_id": "QKHSSXR-B6U5F5R-FODBXQX-TTAHT3I-LARG5QO-LSGZJEJ-MSDTFJH-SLY3XQM",
         "pending_device_ids": [],
         "pending_folder_ids": []
       },
       "pre_crash": {
         "device_ids": [
-          "3E7CQNM-WTOPP65-NUYGJ5I-VIRXQZT-LDIB3W2-YUE7IJ6-34X2Y3F-R4W6IQC"
+          "QKHSSXR-B6U5F5R-FODBXQX-TTAHT3I-LARG5QO-LSGZJEJ-MSDTFJH-SLY3XQM"
         ],
         "folder_summaries": [
           {
@@ -79,7 +79,7 @@
         ],
         "invalid_pending_device_ids": [],
         "invalid_pending_folder_ids": [],
-        "my_id": "3E7CQNM-WTOPP65-NUYGJ5I-VIRXQZT-LDIB3W2-YUE7IJ6-34X2Y3F-R4W6IQC",
+        "my_id": "QKHSSXR-B6U5F5R-FODBXQX-TTAHT3I-LARG5QO-LSGZJEJ-MSDTFJH-SLY3XQM",
         "pending_device_ids": [],
         "pending_folder_ids": []
       }

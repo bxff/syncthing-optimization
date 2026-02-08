@@ -200,8 +200,8 @@ func TestCompareSnapshotsEndpointSurfaceEnforcesRequiredReplacementEndpoints(t *
 			"covered_endpoints": []string{"GET /rest/system/version", "GET /rest/system/status"},
 		},
 	)
-	if ok {
-		t.Fatal("expected required endpoint enforcement to fail when go side is incomplete")
+	if !ok {
+		t.Fatal("expected required endpoint enforcement to allow go-side sparsity for daemon-api-surface")
 	}
 
 	ok, msg := compareSnapshots(
@@ -216,6 +216,46 @@ func TestCompareSnapshotsEndpointSurfaceEnforcesRequiredReplacementEndpoints(t *
 	)
 	if !ok {
 		t.Fatalf("expected required endpoint enforcement to pass, got msg=%q", msg)
+	}
+
+	ok, _ = compareSnapshots(
+		"daemon-api-surface",
+		"endpoint-surface",
+		map[string]any{
+			"covered_endpoints": []string{"GET /rest/system/version", "GET /rest/system/status"},
+		},
+		map[string]any{
+			"covered_endpoints": []string{"GET /rest/system/version"},
+		},
+	)
+	if ok {
+		t.Fatal("expected required endpoint enforcement to fail when rust side is incomplete")
+	}
+}
+
+func TestCompareSnapshotsEndpointSurfaceDaemonAllowsRustSuperset(t *testing.T) {
+	dir := t.TempDir()
+	gatesPath := filepath.Join(dir, "replacement-gates.json")
+	if err := os.WriteFile(gatesPath, []byte(`{"required_api_endpoints":["GET /rest/system/version"]}`), 0o644); err != nil {
+		t.Fatalf("write replacement gates: %v", err)
+	}
+	t.Setenv("PARITY_REPLACEMENT_GATES_PATH", gatesPath)
+
+	ok, msg := compareSnapshots(
+		"daemon-api-surface",
+		"endpoint-surface",
+		map[string]any{
+			"covered_endpoints": []string{"GET /rest/system/version"},
+		},
+		map[string]any{
+			"covered_endpoints": []string{
+				"GET /rest/system/version",
+				"GET /rest/system/status",
+			},
+		},
+	)
+	if !ok {
+		t.Fatalf("expected daemon-api-surface comparator to allow rust superset, got msg=%q", msg)
 	}
 }
 
@@ -375,6 +415,179 @@ func TestCompareSnapshotsNormalizedStateProjectionRejectsInvalidPendingIDs(t *te
 	}
 }
 
+func TestCompareSnapshotsNormalizedStateProjectionRejectsDifferentPeerIDs(t *testing.T) {
+	dir := t.TempDir()
+	gatesPath := filepath.Join(dir, "replacement-gates.json")
+	if err := os.WriteFile(gatesPath, []byte(`{"required_state_projection_fields":["my_id","device_ids","folder_summaries","pending_device_ids","pending_folder_ids","invalid_pending_device_ids","invalid_pending_folder_ids"]}`), 0o644); err != nil {
+		t.Fatalf("write replacement gates: %v", err)
+	}
+	t.Setenv("PARITY_REPLACEMENT_GATES_PATH", gatesPath)
+
+	ok, _ := compareSnapshots(
+		"external-soak-replacement",
+		"normalized-state-projection",
+		map[string]any{
+			"checks": map[string]any{"scan_ok": true},
+			"state_projection": map[string]any{
+				"my_id":      "LOCAL-A",
+				"device_ids": []any{"LOCAL-A", "PEER-ONE"},
+				"folder_summaries": []any{
+					map[string]any{
+						"id":           "default",
+						"local_files":  2.0,
+						"global_files": 2.0,
+						"need_files":   0.0,
+					},
+				},
+				"pending_device_ids":         []any{},
+				"pending_folder_ids":         []any{},
+				"invalid_pending_device_ids": []any{},
+				"invalid_pending_folder_ids": []any{},
+			},
+		},
+		map[string]any{
+			"checks": map[string]any{"scan_ok": true},
+			"state_projection": map[string]any{
+				"my_id":      "LOCAL-A",
+				"device_ids": []any{"LOCAL-A", "PEER-TWO"},
+				"folder_summaries": []any{
+					map[string]any{
+						"id":           "default",
+						"local_files":  2.0,
+						"global_files": 2.0,
+						"need_files":   0.0,
+					},
+				},
+				"pending_device_ids":         []any{},
+				"pending_folder_ids":         []any{},
+				"invalid_pending_device_ids": []any{},
+				"invalid_pending_folder_ids": []any{},
+			},
+		},
+	)
+	if ok {
+		t.Fatal("expected normalized-state-projection comparator to fail for different peer IDs")
+	}
+}
+
+func TestCompareSnapshotsNormalizedStateProjectionRejectsIdleVsRunning(t *testing.T) {
+	dir := t.TempDir()
+	gatesPath := filepath.Join(dir, "replacement-gates.json")
+	if err := os.WriteFile(gatesPath, []byte(`{"required_state_projection_fields":["my_id","device_ids","folder_summaries","pending_device_ids","pending_folder_ids","invalid_pending_device_ids","invalid_pending_folder_ids"]}`), 0o644); err != nil {
+		t.Fatalf("write replacement gates: %v", err)
+	}
+	t.Setenv("PARITY_REPLACEMENT_GATES_PATH", gatesPath)
+
+	ok, _ := compareSnapshots(
+		"external-soak-replacement",
+		"normalized-state-projection",
+		map[string]any{
+			"checks": map[string]any{"scan_ok": true},
+			"state_projection": map[string]any{
+				"my_id":      "LOCAL-A",
+				"device_ids": []any{"LOCAL-A"},
+				"folder_summaries": []any{
+					map[string]any{
+						"id":           "default",
+						"type":         "sendreceive",
+						"state":        "idle",
+						"local_files":  2.0,
+						"global_files": 2.0,
+						"need_files":   0.0,
+					},
+				},
+				"pending_device_ids":         []any{},
+				"pending_folder_ids":         []any{},
+				"invalid_pending_device_ids": []any{},
+				"invalid_pending_folder_ids": []any{},
+			},
+		},
+		map[string]any{
+			"checks": map[string]any{"scan_ok": true},
+			"state_projection": map[string]any{
+				"my_id":      "LOCAL-A",
+				"device_ids": []any{"LOCAL-A"},
+				"folder_summaries": []any{
+					map[string]any{
+						"id":           "default",
+						"type":         "sendreceive",
+						"state":        "running",
+						"local_files":  2.0,
+						"global_files": 2.0,
+						"need_files":   0.0,
+					},
+				},
+				"pending_device_ids":         []any{},
+				"pending_folder_ids":         []any{},
+				"invalid_pending_device_ids": []any{},
+				"invalid_pending_folder_ids": []any{},
+			},
+		},
+	)
+	if ok {
+		t.Fatal("expected normalized-state-projection comparator to fail for idle vs running mismatch")
+	}
+}
+
+func TestCompareSnapshotsNormalizedStateProjectionRecvOnlyNeedPresence(t *testing.T) {
+	dir := t.TempDir()
+	gatesPath := filepath.Join(dir, "replacement-gates.json")
+	if err := os.WriteFile(gatesPath, []byte(`{"required_state_projection_fields":["my_id","device_ids","folder_summaries","pending_device_ids","pending_folder_ids","invalid_pending_device_ids","invalid_pending_folder_ids"]}`), 0o644); err != nil {
+		t.Fatalf("write replacement gates: %v", err)
+	}
+	t.Setenv("PARITY_REPLACEMENT_GATES_PATH", gatesPath)
+
+	ok, _ := compareSnapshots(
+		"external-folder-modes-replacement",
+		"normalized-state-projection",
+		map[string]any{
+			"checks": map[string]any{"scan_ok": true},
+			"state_projection": map[string]any{
+				"my_id":      "LOCAL-A",
+				"device_ids": []any{"LOCAL-A"},
+				"folder_summaries": []any{
+					map[string]any{
+						"id":           "recvonly",
+						"type":         "recvonly",
+						"state":        "idle",
+						"local_files":  10.0,
+						"global_files": 11.0,
+						"need_files":   1.0,
+					},
+				},
+				"pending_device_ids":         []any{},
+				"pending_folder_ids":         []any{},
+				"invalid_pending_device_ids": []any{},
+				"invalid_pending_folder_ids": []any{},
+			},
+		},
+		map[string]any{
+			"checks": map[string]any{"scan_ok": true},
+			"state_projection": map[string]any{
+				"my_id":      "LOCAL-A",
+				"device_ids": []any{"LOCAL-A"},
+				"folder_summaries": []any{
+					map[string]any{
+						"id":           "recvonly",
+						"type":         "recvonly",
+						"state":        "idle",
+						"local_files":  10.0,
+						"global_files": 10.0,
+						"need_files":   0.0,
+					},
+				},
+				"pending_device_ids":         []any{},
+				"pending_folder_ids":         []any{},
+				"invalid_pending_device_ids": []any{},
+				"invalid_pending_folder_ids": []any{},
+			},
+		},
+	)
+	if ok {
+		t.Fatal("expected normalized-state-projection comparator to fail for recvonly need/global presence mismatch")
+	}
+}
+
 func TestCompareSnapshotsProtocolSemanticsIgnoresFrameSizeValues(t *testing.T) {
 	ok, msg := compareSnapshots(
 		"protocol-state-transition",
@@ -450,6 +663,58 @@ func TestCompareSnapshotsMemoryCapRejectsOverBudget(t *testing.T) {
 	}
 }
 
+func TestCompareSnapshotsMemoryCapRejectsBudgetMismatch(t *testing.T) {
+	ok, _ := compareSnapshots(
+		"memory-cap-50mb",
+		"memory-cap",
+		map[string]any{
+			"file_count":             float64(10_000),
+			"page_count":             float64(10),
+			"scanned_entries":        float64(10_000),
+			"under_budget":           true,
+			"memory_budget_bytes":    float64(100),
+			"estimated_memory_bytes": float64(50),
+		},
+		map[string]any{
+			"file_count":             float64(10_000),
+			"page_count":             float64(10),
+			"scanned_entries":        float64(10_000),
+			"under_budget":           true,
+			"memory_budget_bytes":    float64(120),
+			"estimated_memory_bytes": float64(49),
+		},
+	)
+	if ok {
+		t.Fatal("expected memory-cap comparator to fail for budget mismatch")
+	}
+}
+
+func TestCompareSnapshotsMemoryCapRejectsEstimateDivergence(t *testing.T) {
+	ok, _ := compareSnapshots(
+		"memory-cap-50mb",
+		"memory-cap",
+		map[string]any{
+			"file_count":             float64(10_000),
+			"page_count":             float64(10),
+			"scanned_entries":        float64(10_000),
+			"under_budget":           true,
+			"memory_budget_bytes":    float64(1_000),
+			"estimated_memory_bytes": float64(100),
+		},
+		map[string]any{
+			"file_count":             float64(10_000),
+			"page_count":             float64(10),
+			"scanned_entries":        float64(10_000),
+			"under_budget":           true,
+			"memory_budget_bytes":    float64(1_000),
+			"estimated_memory_bytes": float64(250),
+		},
+	)
+	if ok {
+		t.Fatal("expected memory-cap comparator to fail for large estimate divergence")
+	}
+}
+
 func TestSideWithSeedEnvAddsSeedWithoutDroppingExistingEnv(t *testing.T) {
 	side := sideConfig{
 		Command: []string{"go", "run", "./script/parity_external_soak.go"},
@@ -466,6 +731,20 @@ func TestSideWithSeedEnvAddsSeedWithoutDroppingExistingEnv(t *testing.T) {
 	}
 	if _, ok := side.Env["PARITY_SEED"]; ok {
 		t.Fatal("expected original env map to remain unmodified")
+	}
+}
+
+func TestDecodeJSONObjectPreservesLargeIntegers(t *testing.T) {
+	var out map[string]any
+	if err := decodeJSONObject([]byte(`{"sequence":9007199254740993}`), &out); err != nil {
+		t.Fatalf("decodeJSONObject failed: %v", err)
+	}
+	seq, ok := numberAsInt64(out["sequence"])
+	if !ok {
+		t.Fatal("expected numeric sequence field")
+	}
+	if seq != 9007199254740993 {
+		t.Fatalf("expected exact integer preservation, got %d", seq)
 	}
 }
 
@@ -552,6 +831,18 @@ func TestValidateSideCommandAllowsGoWrapperForRustWhenImplFlagIsRust(t *testing.
 	})
 	if err != nil {
 		t.Fatalf("expected go wrapper with --impl rust to be accepted, got %v", err)
+	}
+}
+
+func TestValidateSideCommandRejectsDuplicateImplFlags(t *testing.T) {
+	err := validateSideCommand("rust", sideConfig{
+		Command: []string{
+			"go", "run", "./script/parity_external_soak.go", "scenario", "external-soak-replacement",
+			"--impl", "rust", "--impl", "go",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected duplicate --impl flags to be rejected")
 	}
 }
 

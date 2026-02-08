@@ -544,6 +544,9 @@ func validateSideCommand(expectedSource string, side sideConfig) error {
 	cmdLine := strings.ToLower(strings.Join(side.Command, " "))
 	switch strings.ToLower(strings.TrimSpace(expectedSource)) {
 	case "go":
+		if countFlagMatches(side.Command, "--impl") > 1 {
+			return errors.New("go side command contains duplicate --impl flags")
+		}
 		if value, ok := findFlagValue(side.Command, "--impl"); ok && strings.EqualFold(value, "rust") {
 			return errors.New("go side command must not set --impl rust")
 		}
@@ -551,6 +554,9 @@ func validateSideCommand(expectedSource string, side sideConfig) error {
 			return errors.New("go side command unexpectedly references syncthing-rs")
 		}
 	case "rust":
+		if countFlagMatches(side.Command, "--impl") > 1 {
+			return errors.New("rust side command contains duplicate --impl flags")
+		}
 		if strings.Contains(cmdLine, "parity_harness_go.go") {
 			return errors.New("rust side command must not reference parity_harness_go.go")
 		}
@@ -608,6 +614,28 @@ func findFlagValue(args []string, flag string) (string, bool) {
 		return "", false
 	}
 	return value, true
+}
+
+func countFlagMatches(args []string, flag string) int {
+	normalized := strings.TrimLeft(strings.TrimSpace(flag), "-")
+	if normalized == "" {
+		return 0
+	}
+	matches := 0
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimLeft(strings.TrimSpace(args[i]), "-")
+		if arg == normalized {
+			matches++
+			if i+1 < len(args) && !strings.HasPrefix(strings.TrimSpace(args[i+1]), "-") {
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, normalized+"=") {
+			matches++
+		}
+	}
+	return matches
 }
 
 func readConfig(path string) (harnessConfig, error) {
@@ -673,7 +701,7 @@ func runCommand(side sideConfig, timeout time.Duration) (map[string]any, error) 
 	}
 
 	var out map[string]any
-	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+	if err := decodeJSONObject(stdout.Bytes(), &out); err != nil {
 		return nil, fmt.Errorf("command output is not valid JSON: %w", err)
 	}
 	return out, nil
@@ -685,10 +713,16 @@ func readSnapshot(path string) (map[string]any, error) {
 		return nil, err
 	}
 	var snap map[string]any
-	if err := json.Unmarshal(bs, &snap); err != nil {
+	if err := decodeJSONObject(bs, &snap); err != nil {
 		return nil, err
 	}
 	return snap, nil
+}
+
+func decodeJSONObject(raw []byte, out *map[string]any) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	return dec.Decode(out)
 }
 
 func compareSnapshots(scenarioID, mode string, goSnap, rustSnap map[string]any) (bool, string) {
@@ -765,6 +799,22 @@ func compareSnapshots(scenarioID, mode string, goSnap, rustSnap map[string]any) 
 				rustBudget,
 			)
 		}
+		if goBudget != rustBudget {
+			return false, fmt.Sprintf("memory budget mismatch (go=%d rust=%d)", goBudget, rustBudget)
+		}
+		high := goEstimated
+		low := rustEstimated
+		if rustEstimated > high {
+			high = rustEstimated
+			low = goEstimated
+		}
+		if low > 0 && high > low*2 {
+			return false, fmt.Sprintf(
+				"memory estimate divergence too large (go=%d rust=%d)",
+				goEstimated,
+				rustEstimated,
+			)
+		}
 		return true, ""
 	case "endpoint-surface":
 		goCovered := toStringSet(goSnap["covered_endpoints"])
@@ -777,22 +827,16 @@ func compareSnapshots(scenarioID, mode string, goSnap, rustSnap map[string]any) 
 			if len(requiredEndpoints) == 0 {
 				return false, "required api endpoints list is empty"
 			}
-			missingGoRequired := make([]string, 0)
 			missingRustRequired := make([]string, 0)
 			for _, endpoint := range requiredEndpoints {
-				if _, ok := goCovered[endpoint]; !ok {
-					missingGoRequired = append(missingGoRequired, endpoint)
-				}
 				if _, ok := rustCovered[endpoint]; !ok {
 					missingRustRequired = append(missingRustRequired, endpoint)
 				}
 			}
-			if len(missingGoRequired) > 0 || len(missingRustRequired) > 0 {
-				sort.Strings(missingGoRequired)
+			if len(missingRustRequired) > 0 {
 				sort.Strings(missingRustRequired)
 				return false, fmt.Sprintf(
-					"required endpoints missing (go_missing=%d rust_missing=%d)",
-					len(missingGoRequired),
+					"required endpoints missing in rust coverage (rust_missing=%d)",
 					len(missingRustRequired),
 				)
 			}
@@ -805,20 +849,26 @@ func compareSnapshots(scenarioID, mode string, goSnap, rustSnap map[string]any) 
 			}
 			missingInRust = append(missingInRust, endpoint)
 		}
-		missingInGo := make([]string, 0)
+		extraInRust := make([]string, 0)
 		for endpoint := range rustCovered {
 			if _, ok := goCovered[endpoint]; ok {
 				continue
 			}
-			missingInGo = append(missingInGo, endpoint)
+			extraInRust = append(extraInRust, endpoint)
 		}
 		sort.Strings(missingInRust)
-		sort.Strings(missingInGo)
-		if len(missingInRust) == 0 && len(missingInGo) == 0 {
+		sort.Strings(extraInRust)
+		// Daemon replacement parity is directional: rust must implement every
+		// Go endpoint. Rust may carry additional endpoints while migration is in
+		// progress, but those are not considered replacement blockers.
+		if scenarioID == "daemon-api-surface" && len(missingInRust) == 0 {
+			return true, ""
+		}
+		if len(missingInRust) == 0 && len(extraInRust) == 0 {
 			return true, ""
 		}
 		previewRust := missingInRust
-		previewGo := missingInGo
+		previewGo := extraInRust
 		if len(previewRust) > 12 {
 			previewRust = previewRust[:12]
 		}
@@ -828,7 +878,7 @@ func compareSnapshots(scenarioID, mode string, goSnap, rustSnap map[string]any) 
 		return false, fmt.Sprintf(
 			"endpoint sets differ (rust_missing_go=%d go_missing_rust=%d; rust_missing_preview=[%s]; go_missing_preview=[%s])",
 			len(missingInRust),
-			len(missingInGo),
+			len(extraInRust),
 			strings.Join(previewRust, ", "),
 			strings.Join(previewGo, ", "),
 		)
@@ -1124,14 +1174,15 @@ func canonicalizeStateProjectionForCompare(projection map[string]any) map[string
 		}
 		mapped := make([]string, 0, len(ids))
 		for _, id := range ids {
-			if strings.TrimSpace(id) == "" {
+			trimmed := strings.TrimSpace(id)
+			if trimmed == "" {
 				continue
 			}
-			if localID != "" && id == localID {
+			if localID != "" && trimmed == localID {
 				mapped = append(mapped, "local")
 				continue
 			}
-			mapped = append(mapped, "peer")
+			mapped = append(mapped, "peer-"+shortStableToken(trimmed))
 		}
 		sort.Strings(mapped)
 		comparable[key] = mapped
@@ -1147,13 +1198,16 @@ func canonicalizeStateProjectionForCompare(projection map[string]any) map[string
 			}
 			folderType := strings.ToLower(strings.TrimSpace(asString(summary["type"])))
 			if folderType == "recvonly" || folderType == "recvenc" {
-				// Global/need counters are implementation-specific for passive folder modes.
+				// Passive folder modes can differ in exact global counters. Keep only need
+				// presence so we still catch divergent pull/revert behavior.
+				needFiles, _ := numberAsInt64(summary["need_files"])
+				summary["has_need_files"] = needFiles > 0
 				delete(summary, "global_files")
 				delete(summary, "need_files")
 			}
 			state := strings.ToLower(strings.TrimSpace(asString(summary["state"])))
 			switch state {
-			case "running", "idle", "runnable":
+			case "running", "runnable":
 				summary["state"] = "runnable"
 			default:
 				summary["state"] = state
@@ -1162,6 +1216,11 @@ func canonicalizeStateProjectionForCompare(projection map[string]any) map[string
 	}
 
 	return comparable
+}
+
+func shortStableToken(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:4])
 }
 
 func deepCloneMap(in map[string]any) map[string]any {

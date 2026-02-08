@@ -27,27 +27,32 @@ import (
 )
 
 const (
-	externalSoakScenarioID       = "external-soak-replacement"
-	externalDurabilityScenarioID = "external-durability-restart"
-	externalCrashScenarioID      = "external-crash-recovery-restart"
-	httpTimeout                  = 5 * time.Second
-	startupTimeout               = 30 * time.Second
-	statusTimeout                = 30 * time.Second
-	shutdownTimeout              = 10 * time.Second
-	expectedLocalFiles           = 2
+	externalSoakScenarioID        = "external-soak-replacement"
+	externalMultiFolderScenarioID = "external-multifolder-replacement"
+	externalDurabilityScenarioID  = "external-durability-restart"
+	externalCrashScenarioID       = "external-crash-recovery-restart"
+	httpTimeout                   = 5 * time.Second
+	startupTimeout                = 30 * time.Second
+	statusTimeout                 = 30 * time.Second
+	shutdownTimeout               = 10 * time.Second
+	expectedLocalFiles            = 2
 )
 
 func main() {
 	if len(os.Args) < 3 || os.Args[1] != "scenario" {
 		fatalf(
-			"usage: go run ./script/parity_external_soak.go scenario <%s|%s|%s> --impl <go|rust>",
+			"usage: go run ./script/parity_external_soak.go scenario <%s|%s|%s|%s> --impl <go|rust>",
 			externalSoakScenarioID,
+			externalMultiFolderScenarioID,
 			externalDurabilityScenarioID,
 			externalCrashScenarioID,
 		)
 	}
 	id := strings.TrimSpace(os.Args[2])
-	if id != externalSoakScenarioID && id != externalDurabilityScenarioID && id != externalCrashScenarioID {
+	if id != externalSoakScenarioID &&
+		id != externalMultiFolderScenarioID &&
+		id != externalDurabilityScenarioID &&
+		id != externalCrashScenarioID {
 		fatalf("unsupported scenario id %q", id)
 	}
 
@@ -84,6 +89,8 @@ func runScenario(id, impl string) (map[string]any, map[string]any, error) {
 	switch id {
 	case externalSoakScenarioID:
 		return runScenarioExternalSoak(impl)
+	case externalMultiFolderScenarioID:
+		return runScenarioExternalMultiFolder(impl)
 	case externalDurabilityScenarioID:
 		return runScenarioExternalDurability(impl)
 	case externalCrashScenarioID:
@@ -125,6 +132,52 @@ func runScenarioExternalSoak(impl string) (map[string]any, map[string]any, error
 		"local_files":          metrics.LocalFiles,
 		"global_files":         metrics.GlobalFiles,
 		"need_files":           metrics.NeedFiles,
+		"expected_local_files": expectedLocalFiles,
+		"scan_attempts":        metrics.ScanAttempts,
+		"status_poll_attempts": metrics.StatusPollAttempts,
+	}
+	return checks, m, nil
+}
+
+func runScenarioExternalMultiFolder(impl string) (map[string]any, map[string]any, error) {
+	var (
+		metrics multiFolderMetrics
+		err     error
+	)
+	switch impl {
+	case "go":
+		metrics, err = runGoExternalMultiFolderSoak()
+	case "rust":
+		metrics, err = runRustExternalMultiFolderSoak()
+	default:
+		err = fmt.Errorf("unsupported impl %q", impl)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+
+	checks := map[string]any{
+		"default_folder_configured":              metrics.DefaultFolderConfigured,
+		"media_folder_configured":                metrics.MediaFolderConfigured,
+		"scan_ok":                                metrics.ScanOK,
+		"default_status_ok":                      metrics.StatusOK,
+		"default_status_state_valid":             stateIsRunnable(metrics.DefaultState),
+		"media_status_state_valid":               stateIsRunnable(metrics.MediaState),
+		"default_local_files_at_least_expected":  metrics.DefaultLocalFiles >= expectedLocalFiles,
+		"default_global_files_at_least_expected": metrics.DefaultGlobalFiles >= expectedLocalFiles,
+		"default_need_files_zero":                metrics.DefaultNeedFiles == 0,
+		"media_local_files_at_least_expected":    metrics.MediaLocalFiles >= expectedLocalFiles,
+		"media_global_files_at_least_expected":   metrics.MediaGlobalFiles >= expectedLocalFiles,
+		"media_need_files_zero":                  metrics.MediaNeedFiles == 0,
+		"shutdown_requested":                     metrics.ShutdownRequested,
+	}
+	m := map[string]any{
+		"default_local_files":  metrics.DefaultLocalFiles,
+		"default_global_files": metrics.DefaultGlobalFiles,
+		"default_need_files":   metrics.DefaultNeedFiles,
+		"media_local_files":    metrics.MediaLocalFiles,
+		"media_global_files":   metrics.MediaGlobalFiles,
+		"media_need_files":     metrics.MediaNeedFiles,
 		"expected_local_files": expectedLocalFiles,
 		"scan_attempts":        metrics.ScanAttempts,
 		"status_poll_attempts": metrics.StatusPollAttempts,
@@ -221,6 +274,24 @@ type soakMetrics struct {
 	State              string
 	ScanAttempts       int
 	StatusPollAttempts int
+}
+
+type multiFolderMetrics struct {
+	DefaultFolderConfigured bool
+	MediaFolderConfigured   bool
+	ScanOK                  bool
+	StatusOK                bool
+	ShutdownRequested       bool
+	DefaultLocalFiles       int
+	DefaultGlobalFiles      int
+	DefaultNeedFiles        int
+	DefaultState            string
+	MediaLocalFiles         int
+	MediaGlobalFiles        int
+	MediaNeedFiles          int
+	MediaState              string
+	ScanAttempts            int
+	StatusPollAttempts      int
 }
 
 type durabilityMetrics struct {
@@ -473,6 +544,275 @@ func runRustExternalSoak() (soakMetrics, error) {
 	}
 	if metrics.NeedFiles != 0 {
 		return metrics, fmt.Errorf("rust status expected needFiles=0, got %d", metrics.NeedFiles)
+	}
+
+	if _, _, err := requestJSON(http.MethodPost, baseURL+"/rest/system/shutdown", ""); err != nil {
+		return metrics, fmt.Errorf("rust shutdown request: %w", err)
+	}
+	metrics.ShutdownRequested = true
+	if err := proc.wait(shutdownTimeout); err != nil {
+		return metrics, fmt.Errorf("rust daemon shutdown wait: %w", err)
+	}
+	return metrics, nil
+}
+
+func runGoExternalMultiFolderSoak() (multiFolderMetrics, error) {
+	var metrics multiFolderMetrics
+	root, err := os.MkdirTemp("", "syncthing-go-external-multifolder-")
+	if err != nil {
+		return metrics, fmt.Errorf("create temp root: %w", err)
+	}
+	defer os.RemoveAll(root)
+
+	homeDir := filepath.Join(root, "home")
+	defaultFolderDir := filepath.Join(root, "default-folder")
+	mediaFolderDir := filepath.Join(root, "media-folder")
+	if err := prepareSoakFolder(defaultFolderDir); err != nil {
+		return metrics, fmt.Errorf("prepare default folder: %w", err)
+	}
+	if err := prepareSoakFolder(mediaFolderDir); err != nil {
+		return metrics, fmt.Errorf("prepare media folder: %w", err)
+	}
+
+	if err := runCmd(20*time.Second, "go", "run", "./cmd/syncthing", "generate", "--home", homeDir, "--no-port-probing"); err != nil {
+		return metrics, fmt.Errorf("generate go config: %w", err)
+	}
+	apiKey, err := parseAPIKey(filepath.Join(homeDir, "config.xml"))
+	if err != nil {
+		return metrics, err
+	}
+	apiPort, err := freePort()
+	if err != nil {
+		return metrics, err
+	}
+
+	proc := &daemonProc{
+		cmd: exec.Command(
+			"go", "run", "./cmd/syncthing", "serve",
+			"--home", homeDir,
+			"--no-browser",
+			"--no-restart",
+			"--gui-address", fmt.Sprintf("http://127.0.0.1:%d", apiPort),
+			"--log-file=-",
+		),
+	}
+	if err := proc.start(); err != nil {
+		return metrics, fmt.Errorf("start go daemon: %w", err)
+	}
+	defer proc.stop()
+
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", apiPort)
+	if err := waitForPing(baseURL, apiKey, startupTimeout); err != nil {
+		return metrics, fmt.Errorf("go daemon startup: %w (stderr=%s)", err, strings.TrimSpace(proc.stderr.String()))
+	}
+
+	if err := runCmd(
+		20*time.Second,
+		"go", "run", "./cmd/syncthing", "cli",
+		"--home", homeDir,
+		"--gui-address", fmt.Sprintf("127.0.0.1:%d", apiPort),
+		"--gui-apikey", apiKey,
+		"config", "folders", "add",
+		"--id", "default",
+		"--path", defaultFolderDir,
+		"--type", "sendreceive",
+	); err != nil {
+		return metrics, fmt.Errorf("configure go default folder: %w", err)
+	}
+	metrics.DefaultFolderConfigured = true
+
+	if err := runCmd(
+		20*time.Second,
+		"go", "run", "./cmd/syncthing", "cli",
+		"--home", homeDir,
+		"--gui-address", fmt.Sprintf("127.0.0.1:%d", apiPort),
+		"--gui-apikey", apiKey,
+		"config", "folders", "add",
+		"--id", "media",
+		"--path", mediaFolderDir,
+		"--type", "sendreceive",
+	); err != nil {
+		return metrics, fmt.Errorf("configure go media folder: %w", err)
+	}
+	metrics.MediaFolderConfigured = true
+
+	for _, folder := range []string{"default", "media"} {
+		metrics.ScanAttempts++
+		scanURL := encodeURLQuery(baseURL+"/rest/db/scan", url.Values{"folder": []string{folder}})
+		if _, _, err := requestJSON(http.MethodPost, scanURL, apiKey); err != nil {
+			return metrics, fmt.Errorf("go scan request (%s): %w", folder, err)
+		}
+	}
+	metrics.ScanOK = true
+
+	defaultStatus, defaultPolls, err := pollStatusForFolder(baseURL, apiKey, "default", statusTimeout)
+	metrics.StatusPollAttempts += defaultPolls
+	if err != nil {
+		return metrics, fmt.Errorf("go default status poll: %w", err)
+	}
+	mediaStatus, mediaPolls, err := pollStatusForFolder(baseURL, apiKey, "media", statusTimeout)
+	metrics.StatusPollAttempts += mediaPolls
+	if err != nil {
+		return metrics, fmt.Errorf("go media status poll: %w", err)
+	}
+	metrics.StatusOK = true
+
+	metrics.DefaultLocalFiles = intField(defaultStatus, "localFiles")
+	metrics.DefaultGlobalFiles = intField(defaultStatus, "globalFiles")
+	metrics.DefaultNeedFiles = intField(defaultStatus, "needFiles")
+	metrics.DefaultState = stringField(defaultStatus, "state")
+	if metrics.DefaultLocalFiles < expectedLocalFiles || metrics.DefaultGlobalFiles < expectedLocalFiles {
+		return metrics, fmt.Errorf("go default status did not observe expected files (local=%d global=%d need=%d)",
+			metrics.DefaultLocalFiles, metrics.DefaultGlobalFiles, metrics.DefaultNeedFiles)
+	}
+	if !stateIsRunnable(metrics.DefaultState) {
+		return metrics, fmt.Errorf("go default status returned unexpected state %q", metrics.DefaultState)
+	}
+	if metrics.DefaultNeedFiles != 0 {
+		return metrics, fmt.Errorf("go default status expected needFiles=0, got %d", metrics.DefaultNeedFiles)
+	}
+
+	metrics.MediaLocalFiles = intField(mediaStatus, "localFiles")
+	metrics.MediaGlobalFiles = intField(mediaStatus, "globalFiles")
+	metrics.MediaNeedFiles = intField(mediaStatus, "needFiles")
+	metrics.MediaState = stringField(mediaStatus, "state")
+	if metrics.MediaLocalFiles < expectedLocalFiles || metrics.MediaGlobalFiles < expectedLocalFiles {
+		return metrics, fmt.Errorf("go media status did not observe expected files (local=%d global=%d need=%d)",
+			metrics.MediaLocalFiles, metrics.MediaGlobalFiles, metrics.MediaNeedFiles)
+	}
+	if !stateIsRunnable(metrics.MediaState) {
+		return metrics, fmt.Errorf("go media status returned unexpected state %q", metrics.MediaState)
+	}
+	if metrics.MediaNeedFiles != 0 {
+		return metrics, fmt.Errorf("go media status expected needFiles=0, got %d", metrics.MediaNeedFiles)
+	}
+
+	if err := verifyIndexedFiles(baseURL, apiKey, "default", []string{"a.txt", "nested/b.txt"}); err != nil {
+		return metrics, fmt.Errorf("go default file verification: %w", err)
+	}
+	if err := verifyIndexedFiles(baseURL, apiKey, "media", []string{"a.txt", "nested/b.txt"}); err != nil {
+		return metrics, fmt.Errorf("go media file verification: %w", err)
+	}
+
+	if _, _, err := requestJSON(http.MethodPost, baseURL+"/rest/system/shutdown", apiKey); err != nil {
+		return metrics, fmt.Errorf("go shutdown request: %w", err)
+	}
+	metrics.ShutdownRequested = true
+	if err := proc.wait(shutdownTimeout); err != nil {
+		return metrics, fmt.Errorf("go daemon shutdown wait: %w", err)
+	}
+	return metrics, nil
+}
+
+func runRustExternalMultiFolderSoak() (multiFolderMetrics, error) {
+	var metrics multiFolderMetrics
+	root, err := os.MkdirTemp("", "syncthing-rs-external-multifolder-")
+	if err != nil {
+		return metrics, fmt.Errorf("create temp root: %w", err)
+	}
+	defer os.RemoveAll(root)
+
+	defaultFolderDir := filepath.Join(root, "default-folder")
+	mediaFolderDir := filepath.Join(root, "media-folder")
+	dbRoot := filepath.Join(root, "db")
+	if err := prepareSoakFolder(defaultFolderDir); err != nil {
+		return metrics, fmt.Errorf("prepare default folder: %w", err)
+	}
+	if err := prepareSoakFolder(mediaFolderDir); err != nil {
+		return metrics, fmt.Errorf("prepare media folder: %w", err)
+	}
+	if err := os.MkdirAll(dbRoot, 0o755); err != nil {
+		return metrics, fmt.Errorf("create rust db root: %w", err)
+	}
+
+	apiPort, err := freePort()
+	if err != nil {
+		return metrics, err
+	}
+	bepPort, err := freePort()
+	if err != nil {
+		return metrics, err
+	}
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", apiPort)
+
+	proc := &daemonProc{
+		cmd: exec.Command(
+			"cargo", "run", "--quiet", "--manifest-path", "syncthing-rs/Cargo.toml", "--",
+			"daemon",
+			"--folder", fmt.Sprintf("default:%s", defaultFolderDir),
+			"--folder", fmt.Sprintf("media:%s", mediaFolderDir),
+			"--db-root", dbRoot,
+			"--api-listen", fmt.Sprintf("127.0.0.1:%d", apiPort),
+			"--listen", fmt.Sprintf("127.0.0.1:%d", bepPort),
+		),
+	}
+	if err := proc.start(); err != nil {
+		return metrics, fmt.Errorf("start rust daemon: %w", err)
+	}
+	defer proc.stop()
+	metrics.DefaultFolderConfigured = true
+	metrics.MediaFolderConfigured = true
+
+	if err := waitForPing(baseURL, "", startupTimeout); err != nil {
+		return metrics, fmt.Errorf("rust daemon startup: %w (stderr=%s)", err, strings.TrimSpace(proc.stderr.String()))
+	}
+
+	for _, folder := range []string{"default", "media"} {
+		metrics.ScanAttempts++
+		scanURL := encodeURLQuery(baseURL+"/rest/db/scan", url.Values{"folder": []string{folder}})
+		if _, _, err := requestJSON(http.MethodPost, scanURL, ""); err != nil {
+			return metrics, fmt.Errorf("rust scan request (%s): %w", folder, err)
+		}
+	}
+	metrics.ScanOK = true
+
+	defaultStatus, defaultPolls, err := pollStatusForFolder(baseURL, "", "default", statusTimeout)
+	metrics.StatusPollAttempts += defaultPolls
+	if err != nil {
+		return metrics, fmt.Errorf("rust default status poll: %w", err)
+	}
+	mediaStatus, mediaPolls, err := pollStatusForFolder(baseURL, "", "media", statusTimeout)
+	metrics.StatusPollAttempts += mediaPolls
+	if err != nil {
+		return metrics, fmt.Errorf("rust media status poll: %w", err)
+	}
+	metrics.StatusOK = true
+
+	metrics.DefaultLocalFiles = intField(defaultStatus, "localFiles")
+	metrics.DefaultGlobalFiles = intField(defaultStatus, "globalFiles")
+	metrics.DefaultNeedFiles = intField(defaultStatus, "needFiles")
+	metrics.DefaultState = stringField(defaultStatus, "state")
+	if metrics.DefaultLocalFiles < expectedLocalFiles || metrics.DefaultGlobalFiles < expectedLocalFiles {
+		return metrics, fmt.Errorf("rust default status did not observe expected files (local=%d global=%d need=%d)",
+			metrics.DefaultLocalFiles, metrics.DefaultGlobalFiles, metrics.DefaultNeedFiles)
+	}
+	if !stateIsRunnable(metrics.DefaultState) {
+		return metrics, fmt.Errorf("rust default status returned unexpected state %q", metrics.DefaultState)
+	}
+	if metrics.DefaultNeedFiles != 0 {
+		return metrics, fmt.Errorf("rust default status expected needFiles=0, got %d", metrics.DefaultNeedFiles)
+	}
+
+	metrics.MediaLocalFiles = intField(mediaStatus, "localFiles")
+	metrics.MediaGlobalFiles = intField(mediaStatus, "globalFiles")
+	metrics.MediaNeedFiles = intField(mediaStatus, "needFiles")
+	metrics.MediaState = stringField(mediaStatus, "state")
+	if metrics.MediaLocalFiles < expectedLocalFiles || metrics.MediaGlobalFiles < expectedLocalFiles {
+		return metrics, fmt.Errorf("rust media status did not observe expected files (local=%d global=%d need=%d)",
+			metrics.MediaLocalFiles, metrics.MediaGlobalFiles, metrics.MediaNeedFiles)
+	}
+	if !stateIsRunnable(metrics.MediaState) {
+		return metrics, fmt.Errorf("rust media status returned unexpected state %q", metrics.MediaState)
+	}
+	if metrics.MediaNeedFiles != 0 {
+		return metrics, fmt.Errorf("rust media status expected needFiles=0, got %d", metrics.MediaNeedFiles)
+	}
+
+	if err := verifyIndexedFiles(baseURL, "", "default", []string{"a.txt", "nested/b.txt"}); err != nil {
+		return metrics, fmt.Errorf("rust default file verification: %w", err)
+	}
+	if err := verifyIndexedFiles(baseURL, "", "media", []string{"a.txt", "nested/b.txt"}); err != nil {
+		return metrics, fmt.Errorf("rust media file verification: %w", err)
 	}
 
 	if _, _, err := requestJSON(http.MethodPost, baseURL+"/rest/system/shutdown", ""); err != nil {
@@ -1093,12 +1433,17 @@ func waitForPing(baseURL, apiKey string, timeout time.Duration) error {
 }
 
 func pollStatus(baseURL, apiKey string, timeout time.Duration) (map[string]any, int, error) {
+	return pollStatusForFolder(baseURL, apiKey, "default", timeout)
+}
+
+func pollStatusForFolder(baseURL, apiKey, folder string, timeout time.Duration) (map[string]any, int, error) {
 	deadline := time.Now().Add(timeout)
 	polls := 0
 	var last map[string]any
+	target := encodeURLQuery(baseURL+"/rest/db/status", url.Values{"folder": []string{folder}})
 	for time.Now().Before(deadline) {
 		polls++
-		payload, status, err := requestJSON(http.MethodGet, baseURL+"/rest/db/status?folder=default", apiKey)
+		payload, status, err := requestJSON(http.MethodGet, target, apiKey)
 		if err == nil && status == http.StatusOK {
 			last = payload
 			if intField(payload, "localFiles") >= expectedLocalFiles && intField(payload, "globalFiles") >= expectedLocalFiles {
@@ -1110,7 +1455,7 @@ func pollStatus(baseURL, apiKey string, timeout time.Duration) (map[string]any, 
 	if last == nil {
 		last = map[string]any{}
 	}
-	return last, polls, fmt.Errorf("timed out waiting for status convergence")
+	return last, polls, fmt.Errorf("timed out waiting for status convergence for folder %q", folder)
 }
 
 func verifyIndexedFiles(baseURL, apiKey, folder string, files []string) error {

@@ -238,6 +238,42 @@
       }
     },
     {
+      "id": "external-multifolder-replacement",
+      "description": "Run real daemon processes (Go and Rust) with multiple configured folders and verify each folder converges independently.",
+      "severity": "P0",
+      "required": false,
+      "tags": [
+        "core",
+        "external-soak",
+        "multifolder"
+      ],
+      "comparator": "json-equal",
+      "go": {
+        "command": [
+          "go",
+          "run",
+          "./script/parity_external_soak.go",
+          "scenario",
+          "external-multifolder-replacement",
+          "--impl",
+          "go"
+        ],
+        "snapshot_path": "parity/harness/snapshots/go-external-multifolder-replacement.json"
+      },
+      "rust": {
+        "command": [
+          "go",
+          "run",
+          "./script/parity_external_soak.go",
+          "scenario",
+          "external-multifolder-replacement",
+          "--impl",
+          "rust"
+        ],
+        "snapshot_path": "parity/harness/snapshots/rust-external-multifolder-replacement.json"
+      }
+    },
+    {
       "id": "external-durability-restart",
       "description": "Run real daemon restart cycle and verify file index durability across shutdown/startup on the same disk state.",
       "severity": "P0",

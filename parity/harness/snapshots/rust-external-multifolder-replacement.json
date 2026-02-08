@@ -1,0 +1,31 @@
+{
+  "checks": {
+    "default_folder_configured": true,
+    "default_global_files_at_least_expected": true,
+    "default_local_files_at_least_expected": true,
+    "default_need_files_zero": true,
+    "default_status_ok": true,
+    "default_status_state_valid": true,
+    "media_folder_configured": true,
+    "media_global_files_at_least_expected": true,
+    "media_local_files_at_least_expected": true,
+    "media_need_files_zero": true,
+    "media_status_state_valid": true,
+    "scan_ok": true,
+    "shutdown_requested": true
+  },
+  "metrics": {
+    "default_global_files": 2,
+    "default_local_files": 2,
+    "default_need_files": 0,
+    "expected_local_files": 2,
+    "media_global_files": 2,
+    "media_local_files": 2,
+    "media_need_files": 0,
+    "scan_attempts": 2,
+    "status_poll_attempts": 2
+  },
+  "scenario": "external-multifolder-replacement",
+  "source": "rust",
+  "status": "validated"
+}

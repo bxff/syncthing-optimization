@@ -8,6 +8,7 @@ package main
 
 import (
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -41,6 +42,22 @@ var sourcePatterns = []string{
 	"lib/protocol/bep_*.go",
 	"internal/gen/bep/bep.pb.go",
 	"internal/db/interface.go",
+}
+
+var parityEvidenceInputRoots = []string{
+	"syncthing-rs/src",
+	"lib/api/api.go",
+	"lib/config",
+	"lib/model",
+	"lib/protocol",
+	"internal/db/interface.go",
+	"internal/gen/bep/bep.pb.go",
+	"parity/harness/scenarios.json",
+	"parity/replacement-gates.json",
+	"script/parity.go",
+	"script/parity_external_soak.go",
+	"script/parity_harness.go",
+	"script/parity_harness_go.go",
 }
 
 var parityCriticalRoots = []string{"rust", "crates", "syncthing-rs"}
@@ -137,6 +154,8 @@ type differentialReport struct {
 	SchemaVersion int            `json:"schema_version"`
 	GeneratedAt   string         `json:"generated_at"`
 	ProducedBy    string         `json:"produced_by,omitempty"`
+	InputRoots    []string       `json:"input_roots,omitempty"`
+	InputsDigest  string         `json:"inputs_digest,omitempty"`
 	Match         bool           `json:"match"`
 	Mismatches    []diffMismatch `json:"mismatches"`
 	Scenarios     []diffScenario `json:"scenarios"`
@@ -1321,7 +1340,159 @@ func validateReplacementAPIEndpointCoverage(report *guardrailReport, required []
 			Path:    path,
 			Message: fmt.Sprintf("rust daemon api surface missing %d required endpoints: %s", len(missing), strings.Join(missing, ", ")),
 		})
+		return
 	}
+
+	assertionsRaw, ok := snapshot["endpoint_assertions"].(map[string]any)
+	if !ok || len(assertionsRaw) == 0 {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-api-coverage",
+			Path:    path,
+			Message: "rust daemon api surface is missing endpoint_assertions",
+		})
+		return
+	}
+
+	requiredKeysByEndpoint := replacementAPIRequiredResponseKeys()
+	for _, endpoint := range required {
+		endpoint = strings.TrimSpace(endpoint)
+		if endpoint == "" {
+			continue
+		}
+		rawAssertion, found := assertionsRaw[endpoint]
+		if !found {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "replacement-api-coverage",
+				Path:    path,
+				Message: fmt.Sprintf("rust daemon api surface missing assertion for required endpoint %q", endpoint),
+			})
+			continue
+		}
+
+		assertion, ok := rawAssertion.(map[string]any)
+		if !ok {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "replacement-api-coverage",
+				Path:    path,
+				Message: fmt.Sprintf("rust daemon api assertion for %q has invalid shape", endpoint),
+			})
+			continue
+		}
+
+		statusCode, ok := jsonNumberToInt(assertion["status_code"])
+		if !ok || statusCode != 200 {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "replacement-api-coverage",
+				Path:    path,
+				Message: fmt.Sprintf("rust daemon api assertion for %q must have status_code=200 (got %v)", endpoint, assertion["status_code"]),
+			})
+		}
+
+		responseKind, ok := assertion["response_kind"].(string)
+		responseKind = strings.TrimSpace(strings.ToLower(responseKind))
+		if !ok || (responseKind != "object" && responseKind != "array") {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "replacement-api-coverage",
+				Path:    path,
+				Message: fmt.Sprintf("rust daemon api assertion for %q must have response_kind object/array (got %v)", endpoint, assertion["response_kind"]),
+			})
+		}
+
+		presentKeys := toStringSet(assertion["present_keys"])
+		requiredKeys := requiredKeysByEndpoint[endpoint]
+		if len(requiredKeys) == 0 {
+			requiredKeys = stringSliceFromAny(assertion["required_keys"])
+		}
+		for _, key := range requiredKeys {
+			key = strings.TrimSpace(key)
+			if key == "" {
+				continue
+			}
+			if _, found := presentKeys[key]; found {
+				continue
+			}
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "replacement-api-coverage",
+				Path:    path,
+				Message: fmt.Sprintf("rust daemon api assertion for %q missing required response key %q", endpoint, key),
+			})
+		}
+	}
+}
+
+func replacementAPIRequiredResponseKeys() map[string][]string {
+	return map[string][]string{
+		"GET /rest/system/version":           {"version", "longVersion", "os", "arch"},
+		"GET /rest/system/status":            {"myID", "uptimeS", "memoryEstimatedBytes", "memoryBudgetBytes"},
+		"GET /rest/system/connections":       {"total", "connections"},
+		"GET /rest/system/config/folders":    {"count", "folders"},
+		"GET /rest/db/browse":                {"folder", "limit", "items"},
+		"GET /rest/db/completion":            {"folder", "device", "completionPct", "needBytes"},
+		"GET /rest/db/file":                  {"folder", "file", "exists"},
+		"GET /rest/db/ignores":               {"folder", "count", "patterns"},
+		"GET /rest/db/jobs":                  {"folder", "state", "jobs"},
+		"GET /rest/db/localchanged":          {"folder", "count", "files"},
+		"GET /rest/db/need":                  {"folder", "limit", "items"},
+		"GET /rest/db/remoteneed":            {"folder", "device", "count", "items"},
+		"GET /rest/db/status":                {"folder", "state", "localFiles", "needFiles"},
+		"POST /rest/db/bringtofront":         {"folder", "action", "ok"},
+		"POST /rest/db/override":             {"folder", "action", "ok"},
+		"POST /rest/db/pull":                 {"folder", "state", "sequence", "pull"},
+		"POST /rest/db/reset":                {"folder", "action", "ok"},
+		"POST /rest/db/revert":               {"folder", "action", "ok"},
+		"POST /rest/db/scan":                 {"folder", "sequence", "state", "stats"},
+		"POST /rest/system/config/folders":   {"added", "folder"},
+		"POST /rest/system/config/restart":   {"restarted", "folder"},
+		"DELETE /rest/system/config/folders": {"removed", "folder"},
+	}
+}
+
+func jsonNumberToInt(raw any) (int, bool) {
+	switch typed := raw.(type) {
+	case int:
+		return typed, true
+	case int32:
+		return int(typed), true
+	case int64:
+		return int(typed), true
+	case uint:
+		return int(typed), true
+	case uint32:
+		return int(typed), true
+	case uint64:
+		return int(typed), true
+	case float64:
+		return int(typed), true
+	default:
+		return 0, false
+	}
+}
+
+func stringSliceFromAny(value any) []string {
+	out := make([]string, 0)
+	switch typed := value.(type) {
+	case []string:
+		for _, entry := range typed {
+			entry = strings.TrimSpace(entry)
+			if entry == "" {
+				continue
+			}
+			out = append(out, entry)
+		}
+	case []any:
+		for _, raw := range typed {
+			entry, ok := raw.(string)
+			if !ok {
+				continue
+			}
+			entry = strings.TrimSpace(entry)
+			if entry == "" {
+				continue
+			}
+			out = append(out, entry)
+		}
+	}
+	return out
 }
 
 func readScenarioOutcome(id string) (diffScenario, bool, error) {
@@ -2165,6 +2336,7 @@ func enforceDiffReports(report *guardrailReport, mode string) {
 		})
 	} else {
 		validateReportFreshness(report, latestPath, "differential report", latest.GeneratedAt, maxDiffReportAge)
+		validateDifferentialEvidenceInputs(report, latestPath, latest)
 		if strings.TrimSpace(latest.ProducedBy) != "parity-harness" {
 			report.Failures = append(report.Failures, reportFailure{
 				Rule:    "differential-report",
@@ -2303,6 +2475,116 @@ func validateReportFreshness(report *guardrailReport, path, label, generatedAt s
 			Message: fmt.Sprintf("%s is stale (%s old, max %s)", label, age.Round(time.Minute), maxAge),
 		})
 	}
+}
+
+func validateDifferentialEvidenceInputs(report *guardrailReport, path string, latest differentialReport) {
+	roots := latest.InputRoots
+	if len(roots) == 0 {
+		roots = parityEvidenceInputRoots
+	}
+	if strings.TrimSpace(latest.InputsDigest) == "" {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "differential-evidence-stale",
+			Path:    path,
+			Message: "differential report is missing inputs_digest (rerun parity harness)",
+		})
+		return
+	}
+	currentDigest, err := computeInputDigest(roots)
+	if err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "differential-evidence-stale",
+			Path:    path,
+			Message: fmt.Sprintf("failed to recompute parity evidence digest: %v", err),
+		})
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(currentDigest), strings.TrimSpace(latest.InputsDigest)) {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "differential-evidence-stale",
+			Path:    path,
+			Message: "differential evidence is outdated vs current sources (rerun parity harness)",
+		})
+	}
+}
+
+func computeInputDigest(roots []string) (string, error) {
+	files, err := collectInputDigestFiles(roots)
+	if err != nil {
+		return "", err
+	}
+	if len(files) == 0 {
+		return "", errors.New("no input files found for parity evidence digest")
+	}
+
+	h := sha256.New()
+	for _, path := range files {
+		bs, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
+		}
+		normalized := filepath.ToSlash(path)
+		if _, err := h.Write([]byte(normalized)); err != nil {
+			return "", err
+		}
+		if _, err := h.Write([]byte{0}); err != nil {
+			return "", err
+		}
+		if _, err := h.Write(bs); err != nil {
+			return "", err
+		}
+		if _, err := h.Write([]byte{0}); err != nil {
+			return "", err
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func collectInputDigestFiles(roots []string) ([]string, error) {
+	out := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, root := range roots {
+		root = filepath.Clean(strings.TrimSpace(root))
+		if root == "" {
+			continue
+		}
+		info, err := os.Stat(root)
+		if err != nil {
+			return nil, err
+		}
+		if !info.IsDir() {
+			normalized := filepath.ToSlash(root)
+			if _, ok := seen[normalized]; !ok {
+				seen[normalized] = struct{}{}
+				out = append(out, root)
+			}
+			continue
+		}
+		err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if d.IsDir() {
+				name := d.Name()
+				if name == ".git" || name == "target" || name == ".gocache" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			normalized := filepath.ToSlash(path)
+			if _, ok := seen[normalized]; ok {
+				return nil
+			}
+			seen[normalized] = struct{}{}
+			out = append(out, path)
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func normalizeScenarioEvidence(evidence string) string {

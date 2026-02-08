@@ -435,7 +435,7 @@ func scenarioProtocolStateTransition() (map[string]any, error) {
 }
 
 func scenarioDaemonAPISurface() (map[string]any, error) {
-	covered, err := extractRustRuntimeProbeEndpoints()
+	covered, err := extractGoRESTSurfaceEndpoints()
 	if err != nil {
 		return nil, err
 	}
@@ -445,34 +445,84 @@ func scenarioDaemonAPISurface() (map[string]any, error) {
 	}), nil
 }
 
-func extractRustRuntimeProbeEndpoints() ([]string, error) {
-	bs, err := os.ReadFile("syncthing-rs/src/runtime.rs")
+func extractGoRESTSurfaceEndpoints() ([]string, error) {
+	bs, err := os.ReadFile("lib/api/api.go")
 	if err != nil {
-		return nil, fmt.Errorf("read rust runtime probe source: %w", err)
+		return nil, fmt.Errorf("read go api source: %w", err)
 	}
-	pattern := regexp.MustCompile(`\(\s*"([A-Z]+ /rest/[^"]+)"\s*,\s*Method::[A-Za-z]+,`)
-	matches := pattern.FindAllStringSubmatch(string(bs), -1)
-	if len(matches) == 0 {
-		return nil, fmt.Errorf("failed to discover api probe endpoints from syncthing-rs/src/runtime.rs")
+
+	text := string(bs)
+	endpoints := make(map[string]struct{})
+
+	directPattern := regexp.MustCompile(`restMux\.(?:HandlerFunc|Handler)\(\s*http\.(Method[A-Za-z]+),\s*"(/rest/[^"]+)"`)
+	for _, match := range directPattern.FindAllStringSubmatch(text, -1) {
+		if len(match) != 3 {
+			continue
+		}
+		method := normalizeHTTPMethodToken(match[1])
+		path := strings.TrimSpace(match[2])
+		if method == "" || path == "" {
+			continue
+		}
+		endpoints[method+" "+path] = struct{}{}
 	}
-	seen := make(map[string]struct{}, len(matches))
-	covered := make([]string, 0, len(matches))
-	for _, match := range matches {
-		if len(match) != 2 {
+
+	configRegisterMethods := map[string][]string{
+		"registerConfig":                {"GET", "PUT"},
+		"registerConfigDeprecated":      {"GET", "POST"},
+		"registerConfigInsync":          {"GET"},
+		"registerConfigRequiresRestart": {"GET"},
+		"registerFolders":               {"GET", "PUT", "POST"},
+		"registerDevices":               {"GET", "PUT", "POST"},
+		"registerFolder":                {"GET", "PUT", "PATCH", "DELETE"},
+		"registerDevice":                {"GET", "PUT", "PATCH", "DELETE"},
+		"registerDefaultFolder":         {"GET", "PUT", "PATCH"},
+		"registerDefaultDevice":         {"GET", "PUT", "PATCH"},
+		"registerDefaultIgnores":        {"GET", "PUT"},
+		"registerOptions":               {"GET", "PUT", "PATCH"},
+		"registerLDAP":                  {"GET", "PUT", "PATCH"},
+		"registerGUI":                   {"GET", "PUT", "PATCH"},
+	}
+	registerPattern := regexp.MustCompile(`configBuilder\.(register[A-Za-z0-9]+)\("(/rest/[^"]+)"\)`)
+	for _, match := range registerPattern.FindAllStringSubmatch(text, -1) {
+		if len(match) != 3 {
 			continue
 		}
-		endpoint := strings.TrimSpace(match[1])
-		if endpoint == "" {
+		methods := configRegisterMethods[match[1]]
+		if len(methods) == 0 {
 			continue
 		}
-		if _, ok := seen[endpoint]; ok {
+		path := strings.TrimSpace(match[2])
+		if path == "" {
 			continue
 		}
-		seen[endpoint] = struct{}{}
+		for _, method := range methods {
+			endpoints[method+" "+path] = struct{}{}
+		}
+	}
+
+	if len(endpoints) == 0 {
+		return nil, fmt.Errorf("failed to discover api endpoints from lib/api/api.go")
+	}
+
+	covered := make([]string, 0, len(endpoints))
+	for endpoint := range endpoints {
 		covered = append(covered, endpoint)
 	}
 	sort.Strings(covered)
 	return covered, nil
+}
+
+func normalizeHTTPMethodToken(token string) string {
+	token = strings.TrimSpace(token)
+	if !strings.HasPrefix(token, "Method") {
+		return strings.ToUpper(token)
+	}
+	token = strings.TrimPrefix(token, "Method")
+	if token == "" {
+		return ""
+	}
+	return strings.ToUpper(token)
 }
 
 func scenarioPathOrderInvariant() map[string]any {

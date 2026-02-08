@@ -177,7 +177,7 @@
       "tags": [
         "core"
       ],
-      "comparator": "json-equal",
+      "comparator": "endpoint-surface",
       "go": {
         "command": [
           "go",

@@ -1,7 +1,23 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-02-08T00:29:27Z",
+  "generated_at": "2026-02-08T01:21:23Z",
   "produced_by": "parity-harness",
+  "input_roots": [
+    "syncthing-rs/src",
+    "lib/api/api.go",
+    "lib/config",
+    "lib/model",
+    "lib/protocol",
+    "internal/db/interface.go",
+    "internal/gen/bep/bep.pb.go",
+    "parity/harness/scenarios.json",
+    "parity/replacement-gates.json",
+    "script/parity.go",
+    "script/parity_external_soak.go",
+    "script/parity_harness.go",
+    "script/parity_harness_go.go"
+  ],
+  "inputs_digest": "0392cafdc49cb2e6dfe3742eee3d9aa5e1765b1dcb900d02b938d5e5ea5e59ed",
   "match": true,
   "mismatches": [],
   "scenarios": [

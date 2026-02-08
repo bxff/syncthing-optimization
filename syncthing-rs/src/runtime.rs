@@ -1,7 +1,7 @@
 use crate::bep::{decode_frame, encode_frame, BepMessage};
 use crate::config::{FolderConfiguration, FolderType};
 use crate::db::Db;
-use crate::model_core::{model, newFolderConfiguration, NewModel, NewModelWithRuntime};
+use crate::model_core::{model, newFolderConfiguration, NewModelWithRuntime};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -2894,7 +2894,21 @@ pub(crate) fn run_parity_probe(with_peer_interop: bool) -> Result<(), String> {
     result
 }
 
-pub(crate) fn run_api_surface_probe() -> Result<Vec<String>, String> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ApiSurfaceProbeAssertion {
+    pub(crate) status_code: u16,
+    pub(crate) response_kind: String,
+    pub(crate) required_keys: Vec<String>,
+    pub(crate) present_keys: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ApiSurfaceProbeResult {
+    pub(crate) covered_endpoints: Vec<String>,
+    pub(crate) endpoint_assertions: BTreeMap<String, ApiSurfaceProbeAssertion>,
+}
+
+pub(crate) fn run_api_surface_probe() -> Result<ApiSurfaceProbeResult, String> {
     let mut root = std::env::temp_dir();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3557,6 +3571,7 @@ pub(crate) fn run_api_surface_probe() -> Result<Vec<String>, String> {
         ];
 
         let mut covered = Vec::with_capacity(cases.len());
+        let mut assertions = BTreeMap::new();
         for (key, method, url, expected_status) in cases {
             let reply = build_api_response(&method, &url, &runtime);
             if reply.status_code != StatusCode(expected_status) {
@@ -3566,14 +3581,88 @@ pub(crate) fn run_api_surface_probe() -> Result<Vec<String>, String> {
                     reply.status_code.0
                 ));
             }
+            let (response_kind, present_keys) = response_shape(&reply.body)?;
+            let required_keys = required_api_probe_keys(key)
+                .iter()
+                .map(|entry| (*entry).to_string())
+                .collect::<Vec<_>>();
+            for required_key in &required_keys {
+                if !present_keys.iter().any(|present| present == required_key) {
+                    return Err(format!(
+                        "api probe {key} missing required response key {required_key}"
+                    ));
+                }
+            }
+            assertions.insert(
+                key.to_string(),
+                ApiSurfaceProbeAssertion {
+                    status_code: expected_status,
+                    response_kind,
+                    required_keys,
+                    present_keys,
+                },
+            );
             covered.push(key.to_string());
         }
         covered.sort();
-        Ok(covered)
+        Ok(ApiSurfaceProbeResult {
+            covered_endpoints: covered,
+            endpoint_assertions: assertions,
+        })
     })();
 
     let _ = fs::remove_dir_all(&root);
     result
+}
+
+fn required_api_probe_keys(endpoint: &str) -> &'static [&'static str] {
+    match endpoint {
+        "GET /rest/system/version" => &["version", "longVersion", "os", "arch"],
+        "GET /rest/system/status" => &[
+            "myID",
+            "uptimeS",
+            "memoryEstimatedBytes",
+            "memoryBudgetBytes",
+        ],
+        "GET /rest/system/connections" => &["total", "connections"],
+        "GET /rest/system/config/folders" => &["count", "folders"],
+        "GET /rest/db/status" => &["folder", "state", "localFiles", "needFiles"],
+        "GET /rest/db/completion" => &["folder", "device", "completionPct", "needBytes"],
+        "GET /rest/db/file" => &["folder", "file", "exists"],
+        "GET /rest/db/ignores" => &["folder", "count", "patterns"],
+        "GET /rest/db/jobs" => &["folder", "state", "jobs"],
+        "GET /rest/db/localchanged" => &["folder", "count", "files"],
+        "GET /rest/db/need" => &["folder", "limit", "items"],
+        "GET /rest/db/remoteneed" => &["folder", "device", "count", "items"],
+        "GET /rest/db/browse" => &["folder", "limit", "items"],
+        "POST /rest/db/bringtofront" => &["folder", "action", "ok"],
+        "POST /rest/db/override" => &["folder", "action", "ok"],
+        "POST /rest/db/revert" => &["folder", "action", "ok"],
+        "POST /rest/db/pull" => &["folder", "state", "sequence", "pull"],
+        "POST /rest/db/reset" => &["folder", "action", "ok"],
+        "POST /rest/db/scan" => &["folder", "sequence", "state", "stats"],
+        "POST /rest/system/config/folders" => &["added", "folder"],
+        "POST /rest/system/config/restart" => &["restarted", "folder"],
+        "DELETE /rest/system/config/folders" => &["removed", "folder"],
+        _ => &[],
+    }
+}
+
+fn response_shape(body: &[u8]) -> Result<(String, Vec<String>), String> {
+    let value: Value =
+        serde_json::from_slice(body).map_err(|err| format!("decode probe response JSON: {err}"))?;
+    match value {
+        Value::Object(map) => {
+            let mut keys = map.keys().cloned().collect::<Vec<_>>();
+            keys.sort();
+            Ok(("object".to_string(), keys))
+        }
+        Value::Array(_) => Ok(("array".to_string(), Vec::new())),
+        Value::Null => Ok(("null".to_string(), Vec::new())),
+        Value::Bool(_) => Ok(("bool".to_string(), Vec::new())),
+        Value::Number(_) => Ok(("number".to_string(), Vec::new())),
+        Value::String(_) => Ok(("string".to_string(), Vec::new())),
+    }
 }
 
 fn ensure_api_ok(reply: &ApiReply) -> Result<Value, String> {
@@ -3682,6 +3771,7 @@ mod tests {
     use crate::bep::{default_exchange, BepMessage};
     use crate::db;
     use crate::db::Db;
+    use crate::model_core::NewModel;
     use serde_json::Value;
     use std::fs;
     use std::net::{Shutdown, TcpStream};
@@ -4809,10 +4899,27 @@ mod tests {
 
     #[test]
     fn api_surface_probe_reports_required_endpoints() {
-        let covered = run_api_surface_probe().expect("run api surface probe");
-        assert!(covered.contains(&"GET /rest/system/ping".to_string()));
-        assert!(covered.contains(&"GET /rest/db/status".to_string()));
-        assert!(covered.contains(&"POST /rest/db/bringtofront".to_string()));
-        assert!(covered.contains(&"DELETE /rest/system/config/folders".to_string()));
+        let probe = run_api_surface_probe().expect("run api surface probe");
+        assert!(probe
+            .covered_endpoints
+            .contains(&"GET /rest/system/ping".to_string()));
+        assert!(probe
+            .covered_endpoints
+            .contains(&"GET /rest/db/status".to_string()));
+        assert!(probe
+            .covered_endpoints
+            .contains(&"POST /rest/db/bringtofront".to_string()));
+        assert!(probe
+            .covered_endpoints
+            .contains(&"DELETE /rest/system/config/folders".to_string()));
+
+        let version = probe
+            .endpoint_assertions
+            .get("GET /rest/system/version")
+            .expect("version assertion");
+        assert_eq!(version.status_code, 200);
+        assert_eq!(version.response_kind, "object");
+        assert!(version.present_keys.contains(&"version".to_string()));
+        assert!(version.present_keys.contains(&"longVersion".to_string()));
     }
 }

@@ -201,6 +201,73 @@ func TestValidateReportFreshnessAllowsRecentReports(t *testing.T) {
 	}
 }
 
+func TestValidateDifferentialEvidenceInputsRejectsMissingDigest(t *testing.T) {
+	report := &guardrailReport{}
+	validateDifferentialEvidenceInputs(report, "parity/diff-reports/latest.json", differentialReport{
+		InputRoots: []string{"script/parity.go"},
+	})
+	if len(report.Failures) != 1 {
+		t.Fatalf("expected 1 failure, got %#v", report.Failures)
+	}
+	if report.Failures[0].Rule != "differential-evidence-stale" {
+		t.Fatalf("unexpected rule: %s", report.Failures[0].Rule)
+	}
+	if !strings.Contains(report.Failures[0].Message, "inputs_digest") {
+		t.Fatalf("unexpected message: %s", report.Failures[0].Message)
+	}
+}
+
+func TestValidateDifferentialEvidenceInputsRejectsDigestMismatch(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "probe.txt")
+	if err := os.WriteFile(file, []byte("old"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	digest, err := computeInputDigest([]string{file})
+	if err != nil {
+		t.Fatalf("compute digest: %v", err)
+	}
+	if err := os.WriteFile(file, []byte("new"), 0o644); err != nil {
+		t.Fatalf("rewrite file: %v", err)
+	}
+
+	report := &guardrailReport{}
+	validateDifferentialEvidenceInputs(report, "parity/diff-reports/latest.json", differentialReport{
+		InputRoots:   []string{file},
+		InputsDigest: digest,
+	})
+	if len(report.Failures) != 1 {
+		t.Fatalf("expected 1 failure, got %#v", report.Failures)
+	}
+	if report.Failures[0].Rule != "differential-evidence-stale" {
+		t.Fatalf("unexpected rule: %s", report.Failures[0].Rule)
+	}
+	if !strings.Contains(report.Failures[0].Message, "outdated") {
+		t.Fatalf("unexpected message: %s", report.Failures[0].Message)
+	}
+}
+
+func TestValidateDifferentialEvidenceInputsAcceptsMatchingDigest(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "probe.txt")
+	if err := os.WriteFile(file, []byte("match"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	digest, err := computeInputDigest([]string{file})
+	if err != nil {
+		t.Fatalf("compute digest: %v", err)
+	}
+
+	report := &guardrailReport{}
+	validateDifferentialEvidenceInputs(report, "parity/diff-reports/latest.json", differentialReport{
+		InputRoots:   []string{file},
+		InputsDigest: digest,
+	})
+	if len(report.Failures) != 0 {
+		t.Fatalf("expected no failures, got %#v", report.Failures)
+	}
+}
+
 func TestValidateMemoryCapStatusAcceptsPassing50MBProfile(t *testing.T) {
 	report := &guardrailReport{}
 	test := testStatusReport{
@@ -424,6 +491,129 @@ func TestMissingRequiredStringsReturnsSortedMissingEntries(t *testing.T) {
 	}
 }
 
+func TestValidateReplacementAPIEndpointCoverageRequiresEndpointAssertions(t *testing.T) {
+	withTempRepoLayout(t, func() {
+		writeLatestDiffReport(t, differentialReport{
+			SchemaVersion: schemaVersion,
+			GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+			Scenarios: []diffScenario{
+				{
+					ID:           "daemon-api-surface",
+					Status:       "pass",
+					RustEvidence: "daemon",
+				},
+			},
+		})
+		writeRustAPISnapshot(t, map[string]any{
+			"scenario": "daemon-api-surface",
+			"source":   "rust",
+			"status":   "validated",
+			"covered_endpoints": []string{
+				"GET /rest/system/version",
+			},
+		})
+
+		report := &guardrailReport{}
+		validateReplacementAPIEndpointCoverage(report, []string{"GET /rest/system/version"})
+		if len(report.Failures) != 1 {
+			t.Fatalf("expected exactly one failure, got %#v", report.Failures)
+		}
+		if report.Failures[0].Rule != "replacement-api-coverage" {
+			t.Fatalf("unexpected rule: %s", report.Failures[0].Rule)
+		}
+		if !strings.Contains(report.Failures[0].Message, "endpoint_assertions") {
+			t.Fatalf("unexpected message: %s", report.Failures[0].Message)
+		}
+	})
+}
+
+func TestValidateReplacementAPIEndpointCoverageRequiresResponseKeys(t *testing.T) {
+	withTempRepoLayout(t, func() {
+		writeLatestDiffReport(t, differentialReport{
+			SchemaVersion: schemaVersion,
+			GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+			Scenarios: []diffScenario{
+				{
+					ID:           "daemon-api-surface",
+					Status:       "pass",
+					RustEvidence: "daemon",
+				},
+			},
+		})
+		writeRustAPISnapshot(t, map[string]any{
+			"scenario":               "daemon-api-surface",
+			"source":                 "rust",
+			"status":                 "validated",
+			"covered_endpoints":      []string{"GET /rest/system/version"},
+			"covered_endpoint_count": 1,
+			"endpoint_assertions": map[string]any{
+				"GET /rest/system/version": map[string]any{
+					"status_code":   200,
+					"response_kind": "object",
+					"required_keys": []string{"version", "longVersion"},
+					"present_keys":  []string{"version"},
+				},
+			},
+		})
+
+		report := &guardrailReport{}
+		validateReplacementAPIEndpointCoverage(report, []string{"GET /rest/system/version"})
+		if len(report.Failures) == 0 {
+			t.Fatalf("expected failures, got %#v", report.Failures)
+		}
+		found := false
+		for _, failure := range report.Failures {
+			if failure.Rule != "replacement-api-coverage" {
+				continue
+			}
+			if strings.Contains(failure.Message, "missing required response key") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected missing required response key failure, got %#v", report.Failures)
+		}
+	})
+}
+
+func TestValidateReplacementAPIEndpointCoverageAcceptsValidAssertions(t *testing.T) {
+	withTempRepoLayout(t, func() {
+		writeLatestDiffReport(t, differentialReport{
+			SchemaVersion: schemaVersion,
+			GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+			Scenarios: []diffScenario{
+				{
+					ID:           "daemon-api-surface",
+					Status:       "pass",
+					RustEvidence: "daemon",
+				},
+			},
+		})
+		writeRustAPISnapshot(t, map[string]any{
+			"scenario":               "daemon-api-surface",
+			"source":                 "rust",
+			"status":                 "validated",
+			"covered_endpoints":      []string{"GET /rest/system/version"},
+			"covered_endpoint_count": 1,
+			"endpoint_assertions": map[string]any{
+				"GET /rest/system/version": map[string]any{
+					"status_code":   200,
+					"response_kind": "object",
+					"required_keys": []string{"version", "longVersion"},
+					"present_keys":  []string{"version", "longVersion", "os", "arch"},
+				},
+			},
+		})
+
+		report := &guardrailReport{}
+		validateReplacementAPIEndpointCoverage(report, []string{"GET /rest/system/version"})
+		if len(report.Failures) != 0 {
+			t.Fatalf("expected no failures, got %#v", report.Failures)
+		}
+	})
+}
+
 func TestNormalizeBEPMessageTypeNormalizesCamelCaseAndDelimiters(t *testing.T) {
 	cases := map[string]string{
 		"ClusterConfig":               "cluster_config",
@@ -536,5 +726,21 @@ func writeLatestDiffReport(t *testing.T, report differentialReport) {
 	path := filepath.Join("parity", "diff-reports", "latest.json")
 	if err := os.WriteFile(path, bs, 0o644); err != nil {
 		t.Fatalf("write report: %v", err)
+	}
+}
+
+func writeRustAPISnapshot(t *testing.T, snapshot map[string]any) {
+	t.Helper()
+	path := filepath.Join("parity", "harness", "snapshots")
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatalf("mkdir snapshots: %v", err)
+	}
+	bs, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	fullPath := filepath.Join(path, "rust-daemon-api-surface.json")
+	if err := os.WriteFile(fullPath, bs, 0o644); err != nil {
+		t.Fatalf("write snapshot: %v", err)
 	}
 }

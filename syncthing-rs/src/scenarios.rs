@@ -309,13 +309,29 @@ fn scenario_protocol_state_transition() -> Result<Value, String> {
 }
 
 fn scenario_daemon_api_surface() -> Result<Value, String> {
-    let covered = run_api_surface_probe()?;
+    let probe = run_api_surface_probe()?;
+    let assertions = probe
+        .endpoint_assertions
+        .into_iter()
+        .map(|(endpoint, assertion)| {
+            (
+                endpoint,
+                json!({
+                    "status_code": assertion.status_code,
+                    "response_kind": assertion.response_kind,
+                    "required_keys": assertion.required_keys,
+                    "present_keys": assertion.present_keys,
+                }),
+            )
+        })
+        .collect::<serde_json::Map<String, serde_json::Value>>();
     Ok(json!({
         "scenario": "daemon-api-surface",
         "source": "rust",
         "status": "validated",
-        "covered_endpoints": covered,
-        "covered_endpoint_count": covered.len()
+        "covered_endpoints": probe.covered_endpoints,
+        "covered_endpoint_count": probe.covered_endpoints.len(),
+        "endpoint_assertions": assertions
     }))
 }
 

@@ -9,10 +9,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +25,22 @@ import (
 )
 
 const harnessSchemaVersion = 1
+
+var parityEvidenceInputRoots = []string{
+	"syncthing-rs/src",
+	"lib/api/api.go",
+	"lib/config",
+	"lib/model",
+	"lib/protocol",
+	"internal/db/interface.go",
+	"internal/gen/bep/bep.pb.go",
+	"parity/harness/scenarios.json",
+	"parity/replacement-gates.json",
+	"script/parity.go",
+	"script/parity_external_soak.go",
+	"script/parity_harness.go",
+	"script/parity_harness_go.go",
+}
 
 type harnessConfig struct {
 	SchemaVersion int               `json:"schema_version"`
@@ -53,6 +72,8 @@ type latestReport struct {
 	SchemaVersion int               `json:"schema_version"`
 	GeneratedAt   string            `json:"generated_at"`
 	ProducedBy    string            `json:"produced_by"`
+	InputRoots    []string          `json:"input_roots,omitempty"`
+	InputsDigest  string            `json:"inputs_digest,omitempty"`
 	Match         bool              `json:"match"`
 	Mismatches    []latestMismatch  `json:"mismatches"`
 	Scenarios     []scenarioOutcome `json:"scenarios"`
@@ -256,6 +277,13 @@ func run(args []string) {
 	})
 	sort.Slice(report.Scenarios, func(i, j int) bool { return report.Scenarios[i].ID < report.Scenarios[j].ID })
 
+	inputDigest, err := computeInputDigest(parityEvidenceInputRoots)
+	if err != nil {
+		fatalf("compute parity evidence digest: %v", err)
+	}
+	report.InputRoots = append([]string(nil), parityEvidenceInputRoots...)
+	report.InputsDigest = inputDigest
+
 	testStatus := testStatusReport{
 		SchemaVersion: harnessSchemaVersion,
 		GeneratedAt:   now,
@@ -434,6 +462,30 @@ func compareSnapshots(scenarioID, mode string, goSnap, rustSnap map[string]any) 
 			return true, ""
 		}
 		return false, "json outputs differ"
+	case "endpoint-surface":
+		goCovered := toStringSet(goSnap["covered_endpoints"])
+		rustCovered := toStringSet(rustSnap["covered_endpoints"])
+		missing := make([]string, 0)
+		for endpoint := range goCovered {
+			if _, ok := rustCovered[endpoint]; ok {
+				continue
+			}
+			missing = append(missing, endpoint)
+		}
+		sort.Strings(missing)
+		if len(missing) == 0 {
+			return true, ""
+		}
+		preview := missing
+		if len(preview) > 25 {
+			preview = preview[:25]
+		}
+		return false, fmt.Sprintf(
+			"rust api surface missing %d go endpoint(s), first %d: %s",
+			len(missing),
+			len(preview),
+			strings.Join(preview, ", "),
+		)
 	default:
 		return false, fmt.Sprintf("unsupported comparator %q", mode)
 	}
@@ -523,6 +575,9 @@ func normalizeComparisonSnapshot(scenarioID string, snap map[string]any) map[str
 		if scenarioID == "protocol-state-transition" && k == "frame_sizes" {
 			continue
 		}
+		if scenarioID == "daemon-api-surface" && k == "endpoint_assertions" {
+			continue
+		}
 		out[k] = v
 	}
 	return out
@@ -568,6 +623,112 @@ func evaluateStatus(total, passed int) string {
 		return "passed"
 	}
 	return "failed"
+}
+
+func toStringSet(value any) map[string]struct{} {
+	out := make(map[string]struct{})
+	switch typed := value.(type) {
+	case []string:
+		for _, entry := range typed {
+			entry = strings.TrimSpace(entry)
+			if entry == "" {
+				continue
+			}
+			out[entry] = struct{}{}
+		}
+	case []any:
+		for _, raw := range typed {
+			entry, ok := raw.(string)
+			if !ok {
+				continue
+			}
+			entry = strings.TrimSpace(entry)
+			if entry == "" {
+				continue
+			}
+			out[entry] = struct{}{}
+		}
+	}
+	return out
+}
+
+func computeInputDigest(roots []string) (string, error) {
+	files, err := collectInputDigestFiles(roots)
+	if err != nil {
+		return "", err
+	}
+	if len(files) == 0 {
+		return "", errors.New("no input files found for parity evidence digest")
+	}
+
+	h := sha256.New()
+	for _, path := range files {
+		bs, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
+		}
+		normalized := filepath.ToSlash(path)
+		if _, err := h.Write([]byte(normalized)); err != nil {
+			return "", err
+		}
+		if _, err := h.Write([]byte{0}); err != nil {
+			return "", err
+		}
+		if _, err := h.Write(bs); err != nil {
+			return "", err
+		}
+		if _, err := h.Write([]byte{0}); err != nil {
+			return "", err
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func collectInputDigestFiles(roots []string) ([]string, error) {
+	out := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, root := range roots {
+		root = filepath.Clean(strings.TrimSpace(root))
+		if root == "" {
+			continue
+		}
+		info, err := os.Stat(root)
+		if err != nil {
+			return nil, err
+		}
+		if !info.IsDir() {
+			normalized := filepath.ToSlash(root)
+			if _, ok := seen[normalized]; !ok {
+				seen[normalized] = struct{}{}
+				out = append(out, root)
+			}
+			continue
+		}
+		err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if d.IsDir() {
+				name := d.Name()
+				if name == ".git" || name == "target" || name == ".gocache" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			normalized := filepath.ToSlash(path)
+			if _, ok := seen[normalized]; ok {
+				return nil
+			}
+			seen[normalized] = struct{}{}
+			out = append(out, path)
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func writeJSON(path string, v any) error {

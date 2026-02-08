@@ -9,6 +9,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -78,6 +80,7 @@ func main() {
 
 	fs := flag.NewFlagSet("scenario", flag.ExitOnError)
 	impl := fs.String("impl", "", "implementation to run (go or rust)")
+	seed := fs.Int64("seed", seedFromEnv(), "deterministic workload seed")
 	if err := fs.Parse(os.Args[3:]); err != nil {
 		fatalf("parse flags: %v", err)
 	}
@@ -85,7 +88,7 @@ func main() {
 		fatalf("--impl must be go or rust")
 	}
 
-	checks, metrics, err := runScenario(id, *impl)
+	checks, metrics, err := runScenario(id, *impl, *seed)
 	if err != nil {
 		fatalf("external soak failed: %v", err)
 	}
@@ -105,33 +108,33 @@ func main() {
 	}
 }
 
-func runScenario(id, impl string) (map[string]any, map[string]any, error) {
+func runScenario(id, impl string, seed int64) (map[string]any, map[string]any, error) {
 	switch id {
 	case externalSoakScenarioID:
-		return runScenarioExternalSoak(impl)
+		return runScenarioExternalSoak(impl, seed)
 	case externalMultiFolderScenarioID:
-		return runScenarioExternalMultiFolder(impl)
+		return runScenarioExternalMultiFolder(impl, seed)
 	case externalFolderModesScenarioID:
-		return runScenarioExternalFolderModes(impl)
+		return runScenarioExternalFolderModes(impl, seed)
 	case externalDurabilityScenarioID:
-		return runScenarioExternalDurability(impl)
+		return runScenarioExternalDurability(impl, seed)
 	case externalCrashScenarioID:
-		return runScenarioExternalCrashRecovery(impl)
+		return runScenarioExternalCrashRecovery(impl, seed)
 	default:
 		return nil, nil, fmt.Errorf("unsupported scenario %q", id)
 	}
 }
 
-func runScenarioExternalSoak(impl string) (map[string]any, map[string]any, error) {
+func runScenarioExternalSoak(impl string, seed int64) (map[string]any, map[string]any, error) {
 	var (
 		metrics soakMetrics
 		err     error
 	)
 	switch impl {
 	case "go":
-		metrics, err = runGoExternalSoak()
+		metrics, err = runGoExternalSoak(seed)
 	case "rust":
-		metrics, err = runRustExternalSoak()
+		metrics, err = runRustExternalSoak(seed)
 	default:
 		err = fmt.Errorf("unsupported impl %q", impl)
 	}
@@ -157,20 +160,22 @@ func runScenarioExternalSoak(impl string) (map[string]any, map[string]any, error
 		"expected_local_files": expectedLocalFiles,
 		"scan_attempts":        metrics.ScanAttempts,
 		"status_poll_attempts": metrics.StatusPollAttempts,
+		"seed":                 metrics.Seed,
+		"workload_digest":      metrics.WorkloadDigest,
 	}
 	return checks, m, nil
 }
 
-func runScenarioExternalMultiFolder(impl string) (map[string]any, map[string]any, error) {
+func runScenarioExternalMultiFolder(impl string, seed int64) (map[string]any, map[string]any, error) {
 	var (
 		metrics multiFolderMetrics
 		err     error
 	)
 	switch impl {
 	case "go":
-		metrics, err = runGoExternalMultiFolderSoak()
+		metrics, err = runGoExternalMultiFolderSoak(seed)
 	case "rust":
-		metrics, err = runRustExternalMultiFolderSoak()
+		metrics, err = runRustExternalMultiFolderSoak(seed)
 	default:
 		err = fmt.Errorf("unsupported impl %q", impl)
 	}
@@ -207,20 +212,22 @@ func runScenarioExternalMultiFolder(impl string) (map[string]any, map[string]any
 		"expected_ordered_paths": expectedOrderedPaths,
 		"scan_attempts":          metrics.ScanAttempts,
 		"status_poll_attempts":   metrics.StatusPollAttempts,
+		"seed":                   metrics.Seed,
+		"workload_digest":        metrics.WorkloadDigest,
 	}
 	return checks, m, nil
 }
 
-func runScenarioExternalFolderModes(impl string) (map[string]any, map[string]any, error) {
+func runScenarioExternalFolderModes(impl string, seed int64) (map[string]any, map[string]any, error) {
 	var (
 		metrics folderModeMetrics
 		err     error
 	)
 	switch impl {
 	case "go":
-		metrics, err = runGoExternalFolderModes()
+		metrics, err = runGoExternalFolderModes(seed)
 	case "rust":
-		metrics, err = runRustExternalFolderModes()
+		metrics, err = runRustExternalFolderModes(seed)
 	default:
 		err = fmt.Errorf("unsupported impl %q", impl)
 	}
@@ -243,20 +250,22 @@ func runScenarioExternalFolderModes(impl string) (map[string]any, map[string]any
 		"expected_type_map":    expectedFolderModeTypes,
 		"scan_attempts":        metrics.ScanAttempts,
 		"status_poll_attempts": metrics.StatusPollAttempts,
+		"seed":                 metrics.Seed,
+		"workload_digest":      metrics.WorkloadDigest,
 	}
 	return checks, m, nil
 }
 
-func runScenarioExternalDurability(impl string) (map[string]any, map[string]any, error) {
+func runScenarioExternalDurability(impl string, seed int64) (map[string]any, map[string]any, error) {
 	var (
 		metrics durabilityMetrics
 		err     error
 	)
 	switch impl {
 	case "go":
-		metrics, err = runGoExternalDurabilityRestart()
+		metrics, err = runGoExternalDurabilityRestart(seed)
 	case "rust":
-		metrics, err = runRustExternalDurabilityRestart()
+		metrics, err = runRustExternalDurabilityRestart(seed)
 	default:
 		err = fmt.Errorf("unsupported impl %q", impl)
 	}
@@ -282,20 +291,23 @@ func runScenarioExternalDurability(impl string) (map[string]any, map[string]any,
 		"post_restart_local_files":  metrics.PostRestartLocalFiles,
 		"post_restart_global_files": metrics.PostRestartGlobalFiles,
 		"post_restart_need_files":   metrics.PostRestartNeedFiles,
+		"status_poll_attempts":      metrics.StatusPollAttempts,
+		"seed":                      metrics.Seed,
+		"workload_digest":           metrics.WorkloadDigest,
 	}
 	return checks, m, nil
 }
 
-func runScenarioExternalCrashRecovery(impl string) (map[string]any, map[string]any, error) {
+func runScenarioExternalCrashRecovery(impl string, seed int64) (map[string]any, map[string]any, error) {
 	var (
 		metrics crashMetrics
 		err     error
 	)
 	switch impl {
 	case "go":
-		metrics, err = runGoExternalCrashRecoveryRestart()
+		metrics, err = runGoExternalCrashRecoveryRestart(seed)
 	case "rust":
-		metrics, err = runRustExternalCrashRecoveryRestart()
+		metrics, err = runRustExternalCrashRecoveryRestart(seed)
 	default:
 		err = fmt.Errorf("unsupported impl %q", impl)
 	}
@@ -321,6 +333,9 @@ func runScenarioExternalCrashRecovery(impl string) (map[string]any, map[string]a
 		"post_restart_local_files":  metrics.PostRestartLocalFiles,
 		"post_restart_global_files": metrics.PostRestartGlobalFiles,
 		"post_restart_need_files":   metrics.PostRestartNeedFiles,
+		"status_poll_attempts":      metrics.StatusPollAttempts,
+		"seed":                      metrics.Seed,
+		"workload_digest":           metrics.WorkloadDigest,
 	}
 	return checks, m, nil
 }
@@ -336,6 +351,8 @@ type soakMetrics struct {
 	State              string
 	ScanAttempts       int
 	StatusPollAttempts int
+	Seed               int64
+	WorkloadDigest     string
 }
 
 type multiFolderMetrics struct {
@@ -357,6 +374,8 @@ type multiFolderMetrics struct {
 	MediaBrowsePaths        int
 	ScanAttempts            int
 	StatusPollAttempts      int
+	Seed                    int64
+	WorkloadDigest          string
 }
 
 type folderModeMetrics struct {
@@ -371,6 +390,8 @@ type folderModeMetrics struct {
 	NeedFilesZero      map[string]bool
 	ScanAttempts       int
 	StatusPollAttempts int
+	Seed               int64
+	WorkloadDigest     string
 }
 
 type durabilityMetrics struct {
@@ -387,6 +408,9 @@ type durabilityMetrics struct {
 	PostRestartLocalFiles    int
 	PostRestartGlobalFiles   int
 	PostRestartNeedFiles     int
+	StatusPollAttempts       int
+	Seed                     int64
+	WorkloadDigest           string
 }
 
 type crashMetrics struct {
@@ -403,6 +427,9 @@ type crashMetrics struct {
 	PostRestartLocalFiles    int
 	PostRestartGlobalFiles   int
 	PostRestartNeedFiles     int
+	StatusPollAttempts       int
+	Seed                     int64
+	WorkloadDigest           string
 }
 
 type daemonProc struct {
@@ -444,7 +471,7 @@ func (p *daemonProc) crashKill() error {
 	if errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "signal: killed") {
 		return nil
 	}
-	return nil
+	return err
 }
 
 func (p *daemonProc) wait(timeout time.Duration) error {
@@ -453,8 +480,11 @@ func (p *daemonProc) wait(timeout time.Duration) error {
 	return waitWithContext(waitCtx, p.cmd)
 }
 
-func runGoExternalSoak() (soakMetrics, error) {
-	var metrics soakMetrics
+func runGoExternalSoak(seed int64) (soakMetrics, error) {
+	metrics := soakMetrics{
+		Seed:           seed,
+		WorkloadDigest: workloadDigest("external-soak", seed),
+	}
 	root, err := os.MkdirTemp("", "syncthing-go-external-soak-")
 	if err != nil {
 		return metrics, fmt.Errorf("create temp root: %w", err)
@@ -463,7 +493,7 @@ func runGoExternalSoak() (soakMetrics, error) {
 
 	homeDir := filepath.Join(root, "home")
 	folderDir := filepath.Join(root, "folder")
-	if err := prepareSoakFolder(folderDir); err != nil {
+	if err := prepareSoakFolder(folderDir, seed); err != nil {
 		return metrics, err
 	}
 
@@ -497,6 +527,9 @@ func runGoExternalSoak() (soakMetrics, error) {
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", apiPort)
 	if err := waitForPing(baseURL, apiKey, startupTimeout); err != nil {
 		return metrics, fmt.Errorf("go daemon startup: %w (stderr=%s)", err, strings.TrimSpace(proc.stderr.String()))
+	}
+	if err := verifyRuntimeIdentity(baseURL, apiKey, "go"); err != nil {
+		return metrics, fmt.Errorf("go runtime identity check: %w", err)
 	}
 
 	if err := runCmd(
@@ -551,8 +584,11 @@ func runGoExternalSoak() (soakMetrics, error) {
 	return metrics, nil
 }
 
-func runRustExternalSoak() (soakMetrics, error) {
-	var metrics soakMetrics
+func runRustExternalSoak(seed int64) (soakMetrics, error) {
+	metrics := soakMetrics{
+		Seed:           seed,
+		WorkloadDigest: workloadDigest("external-soak", seed),
+	}
 	root, err := os.MkdirTemp("", "syncthing-rs-external-soak-")
 	if err != nil {
 		return metrics, fmt.Errorf("create temp root: %w", err)
@@ -561,7 +597,7 @@ func runRustExternalSoak() (soakMetrics, error) {
 
 	folderDir := filepath.Join(root, "folder")
 	dbRoot := filepath.Join(root, "db")
-	if err := prepareSoakFolder(folderDir); err != nil {
+	if err := prepareSoakFolder(folderDir, seed); err != nil {
 		return metrics, err
 	}
 	if err := os.MkdirAll(dbRoot, 0o755); err != nil {
@@ -596,6 +632,9 @@ func runRustExternalSoak() (soakMetrics, error) {
 
 	if err := waitForPing(baseURL, "", startupTimeout); err != nil {
 		return metrics, fmt.Errorf("rust daemon startup: %w (stderr=%s)", err, strings.TrimSpace(proc.stderr.String()))
+	}
+	if err := verifyRuntimeIdentity(baseURL, "", "rust"); err != nil {
+		return metrics, fmt.Errorf("rust runtime identity check: %w", err)
 	}
 
 	metrics.ScanAttempts++
@@ -635,8 +674,11 @@ func runRustExternalSoak() (soakMetrics, error) {
 	return metrics, nil
 }
 
-func runGoExternalMultiFolderSoak() (multiFolderMetrics, error) {
-	var metrics multiFolderMetrics
+func runGoExternalMultiFolderSoak(seed int64) (multiFolderMetrics, error) {
+	metrics := multiFolderMetrics{
+		Seed:           seed,
+		WorkloadDigest: workloadDigest("external-multifolder", seed),
+	}
 	root, err := os.MkdirTemp("", "syncthing-go-external-multifolder-")
 	if err != nil {
 		return metrics, fmt.Errorf("create temp root: %w", err)
@@ -646,10 +688,10 @@ func runGoExternalMultiFolderSoak() (multiFolderMetrics, error) {
 	homeDir := filepath.Join(root, "home")
 	defaultFolderDir := filepath.Join(root, "default-folder")
 	mediaFolderDir := filepath.Join(root, "media-folder")
-	if err := prepareMultiFolderSoakFolder(defaultFolderDir); err != nil {
+	if err := prepareMultiFolderSoakFolder(defaultFolderDir, seed+11); err != nil {
 		return metrics, fmt.Errorf("prepare default folder: %w", err)
 	}
-	if err := prepareMultiFolderSoakFolder(mediaFolderDir); err != nil {
+	if err := prepareMultiFolderSoakFolder(mediaFolderDir, seed+29); err != nil {
 		return metrics, fmt.Errorf("prepare media folder: %w", err)
 	}
 
@@ -683,6 +725,9 @@ func runGoExternalMultiFolderSoak() (multiFolderMetrics, error) {
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", apiPort)
 	if err := waitForPing(baseURL, apiKey, startupTimeout); err != nil {
 		return metrics, fmt.Errorf("go daemon startup: %w (stderr=%s)", err, strings.TrimSpace(proc.stderr.String()))
+	}
+	if err := verifyRuntimeIdentity(baseURL, apiKey, "go"); err != nil {
+		return metrics, fmt.Errorf("go runtime identity check: %w", err)
 	}
 
 	if err := runCmd(
@@ -800,8 +845,11 @@ func runGoExternalMultiFolderSoak() (multiFolderMetrics, error) {
 	return metrics, nil
 }
 
-func runRustExternalMultiFolderSoak() (multiFolderMetrics, error) {
-	var metrics multiFolderMetrics
+func runRustExternalMultiFolderSoak(seed int64) (multiFolderMetrics, error) {
+	metrics := multiFolderMetrics{
+		Seed:           seed,
+		WorkloadDigest: workloadDigest("external-multifolder", seed),
+	}
 	root, err := os.MkdirTemp("", "syncthing-rs-external-multifolder-")
 	if err != nil {
 		return metrics, fmt.Errorf("create temp root: %w", err)
@@ -811,10 +859,10 @@ func runRustExternalMultiFolderSoak() (multiFolderMetrics, error) {
 	defaultFolderDir := filepath.Join(root, "default-folder")
 	mediaFolderDir := filepath.Join(root, "media-folder")
 	dbRoot := filepath.Join(root, "db")
-	if err := prepareMultiFolderSoakFolder(defaultFolderDir); err != nil {
+	if err := prepareMultiFolderSoakFolder(defaultFolderDir, seed+11); err != nil {
 		return metrics, fmt.Errorf("prepare default folder: %w", err)
 	}
-	if err := prepareMultiFolderSoakFolder(mediaFolderDir); err != nil {
+	if err := prepareMultiFolderSoakFolder(mediaFolderDir, seed+29); err != nil {
 		return metrics, fmt.Errorf("prepare media folder: %w", err)
 	}
 	if err := os.MkdirAll(dbRoot, 0o755); err != nil {
@@ -851,6 +899,9 @@ func runRustExternalMultiFolderSoak() (multiFolderMetrics, error) {
 
 	if err := waitForPing(baseURL, "", startupTimeout); err != nil {
 		return metrics, fmt.Errorf("rust daemon startup: %w (stderr=%s)", err, strings.TrimSpace(proc.stderr.String()))
+	}
+	if err := verifyRuntimeIdentity(baseURL, "", "rust"); err != nil {
+		return metrics, fmt.Errorf("rust runtime identity check: %w", err)
 	}
 
 	for _, folder := range []string{"default", "media"} {
@@ -944,8 +995,11 @@ type folderModeSpec struct {
 	dir  string
 }
 
-func runGoExternalFolderModes() (folderModeMetrics, error) {
-	var metrics folderModeMetrics
+func runGoExternalFolderModes(seed int64) (folderModeMetrics, error) {
+	metrics := folderModeMetrics{
+		Seed:           seed,
+		WorkloadDigest: workloadDigest("external-folder-modes", seed),
+	}
 	root, err := os.MkdirTemp("", "syncthing-go-external-folder-modes-")
 	if err != nil {
 		return metrics, fmt.Errorf("create temp root: %w", err)
@@ -960,7 +1014,7 @@ func runGoExternalFolderModes() (folderModeMetrics, error) {
 		{id: "recvenc", mode: "receiveencrypted", dir: filepath.Join(root, "recvenc")},
 	}
 	for _, spec := range modeSpecs {
-		if err := prepareSoakFolder(spec.dir); err != nil {
+		if err := prepareSoakFolder(spec.dir, seed+int64(len(spec.id))); err != nil {
 			return metrics, fmt.Errorf("prepare folder %s: %w", spec.id, err)
 		}
 	}
@@ -994,6 +1048,9 @@ func runGoExternalFolderModes() (folderModeMetrics, error) {
 	defer proc.stop()
 	if err := waitForPing(baseURL, apiKey, startupTimeout); err != nil {
 		return metrics, fmt.Errorf("go daemon startup: %w (stderr=%s)", err, strings.TrimSpace(proc.stderr.String()))
+	}
+	if err := verifyRuntimeIdentity(baseURL, apiKey, "go"); err != nil {
+		return metrics, fmt.Errorf("go runtime identity check: %w", err)
 	}
 
 	for _, spec := range modeSpecs {
@@ -1067,8 +1124,11 @@ func runGoExternalFolderModes() (folderModeMetrics, error) {
 	return metrics, nil
 }
 
-func runRustExternalFolderModes() (folderModeMetrics, error) {
-	var metrics folderModeMetrics
+func runRustExternalFolderModes(seed int64) (folderModeMetrics, error) {
+	metrics := folderModeMetrics{
+		Seed:           seed,
+		WorkloadDigest: workloadDigest("external-folder-modes", seed),
+	}
 	root, err := os.MkdirTemp("", "syncthing-rs-external-folder-modes-")
 	if err != nil {
 		return metrics, fmt.Errorf("create temp root: %w", err)
@@ -1082,7 +1142,7 @@ func runRustExternalFolderModes() (folderModeMetrics, error) {
 		{id: "recvenc", mode: "receiveencrypted", dir: filepath.Join(root, "recvenc")},
 	}
 	for _, spec := range modeSpecs {
-		if err := prepareSoakFolder(spec.dir); err != nil {
+		if err := prepareSoakFolder(spec.dir, seed+int64(len(spec.id))); err != nil {
 			return metrics, fmt.Errorf("prepare folder %s: %w", spec.id, err)
 		}
 	}
@@ -1117,6 +1177,9 @@ func runRustExternalFolderModes() (folderModeMetrics, error) {
 	defer proc.stop()
 	if err := waitForPing(baseURL, "", startupTimeout); err != nil {
 		return metrics, fmt.Errorf("rust daemon startup: %w (stderr=%s)", err, strings.TrimSpace(proc.stderr.String()))
+	}
+	if err := verifyRuntimeIdentity(baseURL, "", "rust"); err != nil {
+		return metrics, fmt.Errorf("rust runtime identity check: %w", err)
 	}
 
 	for _, spec := range modeSpecs {
@@ -1189,8 +1252,11 @@ func runRustExternalFolderModes() (folderModeMetrics, error) {
 	return metrics, nil
 }
 
-func runGoExternalDurabilityRestart() (durabilityMetrics, error) {
-	var metrics durabilityMetrics
+func runGoExternalDurabilityRestart(seed int64) (durabilityMetrics, error) {
+	metrics := durabilityMetrics{
+		Seed:           seed,
+		WorkloadDigest: workloadDigest("external-durability", seed),
+	}
 	root, err := os.MkdirTemp("", "syncthing-go-external-durability-")
 	if err != nil {
 		return metrics, fmt.Errorf("create temp root: %w", err)
@@ -1199,7 +1265,7 @@ func runGoExternalDurabilityRestart() (durabilityMetrics, error) {
 
 	homeDir := filepath.Join(root, "home")
 	folderDir := filepath.Join(root, "folder")
-	if err := prepareSoakFolder(folderDir); err != nil {
+	if err := prepareSoakFolder(folderDir, seed); err != nil {
 		return metrics, err
 	}
 	if err := runCmd(20*time.Second, "go", "run", "./cmd/syncthing", "generate", "--home", homeDir, "--no-port-probing"); err != nil {
@@ -1232,6 +1298,9 @@ func runGoExternalDurabilityRestart() (durabilityMetrics, error) {
 	if err := waitForPing(baseURL, apiKey, startupTimeout); err != nil {
 		return metrics, fmt.Errorf("go first boot startup: %w (stderr=%s)", err, strings.TrimSpace(proc.stderr.String()))
 	}
+	if err := verifyRuntimeIdentity(baseURL, apiKey, "go"); err != nil {
+		return metrics, fmt.Errorf("go first boot runtime identity: %w", err)
+	}
 	metrics.FirstBootOK = true
 
 	if err := runCmd(
@@ -1253,7 +1322,8 @@ func runGoExternalDurabilityRestart() (durabilityMetrics, error) {
 		return metrics, fmt.Errorf("go first scan request: %w", err)
 	}
 	metrics.ScanOK = true
-	status, _, err := pollStatus(baseURL, apiKey, statusTimeout)
+	status, polls, err := pollStatus(baseURL, apiKey, statusTimeout)
+	metrics.StatusPollAttempts += polls
 	if err != nil {
 		return metrics, fmt.Errorf("go first status poll: %w", err)
 	}
@@ -1298,9 +1368,13 @@ func runGoExternalDurabilityRestart() (durabilityMetrics, error) {
 	if err := waitForPing(restartURL, apiKey, startupTimeout); err != nil {
 		return metrics, fmt.Errorf("go restart boot startup: %w (stderr=%s)", err, strings.TrimSpace(restarted.stderr.String()))
 	}
+	if err := verifyRuntimeIdentity(restartURL, apiKey, "go"); err != nil {
+		return metrics, fmt.Errorf("go restart runtime identity: %w", err)
+	}
 	metrics.RestartBootOK = true
 
-	restartStatus, _, err := pollStatus(restartURL, apiKey, statusTimeout)
+	restartStatus, polls, err := pollStatus(restartURL, apiKey, statusTimeout)
+	metrics.StatusPollAttempts += polls
 	if err != nil {
 		return metrics, fmt.Errorf("go restart status poll: %w", err)
 	}
@@ -1326,8 +1400,11 @@ func runGoExternalDurabilityRestart() (durabilityMetrics, error) {
 	return metrics, nil
 }
 
-func runRustExternalDurabilityRestart() (durabilityMetrics, error) {
-	var metrics durabilityMetrics
+func runRustExternalDurabilityRestart(seed int64) (durabilityMetrics, error) {
+	metrics := durabilityMetrics{
+		Seed:           seed,
+		WorkloadDigest: workloadDigest("external-durability", seed),
+	}
 	root, err := os.MkdirTemp("", "syncthing-rs-external-durability-")
 	if err != nil {
 		return metrics, fmt.Errorf("create temp root: %w", err)
@@ -1336,7 +1413,7 @@ func runRustExternalDurabilityRestart() (durabilityMetrics, error) {
 
 	folderDir := filepath.Join(root, "folder")
 	dbRoot := filepath.Join(root, "db")
-	if err := prepareSoakFolder(folderDir); err != nil {
+	if err := prepareSoakFolder(folderDir, seed); err != nil {
 		return metrics, err
 	}
 	if err := os.MkdirAll(dbRoot, 0o755); err != nil {
@@ -1370,6 +1447,9 @@ func runRustExternalDurabilityRestart() (durabilityMetrics, error) {
 	if err := waitForPing(baseURL, "", startupTimeout); err != nil {
 		return metrics, fmt.Errorf("rust first boot startup: %w (stderr=%s)", err, strings.TrimSpace(proc.stderr.String()))
 	}
+	if err := verifyRuntimeIdentity(baseURL, "", "rust"); err != nil {
+		return metrics, fmt.Errorf("rust first boot runtime identity: %w", err)
+	}
 	metrics.FirstBootOK = true
 	metrics.FolderConfigured = true
 
@@ -1377,7 +1457,8 @@ func runRustExternalDurabilityRestart() (durabilityMetrics, error) {
 		return metrics, fmt.Errorf("rust first scan request: %w", err)
 	}
 	metrics.ScanOK = true
-	status, _, err := pollStatus(baseURL, "", statusTimeout)
+	status, polls, err := pollStatus(baseURL, "", statusTimeout)
+	metrics.StatusPollAttempts += polls
 	if err != nil {
 		return metrics, fmt.Errorf("rust first status poll: %w", err)
 	}
@@ -1426,9 +1507,13 @@ func runRustExternalDurabilityRestart() (durabilityMetrics, error) {
 	if err := waitForPing(restartURL, "", startupTimeout); err != nil {
 		return metrics, fmt.Errorf("rust restart boot startup: %w (stderr=%s)", err, strings.TrimSpace(restarted.stderr.String()))
 	}
+	if err := verifyRuntimeIdentity(restartURL, "", "rust"); err != nil {
+		return metrics, fmt.Errorf("rust restart runtime identity: %w", err)
+	}
 	metrics.RestartBootOK = true
 
-	restartStatus, _, err := pollStatus(restartURL, "", statusTimeout)
+	restartStatus, polls, err := pollStatus(restartURL, "", statusTimeout)
+	metrics.StatusPollAttempts += polls
 	if err != nil {
 		return metrics, fmt.Errorf("rust restart status poll: %w", err)
 	}
@@ -1454,8 +1539,11 @@ func runRustExternalDurabilityRestart() (durabilityMetrics, error) {
 	return metrics, nil
 }
 
-func runGoExternalCrashRecoveryRestart() (crashMetrics, error) {
-	var metrics crashMetrics
+func runGoExternalCrashRecoveryRestart(seed int64) (crashMetrics, error) {
+	metrics := crashMetrics{
+		Seed:           seed,
+		WorkloadDigest: workloadDigest("external-crash-recovery", seed),
+	}
 	root, err := os.MkdirTemp("", "syncthing-go-external-crash-")
 	if err != nil {
 		return metrics, fmt.Errorf("create temp root: %w", err)
@@ -1465,7 +1553,7 @@ func runGoExternalCrashRecoveryRestart() (crashMetrics, error) {
 	homeDir := filepath.Join(root, "home")
 	folderDir := filepath.Join(root, "folder")
 	goBinary := filepath.Join(root, "syncthing-go")
-	if err := prepareSoakFolder(folderDir); err != nil {
+	if err := prepareSoakFolder(folderDir, seed); err != nil {
 		return metrics, err
 	}
 	if err := runCmd(90*time.Second, "go", "build", "-o", goBinary, "./cmd/syncthing"); err != nil {
@@ -1501,6 +1589,9 @@ func runGoExternalCrashRecoveryRestart() (crashMetrics, error) {
 	if err := waitForPing(baseURL, apiKey, startupTimeout); err != nil {
 		return metrics, fmt.Errorf("go first boot startup: %w (stderr=%s)", err, strings.TrimSpace(proc.stderr.String()))
 	}
+	if err := verifyRuntimeIdentity(baseURL, apiKey, "go"); err != nil {
+		return metrics, fmt.Errorf("go first boot runtime identity: %w", err)
+	}
 	metrics.FirstBootOK = true
 
 	if err := runCmd(
@@ -1522,7 +1613,8 @@ func runGoExternalCrashRecoveryRestart() (crashMetrics, error) {
 		return metrics, fmt.Errorf("go first scan request: %w", err)
 	}
 	metrics.ScanOK = true
-	status, _, err := pollStatus(baseURL, apiKey, statusTimeout)
+	status, polls, err := pollStatus(baseURL, apiKey, statusTimeout)
+	metrics.StatusPollAttempts += polls
 	if err != nil {
 		return metrics, fmt.Errorf("go first status poll: %w", err)
 	}
@@ -1565,9 +1657,13 @@ func runGoExternalCrashRecoveryRestart() (crashMetrics, error) {
 	if err := waitForPing(restartURL, apiKey, startupTimeout); err != nil {
 		return metrics, fmt.Errorf("go restart boot startup: %w (stderr=%s)", err, strings.TrimSpace(restarted.stderr.String()))
 	}
+	if err := verifyRuntimeIdentity(restartURL, apiKey, "go"); err != nil {
+		return metrics, fmt.Errorf("go restart runtime identity: %w", err)
+	}
 	metrics.RestartBootOK = true
 
-	restartStatus, _, err := pollStatus(restartURL, apiKey, statusTimeout)
+	restartStatus, polls, err := pollStatus(restartURL, apiKey, statusTimeout)
+	metrics.StatusPollAttempts += polls
 	if err != nil {
 		return metrics, fmt.Errorf("go restart status poll: %w", err)
 	}
@@ -1593,8 +1689,11 @@ func runGoExternalCrashRecoveryRestart() (crashMetrics, error) {
 	return metrics, nil
 }
 
-func runRustExternalCrashRecoveryRestart() (crashMetrics, error) {
-	var metrics crashMetrics
+func runRustExternalCrashRecoveryRestart(seed int64) (crashMetrics, error) {
+	metrics := crashMetrics{
+		Seed:           seed,
+		WorkloadDigest: workloadDigest("external-crash-recovery", seed),
+	}
 	root, err := os.MkdirTemp("", "syncthing-rs-external-crash-")
 	if err != nil {
 		return metrics, fmt.Errorf("create temp root: %w", err)
@@ -1603,7 +1702,7 @@ func runRustExternalCrashRecoveryRestart() (crashMetrics, error) {
 
 	folderDir := filepath.Join(root, "folder")
 	dbRoot := filepath.Join(root, "db")
-	if err := prepareSoakFolder(folderDir); err != nil {
+	if err := prepareSoakFolder(folderDir, seed); err != nil {
 		return metrics, err
 	}
 	if err := os.MkdirAll(dbRoot, 0o755); err != nil {
@@ -1637,6 +1736,9 @@ func runRustExternalCrashRecoveryRestart() (crashMetrics, error) {
 	if err := waitForPing(baseURL, "", startupTimeout); err != nil {
 		return metrics, fmt.Errorf("rust first boot startup: %w (stderr=%s)", err, strings.TrimSpace(proc.stderr.String()))
 	}
+	if err := verifyRuntimeIdentity(baseURL, "", "rust"); err != nil {
+		return metrics, fmt.Errorf("rust first boot runtime identity: %w", err)
+	}
 	metrics.FirstBootOK = true
 	metrics.FolderConfigured = true
 
@@ -1644,7 +1746,8 @@ func runRustExternalCrashRecoveryRestart() (crashMetrics, error) {
 		return metrics, fmt.Errorf("rust first scan request: %w", err)
 	}
 	metrics.ScanOK = true
-	status, _, err := pollStatus(baseURL, "", statusTimeout)
+	status, polls, err := pollStatus(baseURL, "", statusTimeout)
+	metrics.StatusPollAttempts += polls
 	if err != nil {
 		return metrics, fmt.Errorf("rust first status poll: %w", err)
 	}
@@ -1690,9 +1793,13 @@ func runRustExternalCrashRecoveryRestart() (crashMetrics, error) {
 	if err := waitForPing(restartURL, "", startupTimeout); err != nil {
 		return metrics, fmt.Errorf("rust restart boot startup: %w (stderr=%s)", err, strings.TrimSpace(restarted.stderr.String()))
 	}
+	if err := verifyRuntimeIdentity(restartURL, "", "rust"); err != nil {
+		return metrics, fmt.Errorf("rust restart runtime identity: %w", err)
+	}
 	metrics.RestartBootOK = true
 
-	restartStatus, _, err := pollStatus(restartURL, "", statusTimeout)
+	restartStatus, polls, err := pollStatus(restartURL, "", statusTimeout)
+	metrics.StatusPollAttempts += polls
 	if err != nil {
 		return metrics, fmt.Errorf("rust restart status poll: %w", err)
 	}
@@ -1718,24 +1825,32 @@ func runRustExternalCrashRecoveryRestart() (crashMetrics, error) {
 	return metrics, nil
 }
 
-func prepareSoakFolder(folderDir string) error {
+func prepareSoakFolder(folderDir string, seed int64) error {
 	if err := os.MkdirAll(filepath.Join(folderDir, "nested"), 0o755); err != nil {
 		return fmt.Errorf("create folder tree: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(folderDir, ".stfolder"), []byte(""), 0o644); err != nil {
 		return fmt.Errorf("write marker file: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(folderDir, "a.txt"), []byte("hello"), 0o644); err != nil {
+	if err := os.WriteFile(
+		filepath.Join(folderDir, "a.txt"),
+		[]byte(seededPayload("hello", seed)),
+		0o644,
+	); err != nil {
 		return fmt.Errorf("write a.txt: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(folderDir, "nested", "b.txt"), []byte("world"), 0o644); err != nil {
+	if err := os.WriteFile(
+		filepath.Join(folderDir, "nested", "b.txt"),
+		[]byte(seededPayload("world", seed+1)),
+		0o644,
+	); err != nil {
 		return fmt.Errorf("write nested/b.txt: %w", err)
 	}
 	return nil
 }
 
-func prepareMultiFolderSoakFolder(folderDir string) error {
-	if err := prepareSoakFolder(folderDir); err != nil {
+func prepareMultiFolderSoakFolder(folderDir string, seed int64) error {
+	if err := prepareSoakFolder(folderDir, seed); err != nil {
 		return err
 	}
 	for _, dir := range []string{"a", "a.d"} {
@@ -1744,10 +1859,10 @@ func prepareMultiFolderSoakFolder(folderDir string) error {
 		}
 	}
 	files := map[string]string{
-		"a/x.txt":   "ax",
-		"a/z.txt":   "az",
-		"a.d/x.txt": "adx",
-		"a.d/y.txt": "ady",
+		"a/x.txt":   seededPayload("ax", seed+2),
+		"a/z.txt":   seededPayload("az", seed+3),
+		"a.d/x.txt": seededPayload("adx", seed+4),
+		"a.d/y.txt": seededPayload("ady", seed+5),
 	}
 	for rel, content := range files {
 		if err := os.WriteFile(filepath.Join(folderDir, rel), []byte(content), 0o644); err != nil {
@@ -1755,6 +1870,27 @@ func prepareMultiFolderSoakFolder(folderDir string) error {
 		}
 	}
 	return nil
+}
+
+func seedFromEnv() int64 {
+	seedRaw := strings.TrimSpace(os.Getenv("PARITY_SEED"))
+	if seedRaw == "" {
+		return 1
+	}
+	seed, err := strconv.ParseInt(seedRaw, 10, 64)
+	if err != nil {
+		return 1
+	}
+	return seed
+}
+
+func seededPayload(prefix string, seed int64) string {
+	return fmt.Sprintf("%s-%d", prefix, seed)
+}
+
+func workloadDigest(tag string, seed int64) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", tag, seed)))
+	return hex.EncodeToString(sum[:])
 }
 
 func parseAPIKey(configPath string) (string, error) {
@@ -1819,6 +1955,33 @@ func waitForPing(baseURL, apiKey string, timeout time.Duration) error {
 	return fmt.Errorf("timed out waiting for ping")
 }
 
+func verifyRuntimeIdentity(baseURL, apiKey, expectedSource string) error {
+	payload, status, err := requestJSON(http.MethodGet, baseURL+"/rest/system/version", apiKey)
+	if err != nil {
+		return fmt.Errorf("request version endpoint: %w", err)
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("version endpoint returned status %d", status)
+	}
+
+	longVersion := strings.ToLower(strings.TrimSpace(stringField(payload, "longVersion")))
+	version := strings.ToLower(strings.TrimSpace(stringField(payload, "version")))
+	isRustSignature := strings.Contains(longVersion, "syncthing-rs") || strings.Contains(version, "syncthing-rs")
+	switch strings.ToLower(strings.TrimSpace(expectedSource)) {
+	case "go":
+		if isRustSignature {
+			return fmt.Errorf("expected go runtime but version payload reports rust: longVersion=%q version=%q", longVersion, version)
+		}
+	case "rust":
+		if !isRustSignature {
+			return fmt.Errorf("expected rust runtime signature in version payload, got longVersion=%q version=%q", longVersion, version)
+		}
+	default:
+		return fmt.Errorf("unsupported runtime source expectation %q", expectedSource)
+	}
+	return nil
+}
+
 func pollStatus(baseURL, apiKey string, timeout time.Duration) (map[string]any, int, error) {
 	return pollStatusForFolder(baseURL, apiKey, "default", timeout)
 }
@@ -1880,11 +2043,73 @@ func verifyIndexedFiles(baseURL, apiKey, folder string, files []string) error {
 		if status != http.StatusOK {
 			return fmt.Errorf("request %s returned status %d", target, status)
 		}
-		if len(payload) == 0 {
-			return fmt.Errorf("request %s returned empty payload", target)
+		if err := validateIndexedFilePayload(payload, file); err != nil {
+			return fmt.Errorf("request %s %w payload=%v", target, err, payload)
 		}
 	}
 	return nil
+}
+
+func validateIndexedFilePayload(payload map[string]any, expectedFile string) error {
+	if len(payload) == 0 {
+		return fmt.Errorf("returned empty payload")
+	}
+	if existsRaw, hasExists := payload["exists"]; hasExists {
+		exists, ok := existsRaw.(bool)
+		if !ok || !exists {
+			return fmt.Errorf("returned non-existing entry")
+		}
+		entry, ok := payload["entry"].(map[string]any)
+		if !ok {
+			return fmt.Errorf("returned invalid entry object")
+		}
+		return validateIndexedEntry(entry, expectedFile)
+	}
+
+	// Go's /rest/db/file shape exposes local/global objects instead of exists/entry.
+	if local, ok := payload["local"].(map[string]any); ok && len(local) > 0 {
+		if err := validateIndexedEntry(local, expectedFile); err == nil {
+			return nil
+		}
+	}
+	if global, ok := payload["global"].(map[string]any); ok && len(global) > 0 {
+		if err := validateIndexedEntry(global, expectedFile); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("returned no recognizable indexed entry")
+}
+
+func validateIndexedEntry(entry map[string]any, expectedFile string) error {
+	if len(entry) == 0 {
+		return fmt.Errorf("entry missing")
+	}
+	if deleted, ok := entry["deleted"].(bool); ok && deleted {
+		return fmt.Errorf("entry marked deleted")
+	}
+	name := strings.TrimSpace(stringField(entry, "path"))
+	if name == "" {
+		name = strings.TrimSpace(stringField(entry, "name"))
+	}
+	if name == "" {
+		return fmt.Errorf("entry missing name/path")
+	}
+	if expectedFile != "" && name != expectedFile {
+		return fmt.Errorf("entry path mismatch")
+	}
+	if _, ok := entry["size"]; !ok {
+		return fmt.Errorf("entry missing size")
+	}
+	if _, ok := entry["blockHashes"]; ok {
+		return nil
+	}
+	if _, ok := entry["blocksHash"]; ok {
+		return nil
+	}
+	if _, ok := entry["numBlocks"]; ok {
+		return nil
+	}
+	return fmt.Errorf("entry missing block hash metadata")
 }
 
 func fetchFolderTypeMap(baseURL, apiKey string) (map[string]string, error) {

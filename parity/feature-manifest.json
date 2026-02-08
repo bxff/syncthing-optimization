@@ -15213,6 +15213,8 @@
       "rust_symbol": "NewModel",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15231,6 +15233,8 @@
       "rust_symbol": "encryptionTokenPath",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15249,6 +15253,8 @@
       "rust_symbol": "findByName",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15267,6 +15273,8 @@
       "rust_symbol": "mapDevices",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15285,6 +15293,8 @@
       "rust_symbol": "mapFolders",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15303,6 +15313,8 @@
       "rust_symbol": "newFolderCompletion",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15321,6 +15333,8 @@
       "rust_symbol": "newFolderConfiguration",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15339,6 +15353,8 @@
       "rust_symbol": "newLimitedRequestResponse",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15357,6 +15373,8 @@
       "rust_symbol": "newPager",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15375,6 +15393,8 @@
       "rust_symbol": "newRequestResponse",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15393,6 +15413,8 @@
       "rust_symbol": "observedDeviceSet",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15411,6 +15433,8 @@
       "rust_symbol": "readEncryptionToken",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15429,6 +15453,8 @@
       "rust_symbol": "readOffsetIntoBuf",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15447,6 +15473,8 @@
       "rust_symbol": "redactPathError",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15465,6 +15493,8 @@
       "rust_symbol": "without",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15483,6 +15513,8 @@
       "rust_symbol": "writeEncryptionToken",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15501,6 +15533,8 @@
       "rust_symbol": "AllGlobalFiles",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15519,6 +15553,8 @@
       "rust_symbol": "Availability",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15537,6 +15573,8 @@
       "rust_symbol": "BringToFront",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15555,6 +15593,8 @@
       "rust_symbol": "Completion",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15573,6 +15613,8 @@
       "rust_symbol": "ConnectedTo",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15591,6 +15633,8 @@
       "rust_symbol": "ConnectionStats",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15609,6 +15653,8 @@
       "rust_symbol": "CurrentFolderFile",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15627,6 +15673,8 @@
       "rust_symbol": "CurrentGlobalFile",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15645,6 +15693,8 @@
       "rust_symbol": "CurrentIgnores",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15663,6 +15713,8 @@
       "rust_symbol": "DelayScan",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15681,6 +15733,8 @@
       "rust_symbol": "DeviceStatistics",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15699,6 +15753,8 @@
       "rust_symbol": "DismissPendingDevice",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15717,6 +15773,8 @@
       "rust_symbol": "DismissPendingFolder",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15735,6 +15793,8 @@
       "rust_symbol": "FolderErrors",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15753,6 +15813,8 @@
       "rust_symbol": "FolderProgressBytesCompleted",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15771,6 +15833,8 @@
       "rust_symbol": "FolderStatistics",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15789,6 +15853,8 @@
       "rust_symbol": "GetFolderVersions",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15807,6 +15873,8 @@
       "rust_symbol": "GlobalDirectoryTree",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15825,6 +15893,8 @@
       "rust_symbol": "GlobalSize",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15843,6 +15913,8 @@
       "rust_symbol": "LoadIgnores",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15861,6 +15933,8 @@
       "rust_symbol": "LocalChangedFolderFiles",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15879,6 +15953,8 @@
       "rust_symbol": "LocalFiles",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15897,6 +15973,8 @@
       "rust_symbol": "LocalFilesSequenced",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15915,6 +15993,8 @@
       "rust_symbol": "LocalSize",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15933,6 +16013,8 @@
       "rust_symbol": "NeedFolderFiles",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15951,6 +16033,8 @@
       "rust_symbol": "NeedSize",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15969,6 +16053,8 @@
       "rust_symbol": "Override",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -15987,6 +16073,8 @@
       "rust_symbol": "PendingDevices",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16005,6 +16093,8 @@
       "rust_symbol": "PendingFolders",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16023,6 +16113,8 @@
       "rust_symbol": "ReceiveOnlySize",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16041,6 +16133,8 @@
       "rust_symbol": "RemoteNeedFolderFiles",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16059,6 +16153,8 @@
       "rust_symbol": "RemoteSequences",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16077,6 +16173,8 @@
       "rust_symbol": "RequestGlobal",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16095,6 +16193,8 @@
       "rust_symbol": "ResetFolder",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16113,6 +16213,8 @@
       "rust_symbol": "RestoreFolderVersions",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16131,6 +16233,8 @@
       "rust_symbol": "Revert",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16149,6 +16253,8 @@
       "rust_symbol": "ScanFolder",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16167,6 +16273,8 @@
       "rust_symbol": "ScanFolderSubdirs",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16185,6 +16293,8 @@
       "rust_symbol": "ScanFolders",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16203,6 +16313,8 @@
       "rust_symbol": "Sequence",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16221,6 +16333,8 @@
       "rust_symbol": "SetIgnores",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16239,6 +16353,8 @@
       "rust_symbol": "State",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16257,6 +16373,8 @@
       "rust_symbol": "UsageReportingStats",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16275,6 +16393,8 @@
       "rust_symbol": "WatchError",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16293,6 +16413,8 @@
       "rust_symbol": "Model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16311,6 +16433,8 @@
       "rust_symbol": "Service",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16329,6 +16453,8 @@
       "rust_symbol": "BringToFront",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16347,6 +16473,8 @@
       "rust_symbol": "DelayScan",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16365,6 +16493,8 @@
       "rust_symbol": "Errors",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16383,6 +16513,8 @@
       "rust_symbol": "GetStatistics",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16401,6 +16533,8 @@
       "rust_symbol": "Jobs",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16419,6 +16553,8 @@
       "rust_symbol": "Override",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16437,6 +16573,8 @@
       "rust_symbol": "Revert",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16455,6 +16593,8 @@
       "rust_symbol": "Scan",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16473,6 +16613,8 @@
       "rust_symbol": "ScheduleForceRescan",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16491,6 +16633,8 @@
       "rust_symbol": "SchedulePull",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16509,6 +16653,8 @@
       "rust_symbol": "ScheduleScan",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16527,6 +16673,8 @@
       "rust_symbol": "WatchError",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16545,6 +16693,8 @@
       "rust_symbol": "getState",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16563,6 +16713,8 @@
       "rust_symbol": "Service",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16581,6 +16733,8 @@
       "rust_symbol": "Map",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16599,6 +16753,8 @@
       "rust_symbol": "add",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16617,6 +16773,8 @@
       "rust_symbol": "setCompletionPct",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16635,6 +16793,8 @@
       "rust_symbol": "AsSlice",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16653,6 +16813,8 @@
       "rust_symbol": "add",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16671,6 +16833,8 @@
       "rust_symbol": "has",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16689,6 +16853,8 @@
       "rust_symbol": "hasDevice",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16707,6 +16873,8 @@
       "rust_symbol": "set",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16725,6 +16893,8 @@
       "rust_symbol": "AddConnection",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16743,6 +16913,8 @@
       "rust_symbol": "AllForBlocksHash",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16761,6 +16933,8 @@
       "rust_symbol": "AllGlobalFiles",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16779,6 +16953,8 @@
       "rust_symbol": "Availability",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16797,6 +16973,8 @@
       "rust_symbol": "BringToFront",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16815,6 +16993,8 @@
       "rust_symbol": "Closed",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16833,6 +17013,8 @@
       "rust_symbol": "ClusterConfig",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16851,6 +17033,8 @@
       "rust_symbol": "CommitConfiguration",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16869,6 +17053,8 @@
       "rust_symbol": "Completion",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16887,6 +17073,8 @@
       "rust_symbol": "ConnectedTo",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16905,6 +17093,8 @@
       "rust_symbol": "ConnectionStats",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16923,6 +17113,8 @@
       "rust_symbol": "CurrentFolderFile",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16941,6 +17133,8 @@
       "rust_symbol": "CurrentGlobalFile",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16959,6 +17153,8 @@
       "rust_symbol": "CurrentIgnores",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16977,6 +17173,8 @@
       "rust_symbol": "DelayScan",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -16995,6 +17193,8 @@
       "rust_symbol": "DeviceStatistics",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17013,6 +17213,8 @@
       "rust_symbol": "DismissPendingDevice",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17031,6 +17233,8 @@
       "rust_symbol": "DismissPendingFolder",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17049,6 +17253,8 @@
       "rust_symbol": "DownloadProgress",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17067,6 +17273,8 @@
       "rust_symbol": "FolderErrors",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17085,6 +17293,8 @@
       "rust_symbol": "FolderProgressBytesCompleted",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17103,6 +17313,8 @@
       "rust_symbol": "FolderStatistics",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17121,6 +17333,8 @@
       "rust_symbol": "GetFolderVersions",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17139,6 +17353,8 @@
       "rust_symbol": "GlobalDirectoryTree",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17157,6 +17373,8 @@
       "rust_symbol": "GlobalSize",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17175,6 +17393,8 @@
       "rust_symbol": "Index",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17193,6 +17413,8 @@
       "rust_symbol": "IndexUpdate",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17211,6 +17433,8 @@
       "rust_symbol": "LoadIgnores",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17229,6 +17453,8 @@
       "rust_symbol": "LocalChangedFolderFiles",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17247,6 +17473,8 @@
       "rust_symbol": "LocalFiles",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17265,6 +17493,8 @@
       "rust_symbol": "LocalFilesSequenced",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17283,6 +17513,8 @@
       "rust_symbol": "LocalSize",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17301,6 +17533,8 @@
       "rust_symbol": "NeedFolderFiles",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17319,6 +17553,8 @@
       "rust_symbol": "NeedSize",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17337,6 +17573,8 @@
       "rust_symbol": "OnHello",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17355,6 +17593,8 @@
       "rust_symbol": "Override",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17373,6 +17613,8 @@
       "rust_symbol": "PendingDevices",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17391,6 +17633,8 @@
       "rust_symbol": "PendingFolders",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17409,6 +17653,8 @@
       "rust_symbol": "ReceiveOnlySize",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17427,6 +17673,8 @@
       "rust_symbol": "RemoteNeedFolderFiles",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17445,6 +17693,8 @@
       "rust_symbol": "RemoteSequences",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17463,6 +17713,8 @@
       "rust_symbol": "Request",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17481,6 +17733,8 @@
       "rust_symbol": "RequestGlobal",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17499,6 +17753,8 @@
       "rust_symbol": "ResetFolder",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17517,6 +17773,8 @@
       "rust_symbol": "RestoreFolderVersions",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17535,6 +17793,8 @@
       "rust_symbol": "Revert",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17553,6 +17813,8 @@
       "rust_symbol": "ScanFolder",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17571,6 +17833,8 @@
       "rust_symbol": "ScanFolderSubdirs",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17589,6 +17853,8 @@
       "rust_symbol": "ScanFolders",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17607,6 +17873,8 @@
       "rust_symbol": "Sequence",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17625,6 +17893,8 @@
       "rust_symbol": "SetIgnores",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17643,6 +17913,8 @@
       "rust_symbol": "State",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17661,6 +17933,8 @@
       "rust_symbol": "String",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17679,6 +17953,8 @@
       "rust_symbol": "UsageReportingStats",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17697,6 +17973,8 @@
       "rust_symbol": "VerifyConfiguration",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17715,6 +17993,8 @@
       "rust_symbol": "WatchError",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17733,6 +18013,8 @@
       "rust_symbol": "addAndStartFolderLocked",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17751,6 +18033,8 @@
       "rust_symbol": "addAndStartFolderLockedWithIgnores",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17769,6 +18053,8 @@
       "rust_symbol": "blockAvailability",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17787,6 +18073,8 @@
       "rust_symbol": "blockAvailabilityFromTemporaryRLocked",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17805,6 +18093,8 @@
       "rust_symbol": "blockAvailabilityRLocked",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17823,6 +18113,8 @@
       "rust_symbol": "ccCheckEncryption",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17841,6 +18133,8 @@
       "rust_symbol": "ccHandleFolders",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17859,6 +18153,8 @@
       "rust_symbol": "checkFolderRunningRLocked",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17877,6 +18173,8 @@
       "rust_symbol": "cleanPending",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17895,6 +18193,8 @@
       "rust_symbol": "cleanupFolderLocked",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17913,6 +18213,8 @@
       "rust_symbol": "closeAllConnectionsAndWait",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17931,6 +18233,8 @@
       "rust_symbol": "deviceDidCloseRLocked",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17949,6 +18253,8 @@
       "rust_symbol": "deviceWasSeen",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17967,6 +18273,8 @@
       "rust_symbol": "ensureIndexHandler",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -17985,6 +18293,8 @@
       "rust_symbol": "fatal",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18003,6 +18313,8 @@
       "rust_symbol": "fileAvailability",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18021,6 +18333,8 @@
       "rust_symbol": "fileAvailabilityRLocked",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18039,6 +18353,8 @@
       "rust_symbol": "folderCompletion",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18057,6 +18373,8 @@
       "rust_symbol": "generateClusterConfig",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18075,6 +18393,8 @@
       "rust_symbol": "generateClusterConfigRLocked",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18093,6 +18413,8 @@
       "rust_symbol": "getIndexHandlerRLocked",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18111,6 +18433,8 @@
       "rust_symbol": "handleAutoAccepts",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18129,6 +18453,8 @@
       "rust_symbol": "handleDeintroductions",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18147,6 +18473,8 @@
       "rust_symbol": "handleIndex",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18165,6 +18493,8 @@
       "rust_symbol": "handleIntroductions",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18183,6 +18513,8 @@
       "rust_symbol": "initFolders",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18201,6 +18533,8 @@
       "rust_symbol": "introduceDevice",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18219,6 +18553,8 @@
       "rust_symbol": "newFolder",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18237,6 +18573,8 @@
       "rust_symbol": "numHashers",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18255,6 +18593,8 @@
       "rust_symbol": "promoteConnections",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18273,6 +18613,8 @@
       "rust_symbol": "recheckFile",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18291,6 +18633,8 @@
       "rust_symbol": "removeFolder",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18309,6 +18653,8 @@
       "rust_symbol": "requestConnectionForDevice",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18327,6 +18673,8 @@
       "rust_symbol": "restartFolder",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18345,6 +18693,8 @@
       "rust_symbol": "scheduleConnectionPromotion",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18363,6 +18713,8 @@
       "rust_symbol": "sendClusterConfig",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18381,6 +18733,8 @@
       "rust_symbol": "serve",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18399,6 +18753,8 @@
       "rust_symbol": "setConnRequestLimitersLocked",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18417,6 +18773,8 @@
       "rust_symbol": "setIgnores",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18435,6 +18793,8 @@
       "rust_symbol": "warnAboutOverwritingProtectedFiles",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18453,6 +18813,8 @@
       "rust_symbol": "done",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18471,6 +18833,8 @@
       "rust_symbol": "skip",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18489,6 +18853,8 @@
       "rust_symbol": "Close",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18507,6 +18873,8 @@
       "rust_symbol": "Data",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18525,6 +18893,8 @@
       "rust_symbol": "Wait",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18543,6 +18913,8 @@
       "rust_symbol": "Get",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18561,6 +18933,8 @@
       "rust_symbol": "Availability",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18579,6 +18953,8 @@
       "rust_symbol": "Availability",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18597,6 +18973,8 @@
       "rust_symbol": "ClusterConfigReceivedEventData",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18615,6 +18993,8 @@
       "rust_symbol": "ConnectionInfo",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18633,6 +19013,8 @@
       "rust_symbol": "ConnectionInfo",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18651,6 +19033,8 @@
       "rust_symbol": "ConnectionInfo",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18669,6 +19053,8 @@
       "rust_symbol": "ConnectionInfo",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18687,6 +19073,8 @@
       "rust_symbol": "ConnectionInfo",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18705,6 +19093,8 @@
       "rust_symbol": "ConnectionStats",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18723,6 +19113,8 @@
       "rust_symbol": "ConnectionStats",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18741,6 +19133,8 @@
       "rust_symbol": "ConnectionStats",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18759,6 +19153,8 @@
       "rust_symbol": "ConnectionStats",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18777,6 +19173,8 @@
       "rust_symbol": "ConnectionStats",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18795,6 +19193,8 @@
       "rust_symbol": "ConnectionStats",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18813,6 +19213,8 @@
       "rust_symbol": "ConnectionStats",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18831,6 +19233,8 @@
       "rust_symbol": "ConnectionStats",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18849,6 +19253,8 @@
       "rust_symbol": "ConnectionStats",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18867,6 +19273,8 @@
       "rust_symbol": "ConnectionStats",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18885,6 +19293,8 @@
       "rust_symbol": "FolderCompletion",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18903,6 +19313,8 @@
       "rust_symbol": "FolderCompletion",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18921,6 +19333,8 @@
       "rust_symbol": "FolderCompletion",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18939,6 +19353,8 @@
       "rust_symbol": "FolderCompletion",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18957,6 +19373,8 @@
       "rust_symbol": "FolderCompletion",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18975,6 +19393,8 @@
       "rust_symbol": "FolderCompletion",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -18993,6 +19413,8 @@
       "rust_symbol": "FolderCompletion",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19011,6 +19433,8 @@
       "rust_symbol": "FolderCompletion",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19029,6 +19453,8 @@
       "rust_symbol": "TreeEntry",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19047,6 +19473,8 @@
       "rust_symbol": "TreeEntry",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19065,6 +19493,8 @@
       "rust_symbol": "TreeEntry",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19083,6 +19513,8 @@
       "rust_symbol": "TreeEntry",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19101,6 +19533,8 @@
       "rust_symbol": "TreeEntry",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19119,6 +19553,8 @@
       "rust_symbol": "clusterConfigDeviceInfo",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19137,6 +19573,8 @@
       "rust_symbol": "clusterConfigDeviceInfo",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19155,6 +19593,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19173,6 +19613,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19191,6 +19633,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19209,6 +19653,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19227,6 +19673,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19245,6 +19693,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19263,6 +19713,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19281,6 +19733,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19299,6 +19753,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19317,6 +19773,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19335,6 +19793,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19353,6 +19813,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19371,6 +19833,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19389,6 +19853,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19407,6 +19873,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19425,6 +19893,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19443,6 +19913,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19461,6 +19933,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19479,6 +19953,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19497,6 +19973,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19515,6 +19993,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19533,6 +20013,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19551,6 +20033,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19569,6 +20053,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19587,6 +20073,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19605,6 +20093,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19623,6 +20113,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19641,6 +20133,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19659,6 +20153,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19677,6 +20173,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19695,6 +20193,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19713,6 +20213,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19731,6 +20233,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19749,6 +20253,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19767,6 +20273,8 @@
       "rust_symbol": "pager",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19785,6 +20293,8 @@
       "rust_symbol": "pager",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19803,6 +20313,8 @@
       "rust_symbol": "redactedError",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19821,6 +20333,8 @@
       "rust_symbol": "redactedError",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19839,6 +20353,8 @@
       "rust_symbol": "requestResponse",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19857,6 +20373,8 @@
       "rust_symbol": "requestResponse",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19875,6 +20393,8 @@
       "rust_symbol": "requestResponse",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19893,6 +20413,8 @@
       "rust_symbol": "storedEncryptionToken",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19911,6 +20433,8 @@
       "rust_symbol": "storedEncryptionToken",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19929,6 +20453,8 @@
       "rust_symbol": "syncMutexMap",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19947,6 +20473,8 @@
       "rust_symbol": "updatedPendingFolder",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19965,6 +20493,8 @@
       "rust_symbol": "updatedPendingFolder",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -19983,6 +20513,8 @@
       "rust_symbol": "updatedPendingFolder",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20001,6 +20533,8 @@
       "rust_symbol": "updatedPendingFolder",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20019,6 +20553,8 @@
       "rust_symbol": "updatedPendingFolder",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20037,6 +20573,8 @@
       "rust_symbol": "Availability",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20055,6 +20593,8 @@
       "rust_symbol": "ClusterConfigReceivedEventData",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20073,6 +20613,8 @@
       "rust_symbol": "ConnectionInfo",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20091,6 +20633,8 @@
       "rust_symbol": "ConnectionStats",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20109,6 +20653,8 @@
       "rust_symbol": "FolderCompletion",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20127,6 +20673,8 @@
       "rust_symbol": "Model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20145,6 +20693,8 @@
       "rust_symbol": "TreeEntry",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20163,6 +20713,8 @@
       "rust_symbol": "clusterConfigDeviceInfo",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20181,6 +20733,8 @@
       "rust_symbol": "deviceIDSet",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20199,6 +20753,8 @@
       "rust_symbol": "folderDeviceSet",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20217,6 +20773,8 @@
       "rust_symbol": "folderFactory",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20235,6 +20793,8 @@
       "rust_symbol": "model",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20253,6 +20813,8 @@
       "rust_symbol": "pager",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20271,6 +20833,8 @@
       "rust_symbol": "redactedError",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20289,6 +20853,8 @@
       "rust_symbol": "requestResponse",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20307,6 +20873,8 @@
       "rust_symbol": "service",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20325,6 +20893,8 @@
       "rust_symbol": "storedEncryptionToken",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20343,6 +20913,8 @@
       "rust_symbol": "syncMutexMap",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20361,6 +20933,8 @@
       "rust_symbol": "updatedPendingFolder",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20379,6 +20953,8 @@
       "rust_symbol": "ErrFolderMissing",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20397,6 +20973,8 @@
       "rust_symbol": "ErrFolderNotRunning",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20415,6 +20993,8 @@
       "rust_symbol": "ErrFolderPaused",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20433,6 +21013,8 @@
       "rust_symbol": "underscore_var",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20451,6 +21033,8 @@
       "rust_symbol": "errDevicePaused",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20469,6 +21053,8 @@
       "rust_symbol": "errDeviceUnknown",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20487,6 +21073,8 @@
       "rust_symbol": "errEncryptionInvConfigLocal",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20505,6 +21093,8 @@
       "rust_symbol": "errEncryptionInvConfigRemote",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20523,6 +21113,8 @@
       "rust_symbol": "errEncryptionNotEncryptedLocal",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20541,6 +21133,8 @@
       "rust_symbol": "errEncryptionNotEncryptedUntrusted",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20559,6 +21153,8 @@
       "rust_symbol": "errEncryptionPassword",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20577,6 +21173,8 @@
       "rust_symbol": "errEncryptionPlainForReceiveEncrypted",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20595,6 +21193,8 @@
       "rust_symbol": "errEncryptionPlainForRemoteEncrypted",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20613,6 +21213,8 @@
       "rust_symbol": "errEncryptionTokenRead",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20631,6 +21233,8 @@
       "rust_symbol": "errEncryptionTokenWrite",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20649,6 +21253,8 @@
       "rust_symbol": "errMissingLocalInClusterConfig",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20667,6 +21273,8 @@
       "rust_symbol": "errMissingRemoteInClusterConfig",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20685,6 +21293,8 @@
       "rust_symbol": "errNoVersioner",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20703,6 +21313,8 @@
       "rust_symbol": "errStopped",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",
@@ -20721,6 +21333,8 @@
       "rust_symbol": "folderFactories",
       "required_tests": [
         "scenario/crash-recovery",
+        "scenario/daemon-api-surface",
+        "scenario/external-soak-replacement",
         "scenario/folder-type-behavior",
         "scenario/global-need-decision",
         "scenario/index-sequence-behavior",

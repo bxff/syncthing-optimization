@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-02-08T03:11:43Z",
+  "generated_at": "2026-02-08T08:04:34Z",
   "memory_cap": {
-    "status": "passed",
+    "status": "failed",
     "flaky": false,
     "profile_mb": 50
   }

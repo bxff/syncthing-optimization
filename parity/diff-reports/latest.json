@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-02-08T03:11:43Z",
+  "generated_at": "2026-02-08T08:04:34Z",
   "produced_by": "parity-harness",
   "input_roots": [
     "syncthing-rs/src",
@@ -17,16 +17,83 @@
     "script/parity_harness.go",
     "script/parity_harness_go.go"
   ],
-  "inputs_digest": "5bee4b7405a2c84919ccb3e673bd43baad7c91ca224198e359e6bc1bdc1e66ee",
-  "match": true,
-  "mismatches": [],
+  "inputs_digest": "079b57082bebccf0eb94c3c0ddb762fc446e90eb1d6c15e690c0ec1e3cf00873",
+  "match": false,
+  "mismatches": [
+    {
+      "id": "crash-recovery",
+      "severity": "P0",
+      "open": true,
+      "message": "required scenario evidence too weak: have=synthetic need\u003e=daemon"
+    },
+    {
+      "id": "daemon-api-surface",
+      "severity": "P0",
+      "open": true,
+      "message": "required scenario evidence too weak: have=synthetic need\u003e=daemon"
+    },
+    {
+      "id": "folder-type-behavior",
+      "severity": "P0",
+      "open": true,
+      "message": "required scenario evidence too weak: have=synthetic need\u003e=daemon"
+    },
+    {
+      "id": "global-need-decision",
+      "severity": "P0",
+      "open": true,
+      "message": "required scenario evidence too weak: have=synthetic need\u003e=daemon"
+    },
+    {
+      "id": "index-sequence-behavior",
+      "severity": "P0",
+      "open": true,
+      "message": "required scenario evidence too weak: have=synthetic need\u003e=daemon"
+    },
+    {
+      "id": "memory-cap-50mb",
+      "severity": "P0",
+      "open": true,
+      "message": "run=1 seed=1: json outputs differ"
+    },
+    {
+      "id": "path-order-invariant",
+      "severity": "P0",
+      "open": true,
+      "message": "required scenario evidence too weak: have=synthetic need\u003e=daemon"
+    },
+    {
+      "id": "protocol-state-transition",
+      "severity": "P0",
+      "open": true,
+      "message": "run=1 seed=1: json outputs differ"
+    },
+    {
+      "id": "wal-free-durability",
+      "severity": "P0",
+      "open": true,
+      "message": "required scenario evidence too weak: have=synthetic need\u003e=daemon"
+    },
+    {
+      "id": "conflict-and-ignore-semantics",
+      "severity": "P1",
+      "open": true,
+      "message": "required scenario evidence too weak: have=synthetic need\u003e=daemon"
+    },
+    {
+      "id": "memory-cap-diagnostics",
+      "severity": "P1",
+      "open": true,
+      "message": "required scenario evidence too weak: have=synthetic need\u003e=daemon"
+    }
+  ],
   "scenarios": [
     {
       "id": "conflict-and-ignore-semantics",
       "severity": "P1",
       "required": true,
-      "status": "pass",
-      "message": "go and rust outputs match",
+      "status": "mismatch",
+      "message": "required scenario evidence too weak: have=synthetic need\u003e=daemon",
       "evidence": "synthetic",
       "go_evidence": "synthetic",
       "rust_evidence": "daemon"
@@ -35,8 +102,8 @@
       "id": "crash-recovery",
       "severity": "P0",
       "required": true,
-      "status": "pass",
-      "message": "go and rust outputs match",
+      "status": "mismatch",
+      "message": "required scenario evidence too weak: have=synthetic need\u003e=daemon",
       "evidence": "synthetic",
       "go_evidence": "synthetic",
       "rust_evidence": "daemon"
@@ -44,9 +111,9 @@
     {
       "id": "daemon-api-surface",
       "severity": "P0",
-      "required": false,
-      "status": "pass",
-      "message": "go and rust outputs match",
+      "required": true,
+      "status": "mismatch",
+      "message": "required scenario evidence too weak: have=synthetic need\u003e=daemon",
       "evidence": "synthetic",
       "go_evidence": "synthetic",
       "rust_evidence": "daemon"
@@ -56,7 +123,7 @@
       "severity": "P0",
       "required": false,
       "status": "pass",
-      "message": "go and rust outputs match",
+      "message": "go and rust outputs match (runs=1)",
       "evidence": "external-soak",
       "go_evidence": "external-soak",
       "rust_evidence": "external-soak"
@@ -66,7 +133,7 @@
       "severity": "P0",
       "required": false,
       "status": "pass",
-      "message": "go and rust outputs match",
+      "message": "go and rust outputs match (runs=1)",
       "evidence": "external-soak",
       "go_evidence": "external-soak",
       "rust_evidence": "external-soak"
@@ -76,7 +143,7 @@
       "severity": "P0",
       "required": false,
       "status": "pass",
-      "message": "go and rust outputs match",
+      "message": "go and rust outputs match (runs=1)",
       "evidence": "external-soak",
       "go_evidence": "external-soak",
       "rust_evidence": "external-soak"
@@ -86,7 +153,7 @@
       "severity": "P0",
       "required": false,
       "status": "pass",
-      "message": "go and rust outputs match",
+      "message": "go and rust outputs match (runs=1)",
       "evidence": "external-soak",
       "go_evidence": "external-soak",
       "rust_evidence": "external-soak"
@@ -94,9 +161,9 @@
     {
       "id": "external-soak-replacement",
       "severity": "P0",
-      "required": false,
+      "required": true,
       "status": "pass",
-      "message": "go and rust outputs match",
+      "message": "go and rust outputs match (runs=1)",
       "evidence": "external-soak",
       "go_evidence": "external-soak",
       "rust_evidence": "external-soak"
@@ -105,8 +172,8 @@
       "id": "folder-type-behavior",
       "severity": "P0",
       "required": true,
-      "status": "pass",
-      "message": "go and rust outputs match",
+      "status": "mismatch",
+      "message": "required scenario evidence too weak: have=synthetic need\u003e=daemon",
       "evidence": "synthetic",
       "go_evidence": "synthetic",
       "rust_evidence": "daemon"
@@ -114,9 +181,9 @@
     {
       "id": "global-need-decision",
       "severity": "P0",
-      "required": false,
-      "status": "pass",
-      "message": "go and rust outputs match",
+      "required": true,
+      "status": "mismatch",
+      "message": "required scenario evidence too weak: have=synthetic need\u003e=daemon",
       "evidence": "synthetic",
       "go_evidence": "synthetic",
       "rust_evidence": "daemon"
@@ -125,8 +192,8 @@
       "id": "index-sequence-behavior",
       "severity": "P0",
       "required": true,
-      "status": "pass",
-      "message": "go and rust outputs match",
+      "status": "mismatch",
+      "message": "required scenario evidence too weak: have=synthetic need\u003e=daemon",
       "evidence": "synthetic",
       "go_evidence": "synthetic",
       "rust_evidence": "peer-interop"
@@ -135,8 +202,8 @@
       "id": "memory-cap-50mb",
       "severity": "P0",
       "required": true,
-      "status": "pass",
-      "message": "go and rust outputs match",
+      "status": "mismatch",
+      "message": "run=1 seed=1: json outputs differ",
       "evidence": "synthetic",
       "go_evidence": "synthetic",
       "rust_evidence": "daemon"
@@ -145,8 +212,8 @@
       "id": "memory-cap-diagnostics",
       "severity": "P1",
       "required": true,
-      "status": "pass",
-      "message": "go and rust outputs match",
+      "status": "mismatch",
+      "message": "required scenario evidence too weak: have=synthetic need\u003e=daemon",
       "evidence": "synthetic",
       "go_evidence": "synthetic",
       "rust_evidence": "daemon"
@@ -155,8 +222,8 @@
       "id": "path-order-invariant",
       "severity": "P0",
       "required": true,
-      "status": "pass",
-      "message": "go and rust outputs match",
+      "status": "mismatch",
+      "message": "required scenario evidence too weak: have=synthetic need\u003e=daemon",
       "evidence": "synthetic",
       "go_evidence": "synthetic",
       "rust_evidence": "daemon"
@@ -165,8 +232,8 @@
       "id": "protocol-state-transition",
       "severity": "P0",
       "required": true,
-      "status": "pass",
-      "message": "go and rust outputs match",
+      "status": "mismatch",
+      "message": "run=1 seed=1: json outputs differ",
       "evidence": "synthetic",
       "go_evidence": "synthetic",
       "rust_evidence": "peer-interop"
@@ -175,8 +242,8 @@
       "id": "wal-free-durability",
       "severity": "P0",
       "required": true,
-      "status": "pass",
-      "message": "go and rust outputs match",
+      "status": "mismatch",
+      "message": "required scenario evidence too weak: have=synthetic need\u003e=daemon",
       "evidence": "synthetic",
       "go_evidence": "synthetic",
       "rust_evidence": "daemon"

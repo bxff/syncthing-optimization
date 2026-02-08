@@ -125,7 +125,7 @@ func TestValidateImplementedLikeRequiresPassingScenarioForParityVerified(t *test
 		RequiredTests: []string{"scenario/index-sequence-behavior"},
 	}
 
-	validateImplementedLike(report, feat, mi, ev)
+	validateImplementedLike(report, feat, mi, ev, "ci")
 
 	if ev.ScenarioRefs["index-sequence-behavior"] != 1 {
 		t.Fatalf("expected scenario ref to be counted, got %d", ev.ScenarioRefs["index-sequence-behavior"])
@@ -166,7 +166,7 @@ func TestValidateImplementedLikeAllowsImplementedWithoutPassingScenario(t *testi
 		RequiredTests: []string{"scenario/index-sequence-behavior"},
 	}
 
-	validateImplementedLike(report, feat, mi, ev)
+	validateImplementedLike(report, feat, mi, ev, "ci")
 
 	for _, failure := range report.Failures {
 		if strings.Contains(failure.Message, "current status=") {
@@ -798,6 +798,107 @@ func TestExtractGoRESTSurfaceContainsKnownEndpoint(t *testing.T) {
 	}
 	if _, ok := surface["GET /rest/system/version"]; !ok {
 		t.Fatalf("expected go rest surface to contain GET /rest/system/version")
+	}
+}
+
+func TestExtractGoInterfaceMethodsContainsCoreDBMethods(t *testing.T) {
+	methods, err := extractGoInterfaceMethods("internal/db/interface.go", "DB")
+	if err != nil {
+		t.Fatalf("extractGoInterfaceMethods error: %v", err)
+	}
+	for _, expected := range []string{"AllGlobalFiles", "AllLocalFiles", "Update"} {
+		if _, ok := methods[expected]; !ok {
+			t.Fatalf("expected go DB interface to contain %q", expected)
+		}
+	}
+}
+
+func TestExtractRustTraitMethodsContainsCoreDBMethods(t *testing.T) {
+	methods, err := extractRustTraitMethods("syncthing-rs/src/db.rs", "Db")
+	if err != nil {
+		t.Fatalf("extractRustTraitMethods error: %v", err)
+	}
+	for _, expected := range []string{"all_global_files", "all_local_files", "update"} {
+		if _, ok := methods[expected]; !ok {
+			t.Fatalf("expected rust Db trait to contain %q", expected)
+		}
+	}
+}
+
+func TestExtractGoReceiverMethodsContainsModelMethods(t *testing.T) {
+	methods, err := extractGoReceiverMethods("lib/model/model.go", "model")
+	if err != nil {
+		t.Fatalf("extractGoReceiverMethods error: %v", err)
+	}
+	for _, expected := range []string{"NeedFolderFiles", "IndexUpdate", "ClusterConfig"} {
+		if _, ok := methods[expected]; !ok {
+			t.Fatalf("expected go model methods to contain %q", expected)
+		}
+	}
+}
+
+func TestExtractRustImplMethodsContainsModelMethods(t *testing.T) {
+	methods, err := extractRustImplMethods("syncthing-rs/src/model_core.rs", "model")
+	if err != nil {
+		t.Fatalf("extractRustImplMethods error: %v", err)
+	}
+	for _, expected := range []string{"NeedFolderFiles", "IndexUpdate", "ClusterConfig"} {
+		if _, ok := methods[expected]; !ok {
+			t.Fatalf("expected rust model impl methods to contain %q", expected)
+		}
+	}
+}
+
+func TestExtractGoStructFieldsContainsFolderConfigurationFields(t *testing.T) {
+	fields, err := extractGoStructFields("lib/config/folderconfiguration.go", "FolderConfiguration")
+	if err != nil {
+		t.Fatalf("extractGoStructFields error: %v", err)
+	}
+	for _, expected := range []string{"ID", "Path", "Type"} {
+		if _, ok := fields[expected]; !ok {
+			t.Fatalf("expected go FolderConfiguration fields to contain %q", expected)
+		}
+	}
+}
+
+func TestExtractRustStructFieldsContainsFolderConfigurationFields(t *testing.T) {
+	fields, err := extractRustStructFields("syncthing-rs/src/config.rs", "FolderConfiguration")
+	if err != nil {
+		t.Fatalf("extractRustStructFields error: %v", err)
+	}
+	for _, expected := range []string{"id", "path", "folder_type"} {
+		if _, ok := fields[expected]; !ok {
+			t.Fatalf("expected rust FolderConfiguration fields to contain %q", expected)
+		}
+	}
+}
+
+func TestNormalizeSurfaceTokenNormalizesCaseAndSeparators(t *testing.T) {
+	if got := normalizeSurfaceToken("All_Global-Files"); got != "allglobalfiles" {
+		t.Fatalf("unexpected normalized token %q", got)
+	}
+	if got := canonicalSurfaceToken("folder_type"); got != "type" {
+		t.Fatalf("unexpected canonical token %q", got)
+	}
+}
+
+func TestSpecificRustSymbolRequirementRejectsGenericSymbol(t *testing.T) {
+	feat := featureItem{Kind: "interface_method", Symbol: "DB.AllGlobalFiles"}
+	mapping := mappingItem{RustSymbol: "Db"}
+	msg := specificRustSymbolRequirement(feat, mapping)
+	if msg == "" {
+		t.Fatalf("expected specificity failure")
+	}
+	if !strings.Contains(msg, "AllGlobalFiles") {
+		t.Fatalf("expected failure message to mention source symbol, got %q", msg)
+	}
+}
+
+func TestSpecificRustSymbolRequirementAllowsSpecificSymbol(t *testing.T) {
+	feat := featureItem{Kind: "interface_method", Symbol: "DB.AllGlobalFiles"}
+	mapping := mappingItem{RustSymbol: "Db::all_global_files"}
+	if msg := specificRustSymbolRequirement(feat, mapping); msg != "" {
+		t.Fatalf("expected no specificity failure, got %q", msg)
 	}
 }
 

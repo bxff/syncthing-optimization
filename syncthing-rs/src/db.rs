@@ -218,6 +218,9 @@ pub(crate) trait Db {
         virtual_ns: i64,
     ) -> Result<(), String>;
 
+    fn kv(&self) -> Result<Vec<KeyValue>, String>;
+    fn service(&self) -> &'static str;
+
     fn get_kv(&self, key: &str) -> Result<Option<Vec<u8>>, String>;
     fn put_kv(&mut self, key: &str, val: &[u8]) -> Result<(), String>;
     fn delete_kv(&mut self, key: &str) -> Result<(), String>;
@@ -1136,6 +1139,14 @@ impl Db for WalFreeDb {
         );
         self.persist_runtime_metadata()?;
         Ok(())
+    }
+
+    fn kv(&self) -> Result<Vec<KeyValue>, String> {
+        <Self as Db>::prefix_kv(self, "")
+    }
+
+    fn service(&self) -> &'static str {
+        "wal-free-db"
     }
 
     fn get_kv(&self, key: &str) -> Result<Option<Vec<u8>>, String> {

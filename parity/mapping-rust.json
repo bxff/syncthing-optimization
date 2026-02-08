@@ -8,7 +8,7 @@
       "kind": "interface_method",
       "symbol": "DB.AllGlobalFiles",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "all_global_files",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -27,7 +27,7 @@
       "kind": "interface_method",
       "symbol": "DB.AllGlobalFilesPrefix",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "all_global_files_prefix",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -44,7 +44,7 @@
       "kind": "interface_method",
       "symbol": "DB.AllLocalBlocksWithHash",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "all_local_blocks_with_hash",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -61,7 +61,7 @@
       "kind": "interface_method",
       "symbol": "DB.AllLocalFiles",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "all_local_files",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -78,7 +78,7 @@
       "kind": "interface_method",
       "symbol": "DB.AllLocalFilesBySequence",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "all_local_files_by_sequence",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -95,7 +95,7 @@
       "kind": "interface_method",
       "symbol": "DB.AllLocalFilesOrdered",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "all_local_files_ordered",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -112,7 +112,7 @@
       "kind": "interface_method",
       "symbol": "DB.AllLocalFilesWithBlocksHash",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "all_local_files_with_blocks_hash",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -129,7 +129,7 @@
       "kind": "interface_method",
       "symbol": "DB.AllLocalFilesWithPrefix",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "all_local_files_with_prefix",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -146,7 +146,7 @@
       "kind": "interface_method",
       "symbol": "DB.AllNeededGlobalFiles",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "all_needed_global_files",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -163,7 +163,7 @@
       "kind": "interface_method",
       "symbol": "DB.Close",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "close",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -180,7 +180,7 @@
       "kind": "interface_method",
       "symbol": "DB.CountGlobal",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "count_global",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -197,7 +197,7 @@
       "kind": "interface_method",
       "symbol": "DB.CountLocal",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "count_local",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -214,7 +214,7 @@
       "kind": "interface_method",
       "symbol": "DB.CountNeed",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "count_need",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -231,7 +231,7 @@
       "kind": "interface_method",
       "symbol": "DB.CountReceiveOnlyChanged",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "count_receive_only_changed",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -248,7 +248,7 @@
       "kind": "interface_method",
       "symbol": "DB.DeleteMtime",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "delete_mtime",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -265,7 +265,7 @@
       "kind": "interface_method",
       "symbol": "DB.DropAllFiles",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "drop_all_files",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -282,7 +282,7 @@
       "kind": "interface_method",
       "symbol": "DB.DropAllIndexIDs",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "drop_all_index_ids",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -299,7 +299,7 @@
       "kind": "interface_method",
       "symbol": "DB.DropDevice",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "drop_device",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -316,7 +316,7 @@
       "kind": "interface_method",
       "symbol": "DB.DropFilesNamed",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "drop_files_named",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -333,7 +333,7 @@
       "kind": "interface_method",
       "symbol": "DB.DropFolder",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "drop_folder",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -350,7 +350,7 @@
       "kind": "interface_method",
       "symbol": "DB.GetDeviceFile",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "get_device_file",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -367,7 +367,7 @@
       "kind": "interface_method",
       "symbol": "DB.GetDeviceSequence",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "get_device_sequence",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -384,7 +384,7 @@
       "kind": "interface_method",
       "symbol": "DB.GetGlobalAvailability",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "get_global_availability",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -401,7 +401,7 @@
       "kind": "interface_method",
       "symbol": "DB.GetGlobalFile",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "get_global_file",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -418,7 +418,7 @@
       "kind": "interface_method",
       "symbol": "DB.GetIndexID",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "get_index_id",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -435,7 +435,7 @@
       "kind": "interface_method",
       "symbol": "DB.GetMtime",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "get_mtime",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -452,7 +452,7 @@
       "kind": "interface_method",
       "symbol": "DB.KV",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "kv",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -469,7 +469,7 @@
       "kind": "interface_method",
       "symbol": "DB.ListDevicesForFolder",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "list_devices_for_folder",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -486,7 +486,7 @@
       "kind": "interface_method",
       "symbol": "DB.ListFolders",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "list_folders",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -503,7 +503,7 @@
       "kind": "interface_method",
       "symbol": "DB.PutMtime",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "put_mtime",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -520,7 +520,7 @@
       "kind": "interface_method",
       "symbol": "DB.RemoteSequences",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "remote_sequences",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -537,7 +537,7 @@
       "kind": "interface_method",
       "symbol": "DB.Service",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "service",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -554,7 +554,7 @@
       "kind": "interface_method",
       "symbol": "DB.SetIndexID",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "set_index_id",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -571,7 +571,7 @@
       "kind": "interface_method",
       "symbol": "DB.Update",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Db",
+      "rust_symbol": "update",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -588,7 +588,7 @@
       "kind": "interface_method",
       "symbol": "KV.DeleteKV",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Kv",
+      "rust_symbol": "delete_kv",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -605,7 +605,7 @@
       "kind": "interface_method",
       "symbol": "KV.GetKV",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Kv",
+      "rust_symbol": "get_kv",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -622,7 +622,7 @@
       "kind": "interface_method",
       "symbol": "KV.PrefixKV",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Kv",
+      "rust_symbol": "prefix_kv",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",
@@ -639,7 +639,7 @@
       "kind": "interface_method",
       "symbol": "KV.PutKV",
       "rust_component": "syncthing-rs/db",
-      "rust_symbol": "Kv",
+      "rust_symbol": "put_kv",
       "required_tests": [
         "scenario/crash-recovery",
         "scenario/global-need-decision",

@@ -1,0 +1,46 @@
+{
+  "checks": {
+    "folders_configured": true,
+    "scan_ok": true,
+    "shutdown_requested": true,
+    "status_ok": true,
+    "type_map_matches_expected": true
+  },
+  "metrics": {
+    "expected_type_map": {
+      "default": "sendrecv",
+      "recvenc": "recvenc",
+      "recvonly": "recvonly",
+      "sendonly": "sendonly"
+    },
+    "local_files_ok": {
+      "default": true,
+      "recvenc": true,
+      "recvonly": true,
+      "sendonly": true
+    },
+    "need_files_zero": {
+      "default": true,
+      "recvenc": true,
+      "recvonly": true,
+      "sendonly": true
+    },
+    "scan_attempts": 4,
+    "state_ok": {
+      "default": true,
+      "recvenc": true,
+      "recvonly": true,
+      "sendonly": true
+    },
+    "status_poll_attempts": 4,
+    "type_map": {
+      "default": "sendrecv",
+      "recvenc": "recvenc",
+      "recvonly": "recvonly",
+      "sendonly": "sendonly"
+    }
+  },
+  "scenario": "external-folder-modes-replacement",
+  "source": "go",
+  "status": "validated"
+}

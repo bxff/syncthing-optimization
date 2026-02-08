@@ -1,7 +1,7 @@
 use crate::folder_modes::FolderMode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{hash_map::DefaultHasher, BTreeMap};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -74,6 +74,32 @@ pub(crate) enum FilesystemType {
     Basic,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct VersioningConfiguration {
+    #[serde(default, rename = "type")]
+    pub(crate) versioning_type: String,
+    #[serde(default)]
+    pub(crate) params: BTreeMap<String, String>,
+    #[serde(default = "default_versioning_cleanup_interval_s")]
+    pub(crate) cleanup_interval_s: i32,
+    #[serde(default)]
+    pub(crate) fs_path: String,
+    #[serde(default = "default_filesystem_type")]
+    pub(crate) fs_type: FilesystemType,
+}
+
+impl Default for VersioningConfiguration {
+    fn default() -> Self {
+        Self {
+            versioning_type: String::new(),
+            params: BTreeMap::new(),
+            cleanup_interval_s: default_versioning_cleanup_interval_s(),
+            fs_path: String::new(),
+            fs_type: FilesystemType::Basic,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Size {
     pub(crate) bytes: i64,
@@ -144,6 +170,8 @@ pub(crate) struct FolderConfiguration {
     pub(crate) filesystem_type: FilesystemType,
     pub(crate) path: String,
     pub(crate) folder_type: FolderType,
+    #[serde(default)]
+    pub(crate) versioning: VersioningConfiguration,
     pub(crate) devices: Vec<FolderDeviceConfiguration>,
     pub(crate) rescan_interval_s: i32,
     pub(crate) fs_watcher_enabled: bool,
@@ -203,6 +231,7 @@ impl Default for FolderConfiguration {
             filesystem_type: FilesystemType::Basic,
             path: String::new(),
             folder_type: FolderType::SendReceive,
+            versioning: VersioningConfiguration::default(),
             devices: Vec::new(),
             rescan_interval_s: 3600,
             fs_watcher_enabled: true,
@@ -655,6 +684,14 @@ fn default_memory_pull_page_items() -> i32 {
 
 fn default_memory_scan_spill_threshold_entries() -> i32 {
     10_000
+}
+
+fn default_versioning_cleanup_interval_s() -> i32 {
+    3600
+}
+
+fn default_filesystem_type() -> FilesystemType {
+    FilesystemType::Basic
 }
 
 #[cfg(test)]

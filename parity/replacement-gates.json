@@ -45,6 +45,7 @@
   "required_external_soak_scenarios": [
     "external-soak-replacement",
     "external-multifolder-replacement",
+    "external-folder-modes-replacement",
     "external-durability-restart",
     "external-crash-recovery-restart"
   ],
@@ -101,6 +102,11 @@
     },
     {
       "id": "external-multifolder-replacement",
+      "go_min_evidence": "external-soak",
+      "rust_min_evidence": "external-soak"
+    },
+    {
+      "id": "external-folder-modes-replacement",
       "go_min_evidence": "external-soak",
       "rust_min_evidence": "external-soak"
     },

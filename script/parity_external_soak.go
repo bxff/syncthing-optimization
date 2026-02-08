@@ -29,6 +29,7 @@ import (
 const (
 	externalSoakScenarioID        = "external-soak-replacement"
 	externalMultiFolderScenarioID = "external-multifolder-replacement"
+	externalFolderModesScenarioID = "external-folder-modes-replacement"
 	externalDurabilityScenarioID  = "external-durability-restart"
 	externalCrashScenarioID       = "external-crash-recovery-restart"
 	httpTimeout                   = 5 * time.Second
@@ -48,12 +49,20 @@ var expectedOrderedPaths = []string{
 	"nested/b.txt",
 }
 
+var expectedFolderModeTypes = map[string]string{
+	"default":  "sendrecv",
+	"sendonly": "sendonly",
+	"recvonly": "recvonly",
+	"recvenc":  "recvenc",
+}
+
 func main() {
 	if len(os.Args) < 3 || os.Args[1] != "scenario" {
 		fatalf(
-			"usage: go run ./script/parity_external_soak.go scenario <%s|%s|%s|%s> --impl <go|rust>",
+			"usage: go run ./script/parity_external_soak.go scenario <%s|%s|%s|%s|%s> --impl <go|rust>",
 			externalSoakScenarioID,
 			externalMultiFolderScenarioID,
+			externalFolderModesScenarioID,
 			externalDurabilityScenarioID,
 			externalCrashScenarioID,
 		)
@@ -61,6 +70,7 @@ func main() {
 	id := strings.TrimSpace(os.Args[2])
 	if id != externalSoakScenarioID &&
 		id != externalMultiFolderScenarioID &&
+		id != externalFolderModesScenarioID &&
 		id != externalDurabilityScenarioID &&
 		id != externalCrashScenarioID {
 		fatalf("unsupported scenario id %q", id)
@@ -101,6 +111,8 @@ func runScenario(id, impl string) (map[string]any, map[string]any, error) {
 		return runScenarioExternalSoak(impl)
 	case externalMultiFolderScenarioID:
 		return runScenarioExternalMultiFolder(impl)
+	case externalFolderModesScenarioID:
+		return runScenarioExternalFolderModes(impl)
 	case externalDurabilityScenarioID:
 		return runScenarioExternalDurability(impl)
 	case externalCrashScenarioID:
@@ -195,6 +207,42 @@ func runScenarioExternalMultiFolder(impl string) (map[string]any, map[string]any
 		"expected_ordered_paths": expectedOrderedPaths,
 		"scan_attempts":          metrics.ScanAttempts,
 		"status_poll_attempts":   metrics.StatusPollAttempts,
+	}
+	return checks, m, nil
+}
+
+func runScenarioExternalFolderModes(impl string) (map[string]any, map[string]any, error) {
+	var (
+		metrics folderModeMetrics
+		err     error
+	)
+	switch impl {
+	case "go":
+		metrics, err = runGoExternalFolderModes()
+	case "rust":
+		metrics, err = runRustExternalFolderModes()
+	default:
+		err = fmt.Errorf("unsupported impl %q", impl)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+
+	checks := map[string]any{
+		"folders_configured":        metrics.FoldersConfigured,
+		"scan_ok":                   metrics.ScanOK,
+		"status_ok":                 metrics.StatusOK,
+		"type_map_matches_expected": metrics.TypeMapMatches,
+		"shutdown_requested":        metrics.ShutdownRequested,
+	}
+	m := map[string]any{
+		"type_map":             metrics.TypeMap,
+		"local_files_ok":       metrics.LocalFilesOK,
+		"state_ok":             metrics.StateOK,
+		"need_files_zero":      metrics.NeedFilesZero,
+		"expected_type_map":    expectedFolderModeTypes,
+		"scan_attempts":        metrics.ScanAttempts,
+		"status_poll_attempts": metrics.StatusPollAttempts,
 	}
 	return checks, m, nil
 }
@@ -309,6 +357,20 @@ type multiFolderMetrics struct {
 	MediaBrowsePaths        int
 	ScanAttempts            int
 	StatusPollAttempts      int
+}
+
+type folderModeMetrics struct {
+	FoldersConfigured  bool
+	ScanOK             bool
+	StatusOK           bool
+	TypeMapMatches     bool
+	ShutdownRequested  bool
+	TypeMap            map[string]string
+	LocalFilesOK       map[string]bool
+	StateOK            map[string]bool
+	NeedFilesZero      map[string]bool
+	ScanAttempts       int
+	StatusPollAttempts int
 }
 
 type durabilityMetrics struct {
@@ -865,6 +927,257 @@ func runRustExternalMultiFolderSoak() (multiFolderMetrics, error) {
 		return metrics, fmt.Errorf("rust media browse order mismatch: got=%v want=%v", mediaPaths, expectedOrderedPaths)
 	}
 	metrics.BrowseOrderOK = true
+
+	if _, _, err := requestJSON(http.MethodPost, baseURL+"/rest/system/shutdown", ""); err != nil {
+		return metrics, fmt.Errorf("rust shutdown request: %w", err)
+	}
+	metrics.ShutdownRequested = true
+	if err := proc.wait(shutdownTimeout); err != nil {
+		return metrics, fmt.Errorf("rust daemon shutdown wait: %w", err)
+	}
+	return metrics, nil
+}
+
+type folderModeSpec struct {
+	id   string
+	mode string
+	dir  string
+}
+
+func runGoExternalFolderModes() (folderModeMetrics, error) {
+	var metrics folderModeMetrics
+	root, err := os.MkdirTemp("", "syncthing-go-external-folder-modes-")
+	if err != nil {
+		return metrics, fmt.Errorf("create temp root: %w", err)
+	}
+	defer os.RemoveAll(root)
+
+	homeDir := filepath.Join(root, "home")
+	modeSpecs := []folderModeSpec{
+		{id: "default", mode: "sendreceive", dir: filepath.Join(root, "default")},
+		{id: "sendonly", mode: "sendonly", dir: filepath.Join(root, "sendonly")},
+		{id: "recvonly", mode: "receiveonly", dir: filepath.Join(root, "recvonly")},
+		{id: "recvenc", mode: "receiveencrypted", dir: filepath.Join(root, "recvenc")},
+	}
+	for _, spec := range modeSpecs {
+		if err := prepareSoakFolder(spec.dir); err != nil {
+			return metrics, fmt.Errorf("prepare folder %s: %w", spec.id, err)
+		}
+	}
+
+	if err := runCmd(20*time.Second, "go", "run", "./cmd/syncthing", "generate", "--home", homeDir, "--no-port-probing"); err != nil {
+		return metrics, fmt.Errorf("generate go config: %w", err)
+	}
+	apiKey, err := parseAPIKey(filepath.Join(homeDir, "config.xml"))
+	if err != nil {
+		return metrics, err
+	}
+	apiPort, err := freePort()
+	if err != nil {
+		return metrics, err
+	}
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", apiPort)
+
+	proc := &daemonProc{
+		cmd: exec.Command(
+			"go", "run", "./cmd/syncthing", "serve",
+			"--home", homeDir,
+			"--no-browser",
+			"--no-restart",
+			"--gui-address", baseURL,
+			"--log-file=-",
+		),
+	}
+	if err := proc.start(); err != nil {
+		return metrics, fmt.Errorf("start go daemon: %w", err)
+	}
+	defer proc.stop()
+	if err := waitForPing(baseURL, apiKey, startupTimeout); err != nil {
+		return metrics, fmt.Errorf("go daemon startup: %w (stderr=%s)", err, strings.TrimSpace(proc.stderr.String()))
+	}
+
+	for _, spec := range modeSpecs {
+		if err := runCmd(
+			20*time.Second,
+			"go", "run", "./cmd/syncthing", "cli",
+			"--home", homeDir,
+			"--gui-address", fmt.Sprintf("127.0.0.1:%d", apiPort),
+			"--gui-apikey", apiKey,
+			"config", "folders", "add",
+			"--id", spec.id,
+			"--path", spec.dir,
+			"--type", spec.mode,
+		); err != nil {
+			return metrics, fmt.Errorf("configure go folder %s (%s): %w", spec.id, spec.mode, err)
+		}
+	}
+	metrics.FoldersConfigured = true
+
+	metrics.LocalFilesOK = make(map[string]bool, len(modeSpecs))
+	metrics.StateOK = make(map[string]bool, len(modeSpecs))
+	metrics.NeedFilesZero = make(map[string]bool, len(modeSpecs))
+	for _, spec := range modeSpecs {
+		metrics.ScanAttempts++
+		scanURL := encodeURLQuery(baseURL+"/rest/db/scan", url.Values{"folder": []string{spec.id}})
+		if _, _, err := requestJSON(http.MethodPost, scanURL, apiKey); err != nil {
+			return metrics, fmt.Errorf("go scan request (%s): %w", spec.id, err)
+		}
+
+		status, polls, err := pollStatusForFolderLocal(baseURL, apiKey, spec.id, statusTimeout)
+		metrics.StatusPollAttempts += polls
+		if err != nil {
+			return metrics, fmt.Errorf("go status poll (%s): %w (last=%v)", spec.id, err, status)
+		}
+		localFiles := intField(status, "localFiles")
+		needFiles := intField(status, "needFiles")
+		state := stringField(status, "state")
+		metrics.LocalFilesOK[spec.id] = localFiles >= expectedLocalFiles
+		metrics.NeedFilesZero[spec.id] = needFiles == 0
+		metrics.StateOK[spec.id] = stateIsRunnable(state)
+		if !metrics.LocalFilesOK[spec.id] {
+			return metrics, fmt.Errorf("go folder %s local files below expected: %d", spec.id, localFiles)
+		}
+		if !metrics.StateOK[spec.id] {
+			return metrics, fmt.Errorf("go folder %s has non-runnable state %q", spec.id, state)
+		}
+		if !metrics.NeedFilesZero[spec.id] {
+			return metrics, fmt.Errorf("go folder %s expected needFiles=0, got %d", spec.id, needFiles)
+		}
+	}
+	metrics.ScanOK = true
+	metrics.StatusOK = true
+
+	types, err := fetchFolderTypeMap(baseURL, apiKey)
+	if err != nil {
+		return metrics, fmt.Errorf("go fetch folder type map: %w", err)
+	}
+	metrics.TypeMap = types
+	metrics.TypeMapMatches = stringMapEquals(types, expectedFolderModeTypes)
+	if !metrics.TypeMapMatches {
+		return metrics, fmt.Errorf("go folder type map mismatch: got=%v want=%v", types, expectedFolderModeTypes)
+	}
+
+	if _, _, err := requestJSON(http.MethodPost, baseURL+"/rest/system/shutdown", apiKey); err != nil {
+		return metrics, fmt.Errorf("go shutdown request: %w", err)
+	}
+	metrics.ShutdownRequested = true
+	if err := proc.wait(shutdownTimeout); err != nil {
+		return metrics, fmt.Errorf("go daemon shutdown wait: %w", err)
+	}
+	return metrics, nil
+}
+
+func runRustExternalFolderModes() (folderModeMetrics, error) {
+	var metrics folderModeMetrics
+	root, err := os.MkdirTemp("", "syncthing-rs-external-folder-modes-")
+	if err != nil {
+		return metrics, fmt.Errorf("create temp root: %w", err)
+	}
+	defer os.RemoveAll(root)
+
+	modeSpecs := []folderModeSpec{
+		{id: "default", mode: "sendreceive", dir: filepath.Join(root, "default")},
+		{id: "sendonly", mode: "sendonly", dir: filepath.Join(root, "sendonly")},
+		{id: "recvonly", mode: "receiveonly", dir: filepath.Join(root, "recvonly")},
+		{id: "recvenc", mode: "receiveencrypted", dir: filepath.Join(root, "recvenc")},
+	}
+	for _, spec := range modeSpecs {
+		if err := prepareSoakFolder(spec.dir); err != nil {
+			return metrics, fmt.Errorf("prepare folder %s: %w", spec.id, err)
+		}
+	}
+	dbRoot := filepath.Join(root, "db")
+	if err := os.MkdirAll(dbRoot, 0o755); err != nil {
+		return metrics, fmt.Errorf("create rust db root: %w", err)
+	}
+
+	apiPort, err := freePort()
+	if err != nil {
+		return metrics, err
+	}
+	bepPort, err := freePort()
+	if err != nil {
+		return metrics, err
+	}
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", apiPort)
+
+	proc := &daemonProc{
+		cmd: exec.Command(
+			"cargo", "run", "--quiet", "--manifest-path", "syncthing-rs/Cargo.toml", "--",
+			"daemon",
+			"--folder", fmt.Sprintf("default:%s", modeSpecs[0].dir),
+			"--db-root", dbRoot,
+			"--api-listen", fmt.Sprintf("127.0.0.1:%d", apiPort),
+			"--listen", fmt.Sprintf("127.0.0.1:%d", bepPort),
+		),
+	}
+	if err := proc.start(); err != nil {
+		return metrics, fmt.Errorf("start rust daemon: %w", err)
+	}
+	defer proc.stop()
+	if err := waitForPing(baseURL, "", startupTimeout); err != nil {
+		return metrics, fmt.Errorf("rust daemon startup: %w (stderr=%s)", err, strings.TrimSpace(proc.stderr.String()))
+	}
+
+	for _, spec := range modeSpecs {
+		query := url.Values{}
+		query.Set("id", spec.id)
+		query.Set("path", spec.dir)
+		query.Set("type", spec.mode)
+		endpoint := encodeURLQuery(baseURL+"/rest/config/folders", query)
+		method := http.MethodPost
+		if spec.id == "default" {
+			method = http.MethodPut
+		}
+		if _, _, err := requestJSON(method, endpoint, ""); err != nil {
+			return metrics, fmt.Errorf("configure rust folder %s (%s): %w", spec.id, spec.mode, err)
+		}
+	}
+	metrics.FoldersConfigured = true
+
+	metrics.LocalFilesOK = make(map[string]bool, len(modeSpecs))
+	metrics.StateOK = make(map[string]bool, len(modeSpecs))
+	metrics.NeedFilesZero = make(map[string]bool, len(modeSpecs))
+	for _, spec := range modeSpecs {
+		metrics.ScanAttempts++
+		scanURL := encodeURLQuery(baseURL+"/rest/db/scan", url.Values{"folder": []string{spec.id}})
+		if _, _, err := requestJSON(http.MethodPost, scanURL, ""); err != nil {
+			return metrics, fmt.Errorf("rust scan request (%s): %w", spec.id, err)
+		}
+
+		status, polls, err := pollStatusForFolderLocal(baseURL, "", spec.id, statusTimeout)
+		metrics.StatusPollAttempts += polls
+		if err != nil {
+			return metrics, fmt.Errorf("rust status poll (%s): %w (last=%v)", spec.id, err, status)
+		}
+		localFiles := intField(status, "localFiles")
+		needFiles := intField(status, "needFiles")
+		state := stringField(status, "state")
+		metrics.LocalFilesOK[spec.id] = localFiles >= expectedLocalFiles
+		metrics.NeedFilesZero[spec.id] = needFiles == 0
+		metrics.StateOK[spec.id] = stateIsRunnable(state)
+		if !metrics.LocalFilesOK[spec.id] {
+			return metrics, fmt.Errorf("rust folder %s local files below expected: %d", spec.id, localFiles)
+		}
+		if !metrics.StateOK[spec.id] {
+			return metrics, fmt.Errorf("rust folder %s has non-runnable state %q", spec.id, state)
+		}
+		if !metrics.NeedFilesZero[spec.id] {
+			return metrics, fmt.Errorf("rust folder %s expected needFiles=0, got %d", spec.id, needFiles)
+		}
+	}
+	metrics.ScanOK = true
+	metrics.StatusOK = true
+
+	types, err := fetchFolderTypeMap(baseURL, "")
+	if err != nil {
+		return metrics, fmt.Errorf("rust fetch folder type map: %w", err)
+	}
+	metrics.TypeMap = types
+	metrics.TypeMapMatches = stringMapEquals(types, expectedFolderModeTypes)
+	if !metrics.TypeMapMatches {
+		return metrics, fmt.Errorf("rust folder type map mismatch: got=%v want=%v", types, expectedFolderModeTypes)
+	}
 
 	if _, _, err := requestJSON(http.MethodPost, baseURL+"/rest/system/shutdown", ""); err != nil {
 		return metrics, fmt.Errorf("rust shutdown request: %w", err)
@@ -1532,6 +1845,28 @@ func pollStatusForFolder(baseURL, apiKey, folder string, timeout time.Duration) 
 	return last, polls, fmt.Errorf("timed out waiting for status convergence for folder %q", folder)
 }
 
+func pollStatusForFolderLocal(baseURL, apiKey, folder string, timeout time.Duration) (map[string]any, int, error) {
+	deadline := time.Now().Add(timeout)
+	polls := 0
+	var last map[string]any
+	target := encodeURLQuery(baseURL+"/rest/db/status", url.Values{"folder": []string{folder}})
+	for time.Now().Before(deadline) {
+		polls++
+		payload, status, err := requestJSON(http.MethodGet, target, apiKey)
+		if err == nil && status == http.StatusOK {
+			last = payload
+			if intField(payload, "localFiles") >= expectedLocalFiles {
+				return payload, polls, nil
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if last == nil {
+		last = map[string]any{}
+	}
+	return last, polls, fmt.Errorf("timed out waiting for local status convergence for folder %q", folder)
+}
+
 func verifyIndexedFiles(baseURL, apiKey, folder string, files []string) error {
 	for _, file := range files {
 		query := url.Values{}
@@ -1550,6 +1885,74 @@ func verifyIndexedFiles(baseURL, apiKey, folder string, files []string) error {
 		}
 	}
 	return nil
+}
+
+func fetchFolderTypeMap(baseURL, apiKey string) (map[string]string, error) {
+	payload, status, err := requestJSONAny(http.MethodGet, baseURL+"/rest/config/folders", apiKey)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("config folders request returned status %d", status)
+	}
+	return decodeFolderTypeMap(payload)
+}
+
+func decodeFolderTypeMap(payload any) (map[string]string, error) {
+	out := make(map[string]string)
+	switch typed := payload.(type) {
+	case []any:
+		for _, item := range typed {
+			entry, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			id := strings.TrimSpace(stringField(entry, "id"))
+			if id == "" {
+				continue
+			}
+			folderType := canonicalFolderType(stringField(entry, "type"))
+			if folderType == "" {
+				folderType = canonicalFolderType(stringField(entry, "folderType"))
+			}
+			if folderType == "" {
+				continue
+			}
+			out[id] = folderType
+		}
+	case map[string]any:
+		return decodeFolderTypeMap(typed["folders"])
+	default:
+		return nil, fmt.Errorf("unsupported /rest/config/folders payload shape %T", payload)
+	}
+	return out, nil
+}
+
+func canonicalFolderType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "sendreceive", "sendrecv", "readwrite":
+		return "sendrecv"
+	case "sendonly", "readonly":
+		return "sendonly"
+	case "receiveonly", "recvonly":
+		return "recvonly"
+	case "receiveencrypted", "recvenc":
+		return "recvenc"
+	default:
+		return ""
+	}
+}
+
+func stringMapEquals(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, leftValue := range left {
+		if right[key] != leftValue {
+			return false
+		}
+	}
+	return true
 }
 
 func browseOrderedPaths(baseURL, apiKey, folder string, limit int) ([]string, error) {

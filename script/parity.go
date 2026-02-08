@@ -493,10 +493,10 @@ func runCheck(args []string) {
 			}
 		case "implemented":
 			report.Summary.Implemented++
-			validateImplementedLike(&report, feat, mi, &testEvidence)
+			validateImplementedLike(&report, feat, mi, &testEvidence, *mode)
 		case "parity-verified":
 			report.Summary.ParityVerified++
-			validateImplementedLike(&report, feat, mi, &testEvidence)
+			validateImplementedLike(&report, feat, mi, &testEvidence, *mode)
 		}
 	}
 
@@ -1055,7 +1055,7 @@ func validateManifestAgainstGeneratedFeatures(report *guardrailReport, manifest 
 	}
 }
 
-func validateImplementedLike(report *guardrailReport, feat featureItem, mi mappingItem, ev *requiredTestEvidence) {
+func validateImplementedLike(report *guardrailReport, feat featureItem, mi mappingItem, ev *requiredTestEvidence, mode string) {
 	if strings.TrimSpace(mi.RustComponent) == "" {
 		report.Failures = append(report.Failures, reportFailure{
 			Rule:    "mapping-rust-component",
@@ -1132,6 +1132,80 @@ func validateImplementedLike(report *guardrailReport, feat featureItem, mi mappi
 			Message: fmt.Sprintf("feature %s (%s) must include at least one scenario/<id> required_test", feat.Symbol, feat.Source),
 		})
 	}
+
+	if mode == "replacement" {
+		if reason := specificRustSymbolRequirement(feat, mi); reason != "" {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "mapping-symbol-specificity",
+				ID:      mi.ID,
+				Message: reason,
+			})
+		}
+	}
+}
+
+func specificRustSymbolRequirement(feat featureItem, mi mappingItem) string {
+	kind := strings.ToLower(strings.TrimSpace(feat.Kind))
+	switch kind {
+	case "method", "interface_method", "func":
+	default:
+		return ""
+	}
+	rustSymbol := strings.TrimSpace(mi.RustSymbol)
+	if rustSymbol == "" {
+		return ""
+	}
+	expected := expectedSourceSpecificToken(feat.Symbol, kind)
+	if expected == "" {
+		return ""
+	}
+	normalizedRustWhole := normalizeSurfaceToken(rustSymbol)
+	if strings.Contains(normalizedRustWhole, expected) {
+		return ""
+	}
+	rustToken := trailingRustSymbolToken(rustSymbol)
+	if normalizeSurfaceToken(rustToken) == expected {
+		return ""
+	}
+	return fmt.Sprintf(
+		"replacement mode requires a specific rust_symbol for %s %q; expected token %q to appear in rust_symbol %q",
+		feat.Kind,
+		feat.Symbol,
+		expected,
+		mi.RustSymbol,
+	)
+}
+
+func expectedSourceSpecificToken(symbol, kind string) string {
+	symbol = strings.TrimSpace(symbol)
+	if symbol == "" {
+		return ""
+	}
+	switch kind {
+	case "method", "interface_method", "struct_field":
+		if idx := strings.LastIndex(symbol, "."); idx >= 0 && idx+1 < len(symbol) {
+			return normalizeSurfaceToken(symbol[idx+1:])
+		}
+	case "const", "var", "func":
+		if idx := strings.LastIndex(symbol, "."); idx >= 0 && idx+1 < len(symbol) {
+			return normalizeSurfaceToken(symbol[idx+1:])
+		}
+	}
+	return normalizeSurfaceToken(symbol)
+}
+
+func trailingRustSymbolToken(symbol string) string {
+	symbol = strings.TrimSpace(symbol)
+	if symbol == "" {
+		return ""
+	}
+	split := strings.FieldsFunc(symbol, func(r rune) bool {
+		return r == ':' || r == '.' || r == '/' || r == '\\'
+	})
+	if len(split) == 0 {
+		return symbol
+	}
+	return split[len(split)-1]
 }
 
 func validateRequiredScenarioCoverage(report *guardrailReport, ev requiredTestEvidence) {
@@ -1337,6 +1411,9 @@ func validateReplacementCapabilityCoverage(report *guardrailReport) {
 	validateGoVsRustRESTSurface(report)
 	validateGoVsRustProtocolSurface(report)
 	validateGoVsRustFolderModeSurface(report)
+	validateGoVsRustDBInterfaceSurface(report)
+	validateGoVsRustModelSurface(report)
+	validateGoVsRustFolderConfigSurface(report)
 }
 
 func validateReplacementExternalSoak(report *guardrailReport, required []string) {
@@ -2143,6 +2220,409 @@ func validateGoVsRustFolderModeSurface(report *guardrailReport) {
 	})
 }
 
+func validateGoVsRustDBInterfaceSurface(report *guardrailReport) {
+	goMethods, err := extractGoInterfaceMethods("internal/db/interface.go", "DB")
+	if err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-db-interface-surface",
+			Path:    "internal/db/interface.go",
+			Message: fmt.Sprintf("failed to extract go DB interface methods: %v", err),
+		})
+		return
+	}
+	rustMethods, err := extractRustTraitMethods("syncthing-rs/src/db.rs", "Db")
+	if err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-db-interface-surface",
+			Path:    "syncthing-rs/src/db.rs",
+			Message: fmt.Sprintf("failed to extract rust Db trait methods: %v", err),
+		})
+		return
+	}
+
+	missing := missingNormalizedSurfaceEntries(goMethods, rustMethods)
+	const gapPath = "parity/diff-reports/replacement-db-interface-surface-missing.json"
+	if len(missing) == 0 {
+		_ = os.Remove(gapPath)
+		return
+	}
+	if err := writeReplacementGapFile(gapPath, "replacement-db-interface-surface", len(goMethods), len(rustMethods), missing); err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-db-interface-surface",
+			Path:    gapPath,
+			Message: fmt.Sprintf("failed to write replacement gap report: %v", err),
+		})
+	}
+
+	preview := missing
+	if len(preview) > 25 {
+		preview = preview[:25]
+	}
+	report.Failures = append(report.Failures, reportFailure{
+		Rule: "replacement-db-interface-surface",
+		Path: gapPath,
+		Message: fmt.Sprintf(
+			"go DB interface exposes %d method(s) while rust Db trait exposes %d; missing %d method(s), first %d: %s",
+			len(goMethods),
+			len(rustMethods),
+			len(missing),
+			len(preview),
+			strings.Join(preview, ", "),
+		),
+	})
+}
+
+func validateGoVsRustModelSurface(report *guardrailReport) {
+	goMethods, err := extractGoReceiverMethods("lib/model/model.go", "model")
+	if err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-model-surface",
+			Path:    "lib/model/model.go",
+			Message: fmt.Sprintf("failed to extract go model methods: %v", err),
+		})
+		return
+	}
+	rustMethods, err := extractRustImplMethods("syncthing-rs/src/model_core.rs", "model")
+	if err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-model-surface",
+			Path:    "syncthing-rs/src/model_core.rs",
+			Message: fmt.Sprintf("failed to extract rust model impl methods: %v", err),
+		})
+		return
+	}
+
+	missing := missingNormalizedSurfaceEntries(goMethods, rustMethods)
+	const gapPath = "parity/diff-reports/replacement-model-surface-missing.json"
+	if len(missing) == 0 {
+		_ = os.Remove(gapPath)
+		return
+	}
+	if err := writeReplacementGapFile(gapPath, "replacement-model-surface", len(goMethods), len(rustMethods), missing); err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-model-surface",
+			Path:    gapPath,
+			Message: fmt.Sprintf("failed to write replacement gap report: %v", err),
+		})
+	}
+
+	preview := missing
+	if len(preview) > 25 {
+		preview = preview[:25]
+	}
+	report.Failures = append(report.Failures, reportFailure{
+		Rule: "replacement-model-surface",
+		Path: gapPath,
+		Message: fmt.Sprintf(
+			"go model exposes %d method(s) while rust model impl exposes %d; missing %d method(s), first %d: %s",
+			len(goMethods),
+			len(rustMethods),
+			len(missing),
+			len(preview),
+			strings.Join(preview, ", "),
+		),
+	})
+}
+
+func validateGoVsRustFolderConfigSurface(report *guardrailReport) {
+	goFields, err := extractGoStructFields("lib/config/folderconfiguration.go", "FolderConfiguration")
+	if err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-folder-config-surface",
+			Path:    "lib/config/folderconfiguration.go",
+			Message: fmt.Sprintf("failed to extract go FolderConfiguration fields: %v", err),
+		})
+		return
+	}
+	rustFields, err := extractRustStructFields("syncthing-rs/src/config.rs", "FolderConfiguration")
+	if err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-folder-config-surface",
+			Path:    "syncthing-rs/src/config.rs",
+			Message: fmt.Sprintf("failed to extract rust FolderConfiguration fields: %v", err),
+		})
+		return
+	}
+
+	missing := missingNormalizedSurfaceEntries(goFields, rustFields)
+	const gapPath = "parity/diff-reports/replacement-folder-config-surface-missing.json"
+	if len(missing) == 0 {
+		_ = os.Remove(gapPath)
+		return
+	}
+	if err := writeReplacementGapFile(gapPath, "replacement-folder-config-surface", len(goFields), len(rustFields), missing); err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-folder-config-surface",
+			Path:    gapPath,
+			Message: fmt.Sprintf("failed to write replacement gap report: %v", err),
+		})
+	}
+
+	preview := missing
+	if len(preview) > 25 {
+		preview = preview[:25]
+	}
+	report.Failures = append(report.Failures, reportFailure{
+		Rule: "replacement-folder-config-surface",
+		Path: gapPath,
+		Message: fmt.Sprintf(
+			"go folder config exposes %d field(s) while rust folder config exposes %d; missing %d field(s), first %d: %s",
+			len(goFields),
+			len(rustFields),
+			len(missing),
+			len(preview),
+			strings.Join(preview, ", "),
+		),
+	})
+}
+
+func missingNormalizedSurfaceEntries(source, target map[string]struct{}) []string {
+	targetNormalized := make(map[string]struct{}, len(target))
+	for entry := range target {
+		normalized := canonicalSurfaceToken(entry)
+		if normalized == "" {
+			continue
+		}
+		targetNormalized[normalized] = struct{}{}
+	}
+
+	missing := make([]string, 0)
+	for entry := range source {
+		normalized := canonicalSurfaceToken(entry)
+		if normalized == "" {
+			continue
+		}
+		if _, ok := targetNormalized[normalized]; ok {
+			continue
+		}
+		missing = append(missing, entry)
+	}
+	sort.Strings(missing)
+	return missing
+}
+
+func extractGoInterfaceMethods(path, ifaceName string) (map[string]struct{}, error) {
+	file, _, err := parseGoRepoFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	methods := make(map[string]struct{})
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.TYPE {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			ts, ok := spec.(*ast.TypeSpec)
+			if !ok || ts.Name.Name != ifaceName {
+				continue
+			}
+			iface, ok := ts.Type.(*ast.InterfaceType)
+			if !ok {
+				continue
+			}
+			for _, field := range iface.Methods.List {
+				for _, name := range fieldNames(field) {
+					if strings.TrimSpace(name) == "" {
+						continue
+					}
+					methods[name] = struct{}{}
+				}
+			}
+		}
+	}
+	if len(methods) == 0 {
+		return nil, fmt.Errorf("no methods found for interface %s", ifaceName)
+	}
+	return methods, nil
+}
+
+func extractGoReceiverMethods(path, receiver string) (map[string]struct{}, error) {
+	file, _, err := parseGoRepoFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	methods := make(map[string]struct{})
+	for _, decl := range file.Decls {
+		fd, ok := decl.(*ast.FuncDecl)
+		if !ok || fd.Recv == nil || fd.Name == nil {
+			continue
+		}
+		if receiverType(fd.Recv.List) != receiver {
+			continue
+		}
+		methods[fd.Name.Name] = struct{}{}
+	}
+	if len(methods) == 0 {
+		return nil, fmt.Errorf("no receiver methods found for %s", receiver)
+	}
+	return methods, nil
+}
+
+func extractGoStructFields(path, structName string) (map[string]struct{}, error) {
+	file, _, err := parseGoRepoFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	fields := make(map[string]struct{})
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.TYPE {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			ts, ok := spec.(*ast.TypeSpec)
+			if !ok || ts.Name.Name != structName {
+				continue
+			}
+			st, ok := ts.Type.(*ast.StructType)
+			if !ok {
+				continue
+			}
+			for _, field := range st.Fields.List {
+				for _, name := range fieldNames(field) {
+					if strings.TrimSpace(name) == "" {
+						continue
+					}
+					fields[name] = struct{}{}
+				}
+			}
+		}
+	}
+	if len(fields) == 0 {
+		return nil, fmt.Errorf("no fields found for struct %s", structName)
+	}
+	return fields, nil
+}
+
+func extractRustTraitMethods(path, traitName string) (map[string]struct{}, error) {
+	return extractRustBlockFunctions(path, regexp.MustCompile(`^pub(?:\(crate\))?\s*trait\s+`+regexp.QuoteMeta(traitName)+`\b`))
+}
+
+func extractRustImplMethods(path, typeName string) (map[string]struct{}, error) {
+	return extractRustBlockFunctions(path, regexp.MustCompile(`^impl(?:\s*<[^>]+>)?\s+`+regexp.QuoteMeta(typeName)+`\b`))
+}
+
+func extractRustStructFields(path, structName string) (map[string]struct{}, error) {
+	bs, err := readRepoFile(path)
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(string(bs), "\n")
+	startPattern := regexp.MustCompile(`^pub(?:\(crate\))?\s*struct\s+` + regexp.QuoteMeta(structName) + `\b`)
+	fieldPattern := regexp.MustCompile(`^(?:pub(?:\(crate\))?\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*:`)
+
+	inBlock := false
+	depth := 0
+	fields := make(map[string]struct{})
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if !inBlock {
+			if !startPattern.MatchString(line) {
+				continue
+			}
+			inBlock = true
+		}
+		depth += strings.Count(line, "{")
+		if inBlock && depth > 0 {
+			if match := fieldPattern.FindStringSubmatch(line); len(match) == 2 {
+				fields[match[1]] = struct{}{}
+			}
+		}
+		depth -= strings.Count(line, "}")
+		if inBlock && depth <= 0 {
+			break
+		}
+	}
+	if len(fields) == 0 {
+		return nil, fmt.Errorf("no fields found for rust struct %s in %s", structName, path)
+	}
+	return fields, nil
+}
+
+func extractRustBlockFunctions(path string, startPattern *regexp.Regexp) (map[string]struct{}, error) {
+	bs, err := readRepoFile(path)
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(string(bs), "\n")
+	fnPattern := regexp.MustCompile(`\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
+
+	inBlock := false
+	depth := 0
+	methods := make(map[string]struct{})
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if !inBlock {
+			if !startPattern.MatchString(line) {
+				continue
+			}
+			inBlock = true
+		}
+		depth += strings.Count(line, "{")
+		if inBlock && depth > 0 {
+			if match := fnPattern.FindStringSubmatch(line); len(match) == 2 {
+				methods[match[1]] = struct{}{}
+			}
+		}
+		depth -= strings.Count(line, "}")
+		if inBlock && depth <= 0 {
+			break
+		}
+	}
+	if len(methods) == 0 {
+		return nil, fmt.Errorf("no methods found in %s", path)
+	}
+	return methods, nil
+}
+
+func normalizeSurfaceToken(token string) string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range token {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r + ('a' - 'A'))
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func canonicalSurfaceToken(token string) string {
+	normalized := normalizeSurfaceToken(token)
+	switch normalized {
+	case "foldertype":
+		return "type"
+	case "versioner":
+		return "versioning"
+	default:
+		return normalized
+	}
+}
+
+func parseGoRepoFile(path string) (*ast.File, *token.FileSet, error) {
+	bs, err := readRepoFile(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, bs, parser.SkipObjectResolution)
+	if err != nil {
+		return nil, nil, err
+	}
+	return file, fset, nil
+}
+
 func extractGoFolderModes() (map[string]struct{}, error) {
 	bs, err := readRepoFile("lib/config/foldertype.go")
 	if err != nil {
@@ -2339,6 +2819,7 @@ type rustSurfacePrefix struct {
 func scanRustSurfaceSymbols() (map[string]bool, map[string]bool) {
 	symbols := make(map[string]bool)
 	publicSymbols := make(map[string]bool)
+	fnPattern := regexp.MustCompile(`\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
 	prefixes := []rustSurfacePrefix{
 		{Prefix: "pub fn ", IsPublic: true},
 		{Prefix: "pub struct ", IsPublic: true},
@@ -2369,6 +2850,9 @@ func scanRustSurfaceSymbols() (map[string]bool, map[string]bool) {
 			}
 			for _, line := range strings.Split(string(bs), "\n") {
 				line = strings.TrimSpace(line)
+				if match := fnPattern.FindStringSubmatch(line); len(match) == 2 {
+					symbols[match[1]] = true
+				}
 				for _, prefix := range prefixes {
 					if !strings.HasPrefix(line, prefix.Prefix) {
 						continue

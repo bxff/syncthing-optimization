@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-02-08T02:34:26Z",
+  "generated_at": "2026-02-08T03:11:43Z",
   "produced_by": "parity-harness",
   "input_roots": [
     "syncthing-rs/src",
@@ -17,7 +17,7 @@
     "script/parity_harness.go",
     "script/parity_harness_go.go"
   ],
-  "inputs_digest": "98f1af10d9732f767697b00e6d857aaa9b450b16d556fcb306fd770c1cba0c29",
+  "inputs_digest": "5bee4b7405a2c84919ccb3e673bd43baad7c91ca224198e359e6bc1bdc1e66ee",
   "match": true,
   "mismatches": [],
   "scenarios": [
@@ -63,6 +63,16 @@
     },
     {
       "id": "external-durability-restart",
+      "severity": "P0",
+      "required": false,
+      "status": "pass",
+      "message": "go and rust outputs match",
+      "evidence": "external-soak",
+      "go_evidence": "external-soak",
+      "rust_evidence": "external-soak"
+    },
+    {
+      "id": "external-folder-modes-replacement",
       "severity": "P0",
       "required": false,
       "status": "pass",

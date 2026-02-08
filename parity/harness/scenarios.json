@@ -274,6 +274,42 @@
       }
     },
     {
+      "id": "external-folder-modes-replacement",
+      "description": "Run real daemon processes (Go and Rust) and verify sendrecv/sendonly/recvonly/recvenc folder mode configuration and scan/status behavior.",
+      "severity": "P0",
+      "required": false,
+      "tags": [
+        "core",
+        "external-soak",
+        "folder-modes"
+      ],
+      "comparator": "json-equal",
+      "go": {
+        "command": [
+          "go",
+          "run",
+          "./script/parity_external_soak.go",
+          "scenario",
+          "external-folder-modes-replacement",
+          "--impl",
+          "go"
+        ],
+        "snapshot_path": "parity/harness/snapshots/go-external-folder-modes-replacement.json"
+      },
+      "rust": {
+        "command": [
+          "go",
+          "run",
+          "./script/parity_external_soak.go",
+          "scenario",
+          "external-folder-modes-replacement",
+          "--impl",
+          "rust"
+        ],
+        "snapshot_path": "parity/harness/snapshots/rust-external-folder-modes-replacement.json"
+      }
+    },
+    {
       "id": "external-durability-restart",
       "description": "Run real daemon restart cycle and verify file index durability across shutdown/startup on the same disk state.",
       "severity": "P0",

@@ -1105,7 +1105,8 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     .get("path")
                     .cloned()
                     .unwrap_or_else(|| format!("/tmp/{folder_id}"));
-                match add_config_folder(runtime, folder_id, &path_value) {
+                let folder_type = params.get("type").and_then(|v| parse_folder_type(v));
+                match add_config_folder(runtime, folder_id, &path_value, folder_type) {
                     Ok(payload) => {
                         append_event(
                             runtime,
@@ -1408,7 +1409,8 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 let Some(path_value) = params.get("path") else {
                     return make_api_error(400, "missing path query parameter");
                 };
-                match add_config_folder(runtime, folder_id, path_value) {
+                let folder_type = params.get("type").and_then(|v| parse_folder_type(v));
+                match add_config_folder(runtime, folder_id, path_value, folder_type) {
                     Ok(payload) => ApiReply::json(200, payload),
                     Err(ApiConfigError::BadRequest(err)) => {
                         ApiReply::json(400, json!({ "error": err }))
@@ -1843,12 +1845,53 @@ fn parse_query(query: &str) -> BTreeMap<String, String> {
             Some(parts) => parts,
             None => (pair, ""),
         };
-        if key.is_empty() {
+        let decoded_key = decode_query_component(key);
+        if decoded_key.is_empty() {
             continue;
         }
-        out.insert(key.to_string(), value.to_string());
+        out.insert(decoded_key, decode_query_component(value));
     }
     out
+}
+
+fn decode_query_component(value: &str) -> String {
+    let mut out = Vec::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut i = 0_usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                if let (Some(hi), Some(lo)) = (
+                    decode_hex_nibble(bytes[i + 1]),
+                    decode_hex_nibble(bytes[i + 2]),
+                ) {
+                    out.push((hi << 4) | lo);
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+fn decode_hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn parse_subdirs(params: &BTreeMap<String, String>) -> Vec<String> {
@@ -2579,6 +2622,7 @@ fn add_config_folder(
     runtime: &DaemonApiRuntime,
     folder_id: &str,
     path: &str,
+    folder_type: Option<FolderType>,
 ) -> Result<Value, ApiConfigError> {
     if folder_id.trim().is_empty() {
         return Err(ApiConfigError::BadRequest(
@@ -2597,13 +2641,17 @@ fn add_config_folder(
     if guard.folderCfgs.contains_key(folder_id) {
         return Err(ApiConfigError::Conflict(folder_id.to_string()));
     }
-    let cfg = newFolderConfiguration(folder_id, path);
+    let mut cfg = newFolderConfiguration(folder_id, path);
+    if let Some(ft) = folder_type {
+        cfg.folder_type = ft;
+    }
     guard.newFolder(cfg.clone());
     Ok(json!({
         "added": true,
         "folder": {
             "id": cfg.id,
             "path": cfg.path,
+            "folderType": cfg.folder_type.as_str(),
         }
     }))
 }
@@ -4572,7 +4620,7 @@ mod tests {
         let add = build_api_response(
             &Method::Post,
             &format!(
-                "/rest/system/config/folders?id=docs&path={}",
+                "/rest/system/config/folders?id=docs&path={}&type=recvonly",
                 folder_path.to_string_lossy()
             ),
             &runtime,
@@ -4581,13 +4629,14 @@ mod tests {
         let add_payload: Value = serde_json::from_slice(&add.body).expect("decode json");
         assert_eq!(add_payload["added"], true);
         assert_eq!(add_payload["folder"]["id"], "docs");
+        assert_eq!(add_payload["folder"]["folderType"], "recvonly");
 
         let list = build_api_response(&Method::Get, "/rest/system/config/folders", &runtime);
         assert_eq!(list.status_code, StatusCode(200));
         let list_payload: Value = serde_json::from_slice(&list.body).expect("decode json");
         assert_eq!(list_payload["count"], 1);
         assert_eq!(list_payload["folders"][0]["id"], "docs");
-        assert_eq!(list_payload["folders"][0]["folderType"], "sendrecv");
+        assert_eq!(list_payload["folders"][0]["folderType"], "recvonly");
         assert_eq!(list_payload["folders"][0]["memoryPolicy"], "throttle");
 
         let restart = build_api_response(
@@ -4645,6 +4694,24 @@ mod tests {
         let missing_restart_folder =
             build_api_response(&Method::Post, "/rest/system/config/restart", &runtime);
         assert_eq!(missing_restart_folder.status_code, StatusCode(400));
+    }
+
+    #[test]
+    fn parse_query_decodes_percent_and_plus() {
+        let params = parse_query("id=docs&path=%2Ftmp%2Ffolder+one&type=receiveonly");
+        assert_eq!(params.get("id").map(String::as_str), Some("docs"));
+        assert_eq!(
+            params.get("path").map(String::as_str),
+            Some("/tmp/folder one")
+        );
+        assert_eq!(params.get("type").map(String::as_str), Some("receiveonly"));
+    }
+
+    #[test]
+    fn decode_query_component_preserves_invalid_percent_sequences() {
+        assert_eq!(decode_query_component("a%2Fb"), "a/b");
+        assert_eq!(decode_query_component("a%2"), "a%2");
+        assert_eq!(decode_query_component("%ZZ"), "%ZZ");
     }
 
     #[test]

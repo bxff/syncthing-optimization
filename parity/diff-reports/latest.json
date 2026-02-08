@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-02-08T00:10:38Z",
+  "generated_at": "2026-02-08T00:20:37Z",
   "produced_by": "parity-harness",
   "match": true,
   "mismatches": [],
@@ -34,6 +34,16 @@
       "evidence": "synthetic",
       "go_evidence": "synthetic",
       "rust_evidence": "daemon"
+    },
+    {
+      "id": "external-durability-restart",
+      "severity": "P0",
+      "required": false,
+      "status": "pass",
+      "message": "go and rust outputs match",
+      "evidence": "external-soak",
+      "go_evidence": "external-soak",
+      "rust_evidence": "external-soak"
     },
     {
       "id": "external-soak-replacement",

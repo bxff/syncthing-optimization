@@ -238,6 +238,42 @@
       }
     },
     {
+      "id": "external-durability-restart",
+      "description": "Run real daemon restart cycle and verify file index durability across shutdown/startup on the same disk state.",
+      "severity": "P0",
+      "required": false,
+      "tags": [
+        "core",
+        "external-soak",
+        "durability"
+      ],
+      "comparator": "json-equal",
+      "go": {
+        "command": [
+          "go",
+          "run",
+          "./script/parity_external_soak.go",
+          "scenario",
+          "external-durability-restart",
+          "--impl",
+          "go"
+        ],
+        "snapshot_path": "parity/harness/snapshots/go-external-durability-restart.json"
+      },
+      "rust": {
+        "command": [
+          "go",
+          "run",
+          "./script/parity_external_soak.go",
+          "scenario",
+          "external-durability-restart",
+          "--impl",
+          "rust"
+        ],
+        "snapshot_path": "parity/harness/snapshots/rust-external-durability-restart.json"
+      }
+    },
+    {
       "id": "path-order-invariant",
       "description": "Validate deterministic filesystem walk order matches ordered DB cursor scans.",
       "severity": "P0",

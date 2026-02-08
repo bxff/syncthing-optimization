@@ -27,20 +27,25 @@ import (
 )
 
 const (
-	externalSoakScenarioID = "external-soak-replacement"
-	httpTimeout            = 5 * time.Second
-	startupTimeout         = 30 * time.Second
-	statusTimeout          = 30 * time.Second
-	shutdownTimeout        = 10 * time.Second
-	expectedLocalFiles     = 2
+	externalSoakScenarioID       = "external-soak-replacement"
+	externalDurabilityScenarioID = "external-durability-restart"
+	httpTimeout                  = 5 * time.Second
+	startupTimeout               = 30 * time.Second
+	statusTimeout                = 30 * time.Second
+	shutdownTimeout              = 10 * time.Second
+	expectedLocalFiles           = 2
 )
 
 func main() {
 	if len(os.Args) < 3 || os.Args[1] != "scenario" {
-		fatalf("usage: go run ./script/parity_external_soak.go scenario %s --impl <go|rust>", externalSoakScenarioID)
+		fatalf(
+			"usage: go run ./script/parity_external_soak.go scenario <%s|%s> --impl <go|rust>",
+			externalSoakScenarioID,
+			externalDurabilityScenarioID,
+		)
 	}
 	id := strings.TrimSpace(os.Args[2])
-	if id != externalSoakScenarioID {
+	if id != externalSoakScenarioID && id != externalDurabilityScenarioID {
 		fatalf("unsupported scenario id %q", id)
 	}
 
@@ -53,45 +58,17 @@ func main() {
 		fatalf("--impl must be go or rust")
 	}
 
-	var (
-		metrics soakMetrics
-		err     error
-	)
-	switch *impl {
-	case "go":
-		metrics, err = runGoExternalSoak()
-	case "rust":
-		metrics, err = runRustExternalSoak()
-	default:
-		err = fmt.Errorf("unsupported impl %q", *impl)
-	}
+	checks, metrics, err := runScenario(id, *impl)
 	if err != nil {
 		fatalf("external soak failed: %v", err)
 	}
 
 	out := map[string]any{
-		"scenario": externalSoakScenarioID,
+		"scenario": id,
 		"source":   *impl,
 		"status":   "validated",
-		"checks": map[string]any{
-			"daemon_boot_ok":                 true,
-			"folder_configured":              metrics.FolderConfigured,
-			"scan_ok":                        metrics.ScanOK,
-			"status_ok":                      metrics.StatusOK,
-			"status_state_valid":             stateIsRunnable(metrics.State),
-			"local_files_at_least_expected":  metrics.LocalFiles >= expectedLocalFiles,
-			"global_files_at_least_expected": metrics.GlobalFiles >= expectedLocalFiles,
-			"need_files_zero":                metrics.NeedFiles == 0,
-			"shutdown_requested":             metrics.ShutdownRequested,
-		},
-		"metrics": map[string]any{
-			"local_files":          metrics.LocalFiles,
-			"global_files":         metrics.GlobalFiles,
-			"need_files":           metrics.NeedFiles,
-			"expected_local_files": expectedLocalFiles,
-			"scan_attempts":        metrics.ScanAttempts,
-			"status_poll_attempts": metrics.StatusPollAttempts,
-		},
+		"checks":   checks,
+		"metrics":  metrics,
 	}
 
 	enc := json.NewEncoder(os.Stdout)
@@ -99,6 +76,95 @@ func main() {
 	if err := enc.Encode(out); err != nil {
 		fatalf("encode output: %v", err)
 	}
+}
+
+func runScenario(id, impl string) (map[string]any, map[string]any, error) {
+	switch id {
+	case externalSoakScenarioID:
+		return runScenarioExternalSoak(impl)
+	case externalDurabilityScenarioID:
+		return runScenarioExternalDurability(impl)
+	default:
+		return nil, nil, fmt.Errorf("unsupported scenario %q", id)
+	}
+}
+
+func runScenarioExternalSoak(impl string) (map[string]any, map[string]any, error) {
+	var (
+		metrics soakMetrics
+		err     error
+	)
+	switch impl {
+	case "go":
+		metrics, err = runGoExternalSoak()
+	case "rust":
+		metrics, err = runRustExternalSoak()
+	default:
+		err = fmt.Errorf("unsupported impl %q", impl)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+
+	checks := map[string]any{
+		"daemon_boot_ok":                 true,
+		"folder_configured":              metrics.FolderConfigured,
+		"scan_ok":                        metrics.ScanOK,
+		"status_ok":                      metrics.StatusOK,
+		"status_state_valid":             stateIsRunnable(metrics.State),
+		"local_files_at_least_expected":  metrics.LocalFiles >= expectedLocalFiles,
+		"global_files_at_least_expected": metrics.GlobalFiles >= expectedLocalFiles,
+		"need_files_zero":                metrics.NeedFiles == 0,
+		"shutdown_requested":             metrics.ShutdownRequested,
+	}
+	m := map[string]any{
+		"local_files":          metrics.LocalFiles,
+		"global_files":         metrics.GlobalFiles,
+		"need_files":           metrics.NeedFiles,
+		"expected_local_files": expectedLocalFiles,
+		"scan_attempts":        metrics.ScanAttempts,
+		"status_poll_attempts": metrics.StatusPollAttempts,
+	}
+	return checks, m, nil
+}
+
+func runScenarioExternalDurability(impl string) (map[string]any, map[string]any, error) {
+	var (
+		metrics durabilityMetrics
+		err     error
+	)
+	switch impl {
+	case "go":
+		metrics, err = runGoExternalDurabilityRestart()
+	case "rust":
+		metrics, err = runRustExternalDurabilityRestart()
+	default:
+		err = fmt.Errorf("unsupported impl %q", impl)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+
+	checks := map[string]any{
+		"first_boot_ok":              metrics.FirstBootOK,
+		"folder_configured":          metrics.FolderConfigured,
+		"scan_ok":                    metrics.ScanOK,
+		"pre_restart_files_indexed":  metrics.PreRestartFilesIndexed,
+		"restart_boot_ok":            metrics.RestartBootOK,
+		"post_restart_files_indexed": metrics.PostRestartFilesIndexed,
+		"need_files_zero":            metrics.PostRestartNeedFiles == 0,
+		"shutdown_requested":         metrics.ShutdownRequested,
+		"restart_shutdown_requested": metrics.RestartShutdownRequested,
+	}
+	m := map[string]any{
+		"expected_local_files":      expectedLocalFiles,
+		"pre_restart_local_files":   metrics.PreRestartLocalFiles,
+		"pre_restart_global_files":  metrics.PreRestartGlobalFiles,
+		"post_restart_local_files":  metrics.PostRestartLocalFiles,
+		"post_restart_global_files": metrics.PostRestartGlobalFiles,
+		"post_restart_need_files":   metrics.PostRestartNeedFiles,
+	}
+	return checks, m, nil
 }
 
 type soakMetrics struct {
@@ -112,6 +178,22 @@ type soakMetrics struct {
 	State              string
 	ScanAttempts       int
 	StatusPollAttempts int
+}
+
+type durabilityMetrics struct {
+	FirstBootOK              bool
+	FolderConfigured         bool
+	ScanOK                   bool
+	PreRestartFilesIndexed   bool
+	RestartBootOK            bool
+	PostRestartFilesIndexed  bool
+	ShutdownRequested        bool
+	RestartShutdownRequested bool
+	PreRestartLocalFiles     int
+	PreRestartGlobalFiles    int
+	PostRestartLocalFiles    int
+	PostRestartGlobalFiles   int
+	PostRestartNeedFiles     int
 }
 
 type daemonProc struct {
@@ -323,6 +405,271 @@ func runRustExternalSoak() (soakMetrics, error) {
 	return metrics, nil
 }
 
+func runGoExternalDurabilityRestart() (durabilityMetrics, error) {
+	var metrics durabilityMetrics
+	root, err := os.MkdirTemp("", "syncthing-go-external-durability-")
+	if err != nil {
+		return metrics, fmt.Errorf("create temp root: %w", err)
+	}
+	defer os.RemoveAll(root)
+
+	homeDir := filepath.Join(root, "home")
+	folderDir := filepath.Join(root, "folder")
+	if err := prepareSoakFolder(folderDir); err != nil {
+		return metrics, err
+	}
+	if err := runCmd(20*time.Second, "go", "run", "./cmd/syncthing", "generate", "--home", homeDir, "--no-port-probing"); err != nil {
+		return metrics, fmt.Errorf("generate go config: %w", err)
+	}
+	apiKey, err := parseAPIKey(filepath.Join(homeDir, "config.xml"))
+	if err != nil {
+		return metrics, err
+	}
+
+	apiPort, err := freePort()
+	if err != nil {
+		return metrics, err
+	}
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", apiPort)
+	proc := &daemonProc{
+		cmd: exec.Command(
+			"go", "run", "./cmd/syncthing", "serve",
+			"--home", homeDir,
+			"--no-browser",
+			"--no-restart",
+			"--gui-address", baseURL,
+			"--log-file=-",
+		),
+	}
+	if err := proc.start(); err != nil {
+		return metrics, fmt.Errorf("start go daemon: %w", err)
+	}
+	defer proc.stop()
+	if err := waitForPing(baseURL, apiKey, startupTimeout); err != nil {
+		return metrics, fmt.Errorf("go first boot startup: %w (stderr=%s)", err, strings.TrimSpace(proc.stderr.String()))
+	}
+	metrics.FirstBootOK = true
+
+	if err := runCmd(
+		20*time.Second,
+		"go", "run", "./cmd/syncthing", "cli",
+		"--home", homeDir,
+		"--gui-address", fmt.Sprintf("127.0.0.1:%d", apiPort),
+		"--gui-apikey", apiKey,
+		"config", "folders", "add",
+		"--id", "default",
+		"--path", folderDir,
+		"--type", "sendreceive",
+	); err != nil {
+		return metrics, fmt.Errorf("configure go folder: %w", err)
+	}
+	metrics.FolderConfigured = true
+
+	if _, _, err := requestJSON(http.MethodPost, baseURL+"/rest/db/scan?folder=default", apiKey); err != nil {
+		return metrics, fmt.Errorf("go first scan request: %w", err)
+	}
+	metrics.ScanOK = true
+	status, _, err := pollStatus(baseURL, apiKey, statusTimeout)
+	if err != nil {
+		return metrics, fmt.Errorf("go first status poll: %w", err)
+	}
+	metrics.PreRestartLocalFiles = intField(status, "localFiles")
+	metrics.PreRestartGlobalFiles = intField(status, "globalFiles")
+	if metrics.PreRestartLocalFiles < expectedLocalFiles || metrics.PreRestartGlobalFiles < expectedLocalFiles {
+		return metrics, fmt.Errorf("go pre-restart status did not observe expected files (local=%d global=%d)",
+			metrics.PreRestartLocalFiles, metrics.PreRestartGlobalFiles)
+	}
+	if err := verifyIndexedFiles(baseURL, apiKey, "default", []string{"a.txt", "nested/b.txt"}); err != nil {
+		return metrics, fmt.Errorf("go pre-restart file verification: %w", err)
+	}
+	metrics.PreRestartFilesIndexed = true
+
+	if _, _, err := requestJSON(http.MethodPost, baseURL+"/rest/system/shutdown", apiKey); err != nil {
+		return metrics, fmt.Errorf("go first shutdown request: %w", err)
+	}
+	metrics.ShutdownRequested = true
+	if err := proc.wait(shutdownTimeout); err != nil {
+		return metrics, fmt.Errorf("go first shutdown wait: %w", err)
+	}
+
+	restartPort, err := freePort()
+	if err != nil {
+		return metrics, err
+	}
+	restartURL := fmt.Sprintf("http://127.0.0.1:%d", restartPort)
+	restarted := &daemonProc{
+		cmd: exec.Command(
+			"go", "run", "./cmd/syncthing", "serve",
+			"--home", homeDir,
+			"--no-browser",
+			"--no-restart",
+			"--gui-address", restartURL,
+			"--log-file=-",
+		),
+	}
+	if err := restarted.start(); err != nil {
+		return metrics, fmt.Errorf("start go daemon restart: %w", err)
+	}
+	defer restarted.stop()
+	if err := waitForPing(restartURL, apiKey, startupTimeout); err != nil {
+		return metrics, fmt.Errorf("go restart boot startup: %w (stderr=%s)", err, strings.TrimSpace(restarted.stderr.String()))
+	}
+	metrics.RestartBootOK = true
+
+	restartStatus, _, err := pollStatus(restartURL, apiKey, statusTimeout)
+	if err != nil {
+		return metrics, fmt.Errorf("go restart status poll: %w", err)
+	}
+	metrics.PostRestartLocalFiles = intField(restartStatus, "localFiles")
+	metrics.PostRestartGlobalFiles = intField(restartStatus, "globalFiles")
+	metrics.PostRestartNeedFiles = intField(restartStatus, "needFiles")
+	if metrics.PostRestartLocalFiles < expectedLocalFiles || metrics.PostRestartGlobalFiles < expectedLocalFiles {
+		return metrics, fmt.Errorf("go post-restart status did not observe expected files (local=%d global=%d need=%d)",
+			metrics.PostRestartLocalFiles, metrics.PostRestartGlobalFiles, metrics.PostRestartNeedFiles)
+	}
+	if err := verifyIndexedFiles(restartURL, apiKey, "default", []string{"a.txt", "nested/b.txt"}); err != nil {
+		return metrics, fmt.Errorf("go post-restart file verification: %w", err)
+	}
+	metrics.PostRestartFilesIndexed = true
+
+	if _, _, err := requestJSON(http.MethodPost, restartURL+"/rest/system/shutdown", apiKey); err != nil {
+		return metrics, fmt.Errorf("go restart shutdown request: %w", err)
+	}
+	metrics.RestartShutdownRequested = true
+	if err := restarted.wait(shutdownTimeout); err != nil {
+		return metrics, fmt.Errorf("go restart shutdown wait: %w", err)
+	}
+	return metrics, nil
+}
+
+func runRustExternalDurabilityRestart() (durabilityMetrics, error) {
+	var metrics durabilityMetrics
+	root, err := os.MkdirTemp("", "syncthing-rs-external-durability-")
+	if err != nil {
+		return metrics, fmt.Errorf("create temp root: %w", err)
+	}
+	defer os.RemoveAll(root)
+
+	folderDir := filepath.Join(root, "folder")
+	dbRoot := filepath.Join(root, "db")
+	if err := prepareSoakFolder(folderDir); err != nil {
+		return metrics, err
+	}
+	if err := os.MkdirAll(dbRoot, 0o755); err != nil {
+		return metrics, fmt.Errorf("create rust db root: %w", err)
+	}
+
+	apiPort, err := freePort()
+	if err != nil {
+		return metrics, err
+	}
+	bepPort, err := freePort()
+	if err != nil {
+		return metrics, err
+	}
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", apiPort)
+
+	proc := &daemonProc{
+		cmd: exec.Command(
+			"cargo", "run", "--quiet", "--manifest-path", "syncthing-rs/Cargo.toml", "--",
+			"daemon",
+			"--folder", fmt.Sprintf("default:%s", folderDir),
+			"--db-root", dbRoot,
+			"--api-listen", fmt.Sprintf("127.0.0.1:%d", apiPort),
+			"--listen", fmt.Sprintf("127.0.0.1:%d", bepPort),
+		),
+	}
+	if err := proc.start(); err != nil {
+		return metrics, fmt.Errorf("start rust daemon: %w", err)
+	}
+	defer proc.stop()
+	if err := waitForPing(baseURL, "", startupTimeout); err != nil {
+		return metrics, fmt.Errorf("rust first boot startup: %w (stderr=%s)", err, strings.TrimSpace(proc.stderr.String()))
+	}
+	metrics.FirstBootOK = true
+	metrics.FolderConfigured = true
+
+	if _, _, err := requestJSON(http.MethodPost, baseURL+"/rest/db/scan?folder=default", ""); err != nil {
+		return metrics, fmt.Errorf("rust first scan request: %w", err)
+	}
+	metrics.ScanOK = true
+	status, _, err := pollStatus(baseURL, "", statusTimeout)
+	if err != nil {
+		return metrics, fmt.Errorf("rust first status poll: %w", err)
+	}
+	metrics.PreRestartLocalFiles = intField(status, "localFiles")
+	metrics.PreRestartGlobalFiles = intField(status, "globalFiles")
+	if metrics.PreRestartLocalFiles < expectedLocalFiles || metrics.PreRestartGlobalFiles < expectedLocalFiles {
+		return metrics, fmt.Errorf("rust pre-restart status did not observe expected files (local=%d global=%d)",
+			metrics.PreRestartLocalFiles, metrics.PreRestartGlobalFiles)
+	}
+	if err := verifyIndexedFiles(baseURL, "", "default", []string{"a.txt", "nested/b.txt"}); err != nil {
+		return metrics, fmt.Errorf("rust pre-restart file verification: %w", err)
+	}
+	metrics.PreRestartFilesIndexed = true
+
+	if _, _, err := requestJSON(http.MethodPost, baseURL+"/rest/system/shutdown", ""); err != nil {
+		return metrics, fmt.Errorf("rust first shutdown request: %w", err)
+	}
+	metrics.ShutdownRequested = true
+	if err := proc.wait(shutdownTimeout); err != nil {
+		return metrics, fmt.Errorf("rust first shutdown wait: %w", err)
+	}
+
+	restartAPIPort, err := freePort()
+	if err != nil {
+		return metrics, err
+	}
+	restartBEPPort, err := freePort()
+	if err != nil {
+		return metrics, err
+	}
+	restartURL := fmt.Sprintf("http://127.0.0.1:%d", restartAPIPort)
+	restarted := &daemonProc{
+		cmd: exec.Command(
+			"cargo", "run", "--quiet", "--manifest-path", "syncthing-rs/Cargo.toml", "--",
+			"daemon",
+			"--folder", fmt.Sprintf("default:%s", folderDir),
+			"--db-root", dbRoot,
+			"--api-listen", fmt.Sprintf("127.0.0.1:%d", restartAPIPort),
+			"--listen", fmt.Sprintf("127.0.0.1:%d", restartBEPPort),
+		),
+	}
+	if err := restarted.start(); err != nil {
+		return metrics, fmt.Errorf("start rust daemon restart: %w", err)
+	}
+	defer restarted.stop()
+	if err := waitForPing(restartURL, "", startupTimeout); err != nil {
+		return metrics, fmt.Errorf("rust restart boot startup: %w (stderr=%s)", err, strings.TrimSpace(restarted.stderr.String()))
+	}
+	metrics.RestartBootOK = true
+
+	restartStatus, _, err := pollStatus(restartURL, "", statusTimeout)
+	if err != nil {
+		return metrics, fmt.Errorf("rust restart status poll: %w", err)
+	}
+	metrics.PostRestartLocalFiles = intField(restartStatus, "localFiles")
+	metrics.PostRestartGlobalFiles = intField(restartStatus, "globalFiles")
+	metrics.PostRestartNeedFiles = intField(restartStatus, "needFiles")
+	if metrics.PostRestartLocalFiles < expectedLocalFiles || metrics.PostRestartGlobalFiles < expectedLocalFiles {
+		return metrics, fmt.Errorf("rust post-restart status did not observe expected files (local=%d global=%d need=%d)",
+			metrics.PostRestartLocalFiles, metrics.PostRestartGlobalFiles, metrics.PostRestartNeedFiles)
+	}
+	if err := verifyIndexedFiles(restartURL, "", "default", []string{"a.txt", "nested/b.txt"}); err != nil {
+		return metrics, fmt.Errorf("rust post-restart file verification: %w", err)
+	}
+	metrics.PostRestartFilesIndexed = true
+
+	if _, _, err := requestJSON(http.MethodPost, restartURL+"/rest/system/shutdown", ""); err != nil {
+		return metrics, fmt.Errorf("rust restart shutdown request: %w", err)
+	}
+	metrics.RestartShutdownRequested = true
+	if err := restarted.wait(shutdownTimeout); err != nil {
+		return metrics, fmt.Errorf("rust restart shutdown wait: %w", err)
+	}
+	return metrics, nil
+}
+
 func prepareSoakFolder(folderDir string) error {
 	if err := os.MkdirAll(filepath.Join(folderDir, "nested"), 0o755); err != nil {
 		return fmt.Errorf("create folder tree: %w", err)
@@ -420,6 +767,26 @@ func pollStatus(baseURL, apiKey string, timeout time.Duration) (map[string]any, 
 		last = map[string]any{}
 	}
 	return last, polls, fmt.Errorf("timed out waiting for status convergence")
+}
+
+func verifyIndexedFiles(baseURL, apiKey, folder string, files []string) error {
+	for _, file := range files {
+		query := url.Values{}
+		query.Set("folder", folder)
+		query.Set("file", file)
+		target := encodeURLQuery(baseURL+"/rest/db/file", query)
+		payload, status, err := requestJSON(http.MethodGet, target, apiKey)
+		if err != nil {
+			return fmt.Errorf("request %s: %w", target, err)
+		}
+		if status != http.StatusOK {
+			return fmt.Errorf("request %s returned status %d", target, status)
+		}
+		if len(payload) == 0 {
+			return fmt.Errorf("request %s returned empty payload", target)
+		}
+	}
+	return nil
 }
 
 func requestJSON(method, rawURL, apiKey string) (map[string]any, int, error) {

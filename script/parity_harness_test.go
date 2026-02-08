@@ -219,6 +219,162 @@ func TestCompareSnapshotsEndpointSurfaceEnforcesRequiredReplacementEndpoints(t *
 	}
 }
 
+func TestCompareSnapshotsNormalizedStateProjectionAcceptsEquivalentState(t *testing.T) {
+	dir := t.TempDir()
+	gatesPath := filepath.Join(dir, "replacement-gates.json")
+	if err := os.WriteFile(gatesPath, []byte(`{"required_state_projection_fields":["my_id","device_ids","folder_summaries","pending_device_ids","pending_folder_ids","invalid_pending_device_ids","invalid_pending_folder_ids"]}`), 0o644); err != nil {
+		t.Fatalf("write replacement gates: %v", err)
+	}
+	t.Setenv("PARITY_REPLACEMENT_GATES_PATH", gatesPath)
+
+	goSnap := map[string]any{
+		"checks": map[string]any{
+			"scan_ok": true,
+		},
+		"state_projection": map[string]any{
+			"my_id": "LOCAL-A",
+			"device_ids": []any{
+				"LOCAL-A",
+			},
+			"folder_summaries": []any{
+				map[string]any{
+					"id":           "default",
+					"local_files":  2.0,
+					"global_files": 2.0,
+					"need_files":   0.0,
+				},
+			},
+			"pending_device_ids":         []any{},
+			"pending_folder_ids":         []any{},
+			"invalid_pending_device_ids": []any{},
+			"invalid_pending_folder_ids": []any{},
+		},
+	}
+	rustSnap := map[string]any{
+		"checks": map[string]any{
+			"scan_ok": true,
+		},
+		"state_projection": map[string]any{
+			"my_id": "LOCAL-A",
+			"device_ids": []any{
+				"LOCAL-A",
+			},
+			"folder_summaries": []any{
+				map[string]any{
+					"id":           "default",
+					"local_files":  2.0,
+					"global_files": 2.0,
+					"need_files":   0.0,
+				},
+			},
+			"pending_device_ids":         []any{},
+			"pending_folder_ids":         []any{},
+			"invalid_pending_device_ids": []any{},
+			"invalid_pending_folder_ids": []any{},
+		},
+	}
+	ok, msg := compareSnapshots("external-soak-replacement", "normalized-state-projection", goSnap, rustSnap)
+	if !ok {
+		t.Fatalf("expected normalized-state-projection comparator to pass, got msg=%q", msg)
+	}
+}
+
+func TestCompareSnapshotsNormalizedStateProjectionRejectsFailedChecks(t *testing.T) {
+	dir := t.TempDir()
+	gatesPath := filepath.Join(dir, "replacement-gates.json")
+	if err := os.WriteFile(gatesPath, []byte(`{"required_state_projection_fields":["my_id","device_ids","folder_summaries","pending_device_ids","pending_folder_ids","invalid_pending_device_ids","invalid_pending_folder_ids"]}`), 0o644); err != nil {
+		t.Fatalf("write replacement gates: %v", err)
+	}
+	t.Setenv("PARITY_REPLACEMENT_GATES_PATH", gatesPath)
+
+	ok, msg := compareSnapshots(
+		"external-soak-replacement",
+		"normalized-state-projection",
+		map[string]any{
+			"checks": map[string]any{
+				"scan_ok": false,
+			},
+			"state_projection": map[string]any{
+				"my_id":                      "LOCAL-A",
+				"device_ids":                 []any{"LOCAL-A"},
+				"folder_summaries":           []any{map[string]any{"id": "default", "local_files": 1.0, "global_files": 1.0, "need_files": 0.0}},
+				"pending_device_ids":         []any{},
+				"pending_folder_ids":         []any{},
+				"invalid_pending_device_ids": []any{},
+				"invalid_pending_folder_ids": []any{},
+			},
+		},
+		map[string]any{
+			"checks": map[string]any{
+				"scan_ok": true,
+			},
+			"state_projection": map[string]any{
+				"my_id":                      "LOCAL-A",
+				"device_ids":                 []any{"LOCAL-A"},
+				"folder_summaries":           []any{map[string]any{"id": "default", "local_files": 1.0, "global_files": 1.0, "need_files": 0.0}},
+				"pending_device_ids":         []any{},
+				"pending_folder_ids":         []any{},
+				"invalid_pending_device_ids": []any{},
+				"invalid_pending_folder_ids": []any{},
+			},
+		},
+	)
+	if ok {
+		t.Fatal("expected normalized-state-projection comparator to fail when checks fail")
+	}
+	if msg == "" {
+		t.Fatal("expected mismatch message")
+	}
+}
+
+func TestCompareSnapshotsNormalizedStateProjectionRejectsInvalidPendingIDs(t *testing.T) {
+	dir := t.TempDir()
+	gatesPath := filepath.Join(dir, "replacement-gates.json")
+	if err := os.WriteFile(gatesPath, []byte(`{"required_state_projection_fields":["my_id","device_ids","folder_summaries","pending_device_ids","pending_folder_ids","invalid_pending_device_ids","invalid_pending_folder_ids"]}`), 0o644); err != nil {
+		t.Fatalf("write replacement gates: %v", err)
+	}
+	t.Setenv("PARITY_REPLACEMENT_GATES_PATH", gatesPath)
+
+	ok, msg := compareSnapshots(
+		"external-soak-replacement",
+		"normalized-state-projection",
+		map[string]any{
+			"checks": map[string]any{
+				"scan_ok": true,
+			},
+			"state_projection": map[string]any{
+				"my_id":                      "LOCAL-A",
+				"device_ids":                 []any{"LOCAL-A"},
+				"folder_summaries":           []any{map[string]any{"id": "default", "local_files": 1.0, "global_files": 1.0, "need_files": 0.0}},
+				"pending_device_ids":         []any{},
+				"pending_folder_ids":         []any{},
+				"invalid_pending_device_ids": []any{"<empty>"},
+				"invalid_pending_folder_ids": []any{},
+			},
+		},
+		map[string]any{
+			"checks": map[string]any{
+				"scan_ok": true,
+			},
+			"state_projection": map[string]any{
+				"my_id":                      "LOCAL-A",
+				"device_ids":                 []any{"LOCAL-A"},
+				"folder_summaries":           []any{map[string]any{"id": "default", "local_files": 1.0, "global_files": 1.0, "need_files": 0.0}},
+				"pending_device_ids":         []any{},
+				"pending_folder_ids":         []any{},
+				"invalid_pending_device_ids": []any{},
+				"invalid_pending_folder_ids": []any{},
+			},
+		},
+	)
+	if ok {
+		t.Fatal("expected normalized-state-projection comparator to fail for invalid pending IDs")
+	}
+	if msg == "" {
+		t.Fatal("expected mismatch message")
+	}
+}
+
 func TestCompareSnapshotsProtocolSemanticsIgnoresFrameSizeValues(t *testing.T) {
 	ok, msg := compareSnapshots(
 		"protocol-state-transition",
@@ -330,6 +486,42 @@ func TestNormalizeScenarioEvidenceRejectsUnknownValues(t *testing.T) {
 	}
 	if got := normalizeScenarioEvidence("  INTEROP  "); got != "peer-interop" {
 		t.Fatalf("expected interop alias normalization, got %q", got)
+	}
+}
+
+func TestParseScenarioIDSetParsesCommaSeparatedIDs(t *testing.T) {
+	got := parseScenarioIDSet(" external-soak-replacement,daemon-api-surface,, path-order-invariant ")
+	if len(got) != 3 {
+		t.Fatalf("expected 3 ids, got %d (%v)", len(got), got)
+	}
+	for _, id := range []string{"external-soak-replacement", "daemon-api-surface", "path-order-invariant"} {
+		if _, ok := got[id]; !ok {
+			t.Fatalf("expected id %q in parsed set (%v)", id, got)
+		}
+	}
+}
+
+func TestLoadRequiredScenarioEvidenceParsesAndNormalizes(t *testing.T) {
+	dir := t.TempDir()
+	gatesPath := filepath.Join(dir, "replacement-gates.json")
+	payload := `{
+  "required_scenarios": [
+    {"id":"index-sequence-behavior","go_min_evidence":"synthetic","rust_min_evidence":"peer-interop"}
+  ]
+}`
+	if err := os.WriteFile(gatesPath, []byte(payload), 0o644); err != nil {
+		t.Fatalf("write replacement gates: %v", err)
+	}
+	got, err := loadRequiredScenarioEvidence(gatesPath)
+	if err != nil {
+		t.Fatalf("load required scenario evidence: %v", err)
+	}
+	req, ok := got["index-sequence-behavior"]
+	if !ok {
+		t.Fatalf("expected index-sequence-behavior in required scenario evidence map (%v)", got)
+	}
+	if req.GoMinEvidence != "synthetic" || req.RustMinEvidence != "peer-interop" {
+		t.Fatalf("unexpected normalized evidence requirement: %+v", req)
 	}
 }
 

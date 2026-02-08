@@ -11,6 +11,9 @@
     "GET /rest/db/need",
     "GET /rest/db/remoteneed",
     "GET /rest/db/status",
+    "GET /rest/cluster/pending/devices",
+    "GET /rest/cluster/pending/folders",
+    "GET /rest/config",
     "GET /rest/system/config/folders",
     "GET /rest/system/connections",
     "GET /rest/system/ping",
@@ -23,7 +26,17 @@
     "POST /rest/db/revert",
     "POST /rest/db/scan",
     "POST /rest/system/config/folders",
-    "POST /rest/system/config/restart"
+    "POST /rest/system/config/restart",
+    "POST /rest/system/shutdown"
+  ],
+  "required_state_projection_fields": [
+    "my_id",
+    "device_ids",
+    "folder_summaries",
+    "pending_device_ids",
+    "pending_folder_ids",
+    "invalid_pending_device_ids",
+    "invalid_pending_folder_ids"
   ],
   "required_bep_message_types": [
     "hello",

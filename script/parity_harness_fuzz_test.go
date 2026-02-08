@@ -78,6 +78,12 @@ func FuzzCanonicalJSONStable(f *testing.F) {
 func FuzzCompareSnapshotsNoPanic(f *testing.F) {
 	f.Add("daemon-api-surface", "endpoint-surface", `{"covered_endpoints":["GET /rest/system/status"]}`, `{"covered_endpoints":["GET /rest/system/status"]}`)
 	f.Add("memory-cap-50mb", "json-equal", `{"a":1}`, `{"a":1}`)
+	f.Add(
+		"external-soak-replacement",
+		"normalized-state-projection",
+		`{"checks":{"scan_ok":true},"state_projection":{"my_id":"LOCAL","device_ids":["LOCAL"],"folder_summaries":[{"id":"default","local_files":1,"global_files":1,"need_files":0}],"pending_device_ids":[],"pending_folder_ids":[],"invalid_pending_device_ids":[],"invalid_pending_folder_ids":[]}}`,
+		`{"checks":{"scan_ok":true},"state_projection":{"my_id":"LOCAL","device_ids":["LOCAL"],"folder_summaries":[{"id":"default","local_files":1,"global_files":1,"need_files":0}],"pending_device_ids":[],"pending_folder_ids":[],"invalid_pending_device_ids":[],"invalid_pending_folder_ids":[]}}`,
+	)
 	f.Add("x", "bogus-mode", `{}`, `{}`)
 	f.Fuzz(func(t *testing.T, id, mode, goRaw, rustRaw string) {
 		var goSnap map[string]any

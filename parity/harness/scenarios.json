@@ -211,7 +211,7 @@
         "core",
         "external-soak"
       ],
-      "comparator": "json-equal",
+      "comparator": "normalized-state-projection",
       "go": {
         "command": [
           "go",
@@ -247,7 +247,7 @@
         "external-soak",
         "multifolder"
       ],
-      "comparator": "json-equal",
+      "comparator": "normalized-state-projection",
       "go": {
         "command": [
           "go",
@@ -283,7 +283,7 @@
         "external-soak",
         "folder-modes"
       ],
-      "comparator": "json-equal",
+      "comparator": "normalized-state-projection",
       "go": {
         "command": [
           "go",
@@ -319,7 +319,7 @@
         "external-soak",
         "durability"
       ],
-      "comparator": "json-equal",
+      "comparator": "normalized-state-projection",
       "go": {
         "command": [
           "go",
@@ -355,7 +355,7 @@
         "external-soak",
         "crash-recovery"
       ],
-      "comparator": "json-equal",
+      "comparator": "normalized-state-projection",
       "go": {
         "command": [
           "go",

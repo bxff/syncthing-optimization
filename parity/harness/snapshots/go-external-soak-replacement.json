@@ -22,5 +22,30 @@
   },
   "scenario": "external-soak-replacement",
   "source": "go",
+  "state_projection": {
+    "device_ids": [
+      "IMTCJMD-2OEJW6G-WAZSYXM-N6BMTLB-AYZGVEI-L4VVETY-E54RM4N-5QCT6AR"
+    ],
+    "folder_summaries": [
+      {
+        "browse_path_count": 2,
+        "browse_paths": [
+          "a.txt",
+          "nested/b.txt"
+        ],
+        "global_files": 2,
+        "id": "default",
+        "local_files": 2,
+        "need_files": 0,
+        "state": "runnable",
+        "type": "sendrecv"
+      }
+    ],
+    "invalid_pending_device_ids": [],
+    "invalid_pending_folder_ids": [],
+    "my_id": "IMTCJMD-2OEJW6G-WAZSYXM-N6BMTLB-AYZGVEI-L4VVETY-E54RM4N-5QCT6AR",
+    "pending_device_ids": [],
+    "pending_folder_ids": []
+  },
   "status": "validated"
 }

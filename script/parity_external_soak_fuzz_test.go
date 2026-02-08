@@ -106,3 +106,37 @@ func TestValidateIndexedFilePayloadRejectsMissingEntry(t *testing.T) {
 		t.Fatal("expected missing entry to be rejected")
 	}
 }
+
+func TestExtractPendingIDsHandlesObjectShapes(t *testing.T) {
+	ids, invalid := extractPendingIDs(
+		map[string]any{
+			"PEER-A": map[string]any{"name": "peer-a"},
+			"devices": map[string]any{
+				"PEER-B": map[string]any{"name": "peer-b"},
+			},
+		},
+		[]string{"deviceID", "id", "name"},
+	)
+	if len(invalid) != 0 {
+		t.Fatalf("expected no invalid pending IDs, got %v", invalid)
+	}
+	if len(ids) != 2 || ids[0] != "PEER-A" || ids[1] != "PEER-B" {
+		t.Fatalf("unexpected pending IDs: %v", ids)
+	}
+}
+
+func TestExtractPendingIDsReportsInvalidEmptyIDs(t *testing.T) {
+	ids, invalid := extractPendingIDs(
+		[]any{
+			map[string]any{"name": "peer-a"},
+			map[string]any{},
+		},
+		[]string{"deviceID", "id"},
+	)
+	if len(ids) != 0 {
+		t.Fatalf("expected no valid IDs, got %v", ids)
+	}
+	if len(invalid) == 0 {
+		t.Fatal("expected invalid pending IDs to be reported")
+	}
+}

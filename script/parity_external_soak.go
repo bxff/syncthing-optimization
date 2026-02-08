@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -88,17 +89,18 @@ func main() {
 		fatalf("--impl must be go or rust")
 	}
 
-	checks, metrics, err := runScenario(id, *impl, *seed)
+	checks, metrics, stateProjection, err := runScenario(id, *impl, *seed)
 	if err != nil {
 		fatalf("external soak failed: %v", err)
 	}
 
 	out := map[string]any{
-		"scenario": id,
-		"source":   *impl,
-		"status":   "validated",
-		"checks":   checks,
-		"metrics":  metrics,
+		"scenario":         id,
+		"source":           *impl,
+		"status":           "validated",
+		"checks":           checks,
+		"metrics":          metrics,
+		"state_projection": stateProjection,
 	}
 
 	enc := json.NewEncoder(os.Stdout)
@@ -108,7 +110,7 @@ func main() {
 	}
 }
 
-func runScenario(id, impl string, seed int64) (map[string]any, map[string]any, error) {
+func runScenario(id, impl string, seed int64) (map[string]any, map[string]any, map[string]any, error) {
 	switch id {
 	case externalSoakScenarioID:
 		return runScenarioExternalSoak(impl, seed)
@@ -121,11 +123,11 @@ func runScenario(id, impl string, seed int64) (map[string]any, map[string]any, e
 	case externalCrashScenarioID:
 		return runScenarioExternalCrashRecovery(impl, seed)
 	default:
-		return nil, nil, fmt.Errorf("unsupported scenario %q", id)
+		return nil, nil, nil, fmt.Errorf("unsupported scenario %q", id)
 	}
 }
 
-func runScenarioExternalSoak(impl string, seed int64) (map[string]any, map[string]any, error) {
+func runScenarioExternalSoak(impl string, seed int64) (map[string]any, map[string]any, map[string]any, error) {
 	var (
 		metrics soakMetrics
 		err     error
@@ -139,7 +141,7 @@ func runScenarioExternalSoak(impl string, seed int64) (map[string]any, map[strin
 		err = fmt.Errorf("unsupported impl %q", impl)
 	}
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	checks := map[string]any{
@@ -163,10 +165,10 @@ func runScenarioExternalSoak(impl string, seed int64) (map[string]any, map[strin
 		"seed":                 metrics.Seed,
 		"workload_digest":      metrics.WorkloadDigest,
 	}
-	return checks, m, nil
+	return checks, m, metrics.StateProjection, nil
 }
 
-func runScenarioExternalMultiFolder(impl string, seed int64) (map[string]any, map[string]any, error) {
+func runScenarioExternalMultiFolder(impl string, seed int64) (map[string]any, map[string]any, map[string]any, error) {
 	var (
 		metrics multiFolderMetrics
 		err     error
@@ -180,7 +182,7 @@ func runScenarioExternalMultiFolder(impl string, seed int64) (map[string]any, ma
 		err = fmt.Errorf("unsupported impl %q", impl)
 	}
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	checks := map[string]any{
@@ -215,10 +217,10 @@ func runScenarioExternalMultiFolder(impl string, seed int64) (map[string]any, ma
 		"seed":                   metrics.Seed,
 		"workload_digest":        metrics.WorkloadDigest,
 	}
-	return checks, m, nil
+	return checks, m, metrics.StateProjection, nil
 }
 
-func runScenarioExternalFolderModes(impl string, seed int64) (map[string]any, map[string]any, error) {
+func runScenarioExternalFolderModes(impl string, seed int64) (map[string]any, map[string]any, map[string]any, error) {
 	var (
 		metrics folderModeMetrics
 		err     error
@@ -232,7 +234,7 @@ func runScenarioExternalFolderModes(impl string, seed int64) (map[string]any, ma
 		err = fmt.Errorf("unsupported impl %q", impl)
 	}
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	checks := map[string]any{
@@ -253,10 +255,10 @@ func runScenarioExternalFolderModes(impl string, seed int64) (map[string]any, ma
 		"seed":                 metrics.Seed,
 		"workload_digest":      metrics.WorkloadDigest,
 	}
-	return checks, m, nil
+	return checks, m, metrics.StateProjection, nil
 }
 
-func runScenarioExternalDurability(impl string, seed int64) (map[string]any, map[string]any, error) {
+func runScenarioExternalDurability(impl string, seed int64) (map[string]any, map[string]any, map[string]any, error) {
 	var (
 		metrics durabilityMetrics
 		err     error
@@ -270,7 +272,7 @@ func runScenarioExternalDurability(impl string, seed int64) (map[string]any, map
 		err = fmt.Errorf("unsupported impl %q", impl)
 	}
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	checks := map[string]any{
@@ -295,10 +297,10 @@ func runScenarioExternalDurability(impl string, seed int64) (map[string]any, map
 		"seed":                      metrics.Seed,
 		"workload_digest":           metrics.WorkloadDigest,
 	}
-	return checks, m, nil
+	return checks, m, metrics.StateProjection, nil
 }
 
-func runScenarioExternalCrashRecovery(impl string, seed int64) (map[string]any, map[string]any, error) {
+func runScenarioExternalCrashRecovery(impl string, seed int64) (map[string]any, map[string]any, map[string]any, error) {
 	var (
 		metrics crashMetrics
 		err     error
@@ -312,7 +314,7 @@ func runScenarioExternalCrashRecovery(impl string, seed int64) (map[string]any, 
 		err = fmt.Errorf("unsupported impl %q", impl)
 	}
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	checks := map[string]any{
@@ -337,7 +339,7 @@ func runScenarioExternalCrashRecovery(impl string, seed int64) (map[string]any, 
 		"seed":                      metrics.Seed,
 		"workload_digest":           metrics.WorkloadDigest,
 	}
-	return checks, m, nil
+	return checks, m, metrics.StateProjection, nil
 }
 
 type soakMetrics struct {
@@ -353,6 +355,7 @@ type soakMetrics struct {
 	StatusPollAttempts int
 	Seed               int64
 	WorkloadDigest     string
+	StateProjection    map[string]any
 }
 
 type multiFolderMetrics struct {
@@ -376,6 +379,7 @@ type multiFolderMetrics struct {
 	StatusPollAttempts      int
 	Seed                    int64
 	WorkloadDigest          string
+	StateProjection         map[string]any
 }
 
 type folderModeMetrics struct {
@@ -392,6 +396,7 @@ type folderModeMetrics struct {
 	StatusPollAttempts int
 	Seed               int64
 	WorkloadDigest     string
+	StateProjection    map[string]any
 }
 
 type durabilityMetrics struct {
@@ -411,6 +416,7 @@ type durabilityMetrics struct {
 	StatusPollAttempts       int
 	Seed                     int64
 	WorkloadDigest           string
+	StateProjection          map[string]any
 }
 
 type crashMetrics struct {
@@ -430,11 +436,13 @@ type crashMetrics struct {
 	StatusPollAttempts       int
 	Seed                     int64
 	WorkloadDigest           string
+	StateProjection          map[string]any
 }
 
 type daemonProc struct {
 	cmd    *exec.Cmd
 	stderr bytes.Buffer
+	waited bool
 }
 
 func (p *daemonProc) start() error {
@@ -447,14 +455,25 @@ func (p *daemonProc) stop() error {
 	if p == nil || p.cmd == nil || p.cmd.Process == nil {
 		return nil
 	}
+	if p.waited {
+		return nil
+	}
 	_ = p.cmd.Process.Kill()
 	waitCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	return waitWithContext(waitCtx, p.cmd)
+	err := waitWithContext(waitCtx, p.cmd)
+	if err == nil || strings.Contains(err.Error(), "Wait was already called") {
+		p.waited = true
+		return nil
+	}
+	return err
 }
 
 func (p *daemonProc) crashKill() error {
 	if p == nil || p.cmd == nil || p.cmd.Process == nil {
+		return nil
+	}
+	if p.waited {
 		return nil
 	}
 	if err := p.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
@@ -464,20 +483,33 @@ func (p *daemonProc) crashKill() error {
 	defer cancel()
 	err := waitWithContext(waitCtx, p.cmd)
 	if err == nil {
+		p.waited = true
 		return nil
 	}
 	// `go run`/`cargo run` wrappers can return deadline/signal errors while still
 	// ensuring abrupt process termination semantics for crash-recovery testing.
 	if errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "signal: killed") {
+		p.waited = true
 		return nil
 	}
 	return err
 }
 
 func (p *daemonProc) wait(timeout time.Duration) error {
+	if p == nil || p.cmd == nil {
+		return nil
+	}
+	if p.waited {
+		return nil
+	}
 	waitCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return waitWithContext(waitCtx, p.cmd)
+	err := waitWithContext(waitCtx, p.cmd)
+	if err == nil || strings.Contains(err.Error(), "Wait was already called") {
+		p.waited = true
+		return nil
+	}
+	return err
 }
 
 func runGoExternalSoak(seed int64) (soakMetrics, error) {
@@ -573,6 +605,10 @@ func runGoExternalSoak(seed int64) (soakMetrics, error) {
 	if metrics.NeedFiles != 0 {
 		return metrics, fmt.Errorf("go status expected needFiles=0, got %d", metrics.NeedFiles)
 	}
+	metrics.StateProjection, err = buildStateProjection(baseURL, apiKey, []string{"default"}, true)
+	if err != nil {
+		return metrics, fmt.Errorf("go state projection: %w", err)
+	}
 
 	if _, _, err := requestJSON(http.MethodPost, baseURL+"/rest/system/shutdown", apiKey); err != nil {
 		return metrics, fmt.Errorf("go shutdown request: %w", err)
@@ -662,6 +698,10 @@ func runRustExternalSoak(seed int64) (soakMetrics, error) {
 	}
 	if metrics.NeedFiles != 0 {
 		return metrics, fmt.Errorf("rust status expected needFiles=0, got %d", metrics.NeedFiles)
+	}
+	metrics.StateProjection, err = buildStateProjection(baseURL, "", []string{"default"}, true)
+	if err != nil {
+		return metrics, fmt.Errorf("rust state projection: %w", err)
 	}
 
 	if _, _, err := requestJSON(http.MethodPost, baseURL+"/rest/system/shutdown", ""); err != nil {
@@ -769,12 +809,28 @@ func runGoExternalMultiFolderSoak(seed int64) (multiFolderMetrics, error) {
 	}
 	metrics.ScanOK = true
 
-	defaultStatus, defaultPolls, err := pollStatusForFolder(baseURL, apiKey, "default", statusTimeout)
+	defaultStatus, defaultPolls, err := pollStatusForFolder(
+		baseURL,
+		apiKey,
+		"default",
+		expectedMultiFolderFiles,
+		expectedMultiFolderFiles,
+		true,
+		statusTimeout,
+	)
 	metrics.StatusPollAttempts += defaultPolls
 	if err != nil {
 		return metrics, fmt.Errorf("go default status poll: %w", err)
 	}
-	mediaStatus, mediaPolls, err := pollStatusForFolder(baseURL, apiKey, "media", statusTimeout)
+	mediaStatus, mediaPolls, err := pollStatusForFolder(
+		baseURL,
+		apiKey,
+		"media",
+		expectedMultiFolderFiles,
+		expectedMultiFolderFiles,
+		true,
+		statusTimeout,
+	)
 	metrics.StatusPollAttempts += mediaPolls
 	if err != nil {
 		return metrics, fmt.Errorf("go media status poll: %w", err)
@@ -834,6 +890,10 @@ func runGoExternalMultiFolderSoak(seed int64) (multiFolderMetrics, error) {
 		return metrics, fmt.Errorf("go media browse order mismatch: got=%v want=%v", mediaPaths, expectedOrderedPaths)
 	}
 	metrics.BrowseOrderOK = true
+	metrics.StateProjection, err = buildStateProjection(baseURL, apiKey, []string{"default", "media"}, true)
+	if err != nil {
+		return metrics, fmt.Errorf("go state projection: %w", err)
+	}
 
 	if _, _, err := requestJSON(http.MethodPost, baseURL+"/rest/system/shutdown", apiKey); err != nil {
 		return metrics, fmt.Errorf("go shutdown request: %w", err)
@@ -913,12 +973,28 @@ func runRustExternalMultiFolderSoak(seed int64) (multiFolderMetrics, error) {
 	}
 	metrics.ScanOK = true
 
-	defaultStatus, defaultPolls, err := pollStatusForFolder(baseURL, "", "default", statusTimeout)
+	defaultStatus, defaultPolls, err := pollStatusForFolder(
+		baseURL,
+		"",
+		"default",
+		expectedMultiFolderFiles,
+		expectedMultiFolderFiles,
+		true,
+		statusTimeout,
+	)
 	metrics.StatusPollAttempts += defaultPolls
 	if err != nil {
 		return metrics, fmt.Errorf("rust default status poll: %w", err)
 	}
-	mediaStatus, mediaPolls, err := pollStatusForFolder(baseURL, "", "media", statusTimeout)
+	mediaStatus, mediaPolls, err := pollStatusForFolder(
+		baseURL,
+		"",
+		"media",
+		expectedMultiFolderFiles,
+		expectedMultiFolderFiles,
+		true,
+		statusTimeout,
+	)
 	metrics.StatusPollAttempts += mediaPolls
 	if err != nil {
 		return metrics, fmt.Errorf("rust media status poll: %w", err)
@@ -978,6 +1054,10 @@ func runRustExternalMultiFolderSoak(seed int64) (multiFolderMetrics, error) {
 		return metrics, fmt.Errorf("rust media browse order mismatch: got=%v want=%v", mediaPaths, expectedOrderedPaths)
 	}
 	metrics.BrowseOrderOK = true
+	metrics.StateProjection, err = buildStateProjection(baseURL, "", []string{"default", "media"}, true)
+	if err != nil {
+		return metrics, fmt.Errorf("rust state projection: %w", err)
+	}
 
 	if _, _, err := requestJSON(http.MethodPost, baseURL+"/rest/system/shutdown", ""); err != nil {
 		return metrics, fmt.Errorf("rust shutdown request: %w", err)
@@ -1080,7 +1160,14 @@ func runGoExternalFolderModes(seed int64) (folderModeMetrics, error) {
 			return metrics, fmt.Errorf("go scan request (%s): %w", spec.id, err)
 		}
 
-		status, polls, err := pollStatusForFolderLocal(baseURL, apiKey, spec.id, statusTimeout)
+		status, polls, err := pollStatusForFolderLocalThreshold(
+			baseURL,
+			apiKey,
+			spec.id,
+			expectedLocalFiles,
+			true,
+			statusTimeout,
+		)
 		metrics.StatusPollAttempts += polls
 		if err != nil {
 			return metrics, fmt.Errorf("go status poll (%s): %w (last=%v)", spec.id, err, status)
@@ -1112,6 +1199,15 @@ func runGoExternalFolderModes(seed int64) (folderModeMetrics, error) {
 	metrics.TypeMapMatches = stringMapEquals(types, expectedFolderModeTypes)
 	if !metrics.TypeMapMatches {
 		return metrics, fmt.Errorf("go folder type map mismatch: got=%v want=%v", types, expectedFolderModeTypes)
+	}
+	metrics.StateProjection, err = buildStateProjection(
+		baseURL,
+		apiKey,
+		[]string{"default", "sendonly", "recvonly", "recvenc"},
+		false,
+	)
+	if err != nil {
+		return metrics, fmt.Errorf("go state projection: %w", err)
 	}
 
 	if _, _, err := requestJSON(http.MethodPost, baseURL+"/rest/system/shutdown", apiKey); err != nil {
@@ -1208,7 +1304,14 @@ func runRustExternalFolderModes(seed int64) (folderModeMetrics, error) {
 			return metrics, fmt.Errorf("rust scan request (%s): %w", spec.id, err)
 		}
 
-		status, polls, err := pollStatusForFolderLocal(baseURL, "", spec.id, statusTimeout)
+		status, polls, err := pollStatusForFolderLocalThreshold(
+			baseURL,
+			"",
+			spec.id,
+			expectedLocalFiles,
+			true,
+			statusTimeout,
+		)
 		metrics.StatusPollAttempts += polls
 		if err != nil {
 			return metrics, fmt.Errorf("rust status poll (%s): %w (last=%v)", spec.id, err, status)
@@ -1240,6 +1343,15 @@ func runRustExternalFolderModes(seed int64) (folderModeMetrics, error) {
 	metrics.TypeMapMatches = stringMapEquals(types, expectedFolderModeTypes)
 	if !metrics.TypeMapMatches {
 		return metrics, fmt.Errorf("rust folder type map mismatch: got=%v want=%v", types, expectedFolderModeTypes)
+	}
+	metrics.StateProjection, err = buildStateProjection(
+		baseURL,
+		"",
+		[]string{"default", "sendonly", "recvonly", "recvenc"},
+		false,
+	)
+	if err != nil {
+		return metrics, fmt.Errorf("rust state projection: %w", err)
 	}
 
 	if _, _, err := requestJSON(http.MethodPost, baseURL+"/rest/system/shutdown", ""); err != nil {
@@ -1337,6 +1449,10 @@ func runGoExternalDurabilityRestart(seed int64) (durabilityMetrics, error) {
 		return metrics, fmt.Errorf("go pre-restart file verification: %w", err)
 	}
 	metrics.PreRestartFilesIndexed = true
+	preProjection, err := buildStateProjection(baseURL, apiKey, []string{"default"}, false)
+	if err != nil {
+		return metrics, fmt.Errorf("go pre-restart state projection: %w", err)
+	}
 
 	if _, _, err := requestJSON(http.MethodPost, baseURL+"/rest/system/shutdown", apiKey); err != nil {
 		return metrics, fmt.Errorf("go first shutdown request: %w", err)
@@ -1389,6 +1505,14 @@ func runGoExternalDurabilityRestart(seed int64) (durabilityMetrics, error) {
 		return metrics, fmt.Errorf("go post-restart file verification: %w", err)
 	}
 	metrics.PostRestartFilesIndexed = true
+	postProjection, err := buildStateProjection(restartURL, apiKey, []string{"default"}, false)
+	if err != nil {
+		return metrics, fmt.Errorf("go post-restart state projection: %w", err)
+	}
+	metrics.StateProjection = mergeProjectionWithPhases(postProjection, map[string]any{
+		"pre_restart":  preProjection,
+		"post_restart": postProjection,
+	})
 
 	if _, _, err := requestJSON(http.MethodPost, restartURL+"/rest/system/shutdown", apiKey); err != nil {
 		return metrics, fmt.Errorf("go restart shutdown request: %w", err)
@@ -1472,6 +1596,10 @@ func runRustExternalDurabilityRestart(seed int64) (durabilityMetrics, error) {
 		return metrics, fmt.Errorf("rust pre-restart file verification: %w", err)
 	}
 	metrics.PreRestartFilesIndexed = true
+	preProjection, err := buildStateProjection(baseURL, "", []string{"default"}, false)
+	if err != nil {
+		return metrics, fmt.Errorf("rust pre-restart state projection: %w", err)
+	}
 
 	if _, _, err := requestJSON(http.MethodPost, baseURL+"/rest/system/shutdown", ""); err != nil {
 		return metrics, fmt.Errorf("rust first shutdown request: %w", err)
@@ -1528,6 +1656,14 @@ func runRustExternalDurabilityRestart(seed int64) (durabilityMetrics, error) {
 		return metrics, fmt.Errorf("rust post-restart file verification: %w", err)
 	}
 	metrics.PostRestartFilesIndexed = true
+	postProjection, err := buildStateProjection(restartURL, "", []string{"default"}, false)
+	if err != nil {
+		return metrics, fmt.Errorf("rust post-restart state projection: %w", err)
+	}
+	metrics.StateProjection = mergeProjectionWithPhases(postProjection, map[string]any{
+		"pre_restart":  preProjection,
+		"post_restart": postProjection,
+	})
 
 	if _, _, err := requestJSON(http.MethodPost, restartURL+"/rest/system/shutdown", ""); err != nil {
 		return metrics, fmt.Errorf("rust restart shutdown request: %w", err)
@@ -1628,6 +1764,10 @@ func runGoExternalCrashRecoveryRestart(seed int64) (crashMetrics, error) {
 		return metrics, fmt.Errorf("go pre-crash file verification: %w", err)
 	}
 	metrics.PreCrashFilesIndexed = true
+	preProjection, err := buildStateProjection(baseURL, apiKey, []string{"default"}, false)
+	if err != nil {
+		return metrics, fmt.Errorf("go pre-crash state projection: %w", err)
+	}
 
 	if err := proc.crashKill(); err != nil {
 		return metrics, fmt.Errorf("go crash kill stop: %w", err)
@@ -1678,6 +1818,14 @@ func runGoExternalCrashRecoveryRestart(seed int64) (crashMetrics, error) {
 		return metrics, fmt.Errorf("go post-restart file verification: %w", err)
 	}
 	metrics.PostRestartFilesIndexed = true
+	postProjection, err := buildStateProjection(restartURL, apiKey, []string{"default"}, false)
+	if err != nil {
+		return metrics, fmt.Errorf("go post-restart state projection: %w", err)
+	}
+	metrics.StateProjection = mergeProjectionWithPhases(postProjection, map[string]any{
+		"pre_crash":    preProjection,
+		"post_restart": postProjection,
+	})
 
 	if _, _, err := requestJSON(http.MethodPost, restartURL+"/rest/system/shutdown", apiKey); err != nil {
 		return metrics, fmt.Errorf("go restart shutdown request: %w", err)
@@ -1761,6 +1909,10 @@ func runRustExternalCrashRecoveryRestart(seed int64) (crashMetrics, error) {
 		return metrics, fmt.Errorf("rust pre-crash file verification: %w", err)
 	}
 	metrics.PreCrashFilesIndexed = true
+	preProjection, err := buildStateProjection(baseURL, "", []string{"default"}, false)
+	if err != nil {
+		return metrics, fmt.Errorf("rust pre-crash state projection: %w", err)
+	}
 
 	if err := proc.crashKill(); err != nil {
 		return metrics, fmt.Errorf("rust crash kill stop: %w", err)
@@ -1814,6 +1966,14 @@ func runRustExternalCrashRecoveryRestart(seed int64) (crashMetrics, error) {
 		return metrics, fmt.Errorf("rust post-restart file verification: %w", err)
 	}
 	metrics.PostRestartFilesIndexed = true
+	postProjection, err := buildStateProjection(restartURL, "", []string{"default"}, false)
+	if err != nil {
+		return metrics, fmt.Errorf("rust post-restart state projection: %w", err)
+	}
+	metrics.StateProjection = mergeProjectionWithPhases(postProjection, map[string]any{
+		"pre_crash":    preProjection,
+		"post_restart": postProjection,
+	})
 
 	if _, _, err := requestJSON(http.MethodPost, restartURL+"/rest/system/shutdown", ""); err != nil {
 		return metrics, fmt.Errorf("rust restart shutdown request: %w", err)
@@ -1983,10 +2143,23 @@ func verifyRuntimeIdentity(baseURL, apiKey, expectedSource string) error {
 }
 
 func pollStatus(baseURL, apiKey string, timeout time.Duration) (map[string]any, int, error) {
-	return pollStatusForFolder(baseURL, apiKey, "default", timeout)
+	return pollStatusForFolder(
+		baseURL,
+		apiKey,
+		"default",
+		expectedLocalFiles,
+		expectedLocalFiles,
+		true,
+		timeout,
+	)
 }
 
-func pollStatusForFolder(baseURL, apiKey, folder string, timeout time.Duration) (map[string]any, int, error) {
+func pollStatusForFolder(
+	baseURL, apiKey, folder string,
+	minLocalFiles, minGlobalFiles int,
+	requireRunnableState bool,
+	timeout time.Duration,
+) (map[string]any, int, error) {
 	deadline := time.Now().Add(timeout)
 	polls := 0
 	var last map[string]any
@@ -1996,7 +2169,13 @@ func pollStatusForFolder(baseURL, apiKey, folder string, timeout time.Duration) 
 		payload, status, err := requestJSON(http.MethodGet, target, apiKey)
 		if err == nil && status == http.StatusOK {
 			last = payload
-			if intField(payload, "localFiles") >= expectedLocalFiles && intField(payload, "globalFiles") >= expectedLocalFiles {
+			localOK := intField(payload, "localFiles") >= minLocalFiles
+			globalOK := intField(payload, "globalFiles") >= minGlobalFiles
+			stateOK := true
+			if requireRunnableState {
+				stateOK = stateIsRunnable(stringField(payload, "state"))
+			}
+			if localOK && globalOK && stateOK {
 				return payload, polls, nil
 			}
 		}
@@ -2008,7 +2187,12 @@ func pollStatusForFolder(baseURL, apiKey, folder string, timeout time.Duration) 
 	return last, polls, fmt.Errorf("timed out waiting for status convergence for folder %q", folder)
 }
 
-func pollStatusForFolderLocal(baseURL, apiKey, folder string, timeout time.Duration) (map[string]any, int, error) {
+func pollStatusForFolderLocalThreshold(
+	baseURL, apiKey, folder string,
+	minLocalFiles int,
+	requireRunnableState bool,
+	timeout time.Duration,
+) (map[string]any, int, error) {
 	deadline := time.Now().Add(timeout)
 	polls := 0
 	var last map[string]any
@@ -2018,7 +2202,12 @@ func pollStatusForFolderLocal(baseURL, apiKey, folder string, timeout time.Durat
 		payload, status, err := requestJSON(http.MethodGet, target, apiKey)
 		if err == nil && status == http.StatusOK {
 			last = payload
-			if intField(payload, "localFiles") >= expectedLocalFiles {
+			localOK := intField(payload, "localFiles") >= minLocalFiles
+			stateOK := true
+			if requireRunnableState {
+				stateOK = stateIsRunnable(stringField(payload, "state"))
+			}
+			if localOK && stateOK {
 				return payload, polls, nil
 			}
 		}
@@ -2242,6 +2431,286 @@ func appendBrowsePaths(out *[]string, parent string, payload any) error {
 	}
 }
 
+func buildStateProjection(baseURL, apiKey string, folders []string, includeBrowse bool) (map[string]any, error) {
+	systemStatus, statusCode, err := requestJSON(http.MethodGet, baseURL+"/rest/system/status", apiKey)
+	if err != nil {
+		return nil, fmt.Errorf("request /rest/system/status: %w", err)
+	}
+	if statusCode != http.StatusOK {
+		return nil, fmt.Errorf("/rest/system/status returned status %d", statusCode)
+	}
+	configPayload, statusCode, err := requestJSON(http.MethodGet, baseURL+"/rest/config", apiKey)
+	if err != nil {
+		return nil, fmt.Errorf("request /rest/config: %w", err)
+	}
+	if statusCode != http.StatusOK {
+		return nil, fmt.Errorf("/rest/config returned status %d", statusCode)
+	}
+
+	pendingDevicesPayload, statusCode, err := requestJSONAny(http.MethodGet, baseURL+"/rest/cluster/pending/devices", apiKey)
+	if err != nil {
+		return nil, fmt.Errorf("request /rest/cluster/pending/devices: %w", err)
+	}
+	if statusCode != http.StatusOK {
+		return nil, fmt.Errorf("/rest/cluster/pending/devices returned status %d", statusCode)
+	}
+	pendingFoldersPayload, statusCode, err := requestJSONAny(http.MethodGet, baseURL+"/rest/cluster/pending/folders", apiKey)
+	if err != nil {
+		return nil, fmt.Errorf("request /rest/cluster/pending/folders: %w", err)
+	}
+	if statusCode != http.StatusOK {
+		return nil, fmt.Errorf("/rest/cluster/pending/folders returned status %d", statusCode)
+	}
+
+	myID := strings.TrimSpace(stringField(systemStatus, "myID"))
+	configuredDeviceIDs := dedupeSortedNonEmpty(extractConfigDeviceIDs(configPayload))
+	if myID == "" && len(configuredDeviceIDs) > 0 {
+		myID = configuredDeviceIDs[0]
+	}
+	deviceIDs := []string{}
+	if myID != "" {
+		deviceIDs = []string{myID}
+	}
+
+	folderTypeMap := extractConfigFolderTypeMap(configPayload)
+	folderIDs := dedupeSortedNonEmpty(folders)
+	if len(folderIDs) == 0 {
+		for folderID := range folderTypeMap {
+			folderIDs = append(folderIDs, folderID)
+		}
+		folderIDs = dedupeSortedNonEmpty(folderIDs)
+	}
+
+	folderSummaries := make([]map[string]any, 0, len(folderIDs))
+	for _, folderID := range folderIDs {
+		target := encodeURLQuery(baseURL+"/rest/db/status", url.Values{"folder": []string{folderID}})
+		payload, statusCode, err := requestJSON(http.MethodGet, target, apiKey)
+		if err != nil {
+			return nil, fmt.Errorf("request folder status %q: %w", folderID, err)
+		}
+		if statusCode != http.StatusOK {
+			return nil, fmt.Errorf("folder status %q returned status %d", folderID, statusCode)
+		}
+
+		summary := map[string]any{
+			"id":           folderID,
+			"type":         folderTypeMap[folderID],
+			"state":        classifyRunnableState(stringField(payload, "state")),
+			"local_files":  intField(payload, "localFiles"),
+			"global_files": intField(payload, "globalFiles"),
+			"need_files":   intField(payload, "needFiles"),
+		}
+		if includeBrowse {
+			paths, err := browseOrderedPaths(baseURL, apiKey, folderID, 1024)
+			if err != nil {
+				return nil, fmt.Errorf("browse ordered paths for %q: %w", folderID, err)
+			}
+			summary["browse_paths"] = paths
+			summary["browse_path_count"] = len(paths)
+		}
+		folderSummaries = append(folderSummaries, summary)
+	}
+	sort.Slice(folderSummaries, func(i, j int) bool {
+		return stringField(folderSummaries[i], "id") < stringField(folderSummaries[j], "id")
+	})
+
+	pendingDeviceIDs, invalidPendingDeviceIDs := extractPendingIDs(pendingDevicesPayload, []string{"deviceID", "id", "name"})
+	pendingFolderIDs, invalidPendingFolderIDs := extractPendingIDs(pendingFoldersPayload, []string{"folder", "id", "label", "name"})
+
+	return map[string]any{
+		"my_id":                      myID,
+		"device_ids":                 deviceIDs,
+		"folder_summaries":           folderSummaries,
+		"pending_device_ids":         pendingDeviceIDs,
+		"pending_folder_ids":         pendingFolderIDs,
+		"invalid_pending_device_ids": invalidPendingDeviceIDs,
+		"invalid_pending_folder_ids": invalidPendingFolderIDs,
+	}, nil
+}
+
+func classifyRunnableState(state string) string {
+	if stateIsRunnable(state) {
+		return "runnable"
+	}
+	return "not-runnable"
+}
+
+func extractConfigDeviceIDs(config map[string]any) []string {
+	raw, ok := config["devices"]
+	if !ok {
+		return nil
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		id := strings.TrimSpace(stringField(entry, "deviceID"))
+		if id == "" {
+			id = strings.TrimSpace(stringField(entry, "id"))
+		}
+		if id == "" {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
+func extractConfigFolderTypeMap(config map[string]any) map[string]string {
+	out := make(map[string]string)
+	raw, ok := config["folders"]
+	if !ok {
+		return out
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		return out
+	}
+	for _, item := range items {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		id := strings.TrimSpace(stringField(entry, "id"))
+		if id == "" {
+			continue
+		}
+		folderType := canonicalFolderType(stringField(entry, "type"))
+		if folderType == "" {
+			folderType = canonicalFolderType(stringField(entry, "folderType"))
+		}
+		out[id] = folderType
+	}
+	return out
+}
+
+func extractPendingIDs(payload any, fieldCandidates []string) ([]string, []string) {
+	ids := make([]string, 0, 8)
+	invalid := make([]string, 0, 4)
+
+	extractEntryID := func(entry map[string]any) string {
+		for _, candidate := range fieldCandidates {
+			candidate = strings.TrimSpace(candidate)
+			if candidate == "" {
+				continue
+			}
+			id := strings.TrimSpace(stringField(entry, candidate))
+			if id != "" {
+				return id
+			}
+		}
+		return ""
+	}
+	isEntryMap := func(entry map[string]any) bool {
+		if len(entry) == 0 {
+			return false
+		}
+		for _, candidate := range fieldCandidates {
+			candidate = strings.TrimSpace(candidate)
+			if candidate == "" {
+				continue
+			}
+			if _, ok := entry[candidate]; ok {
+				return true
+			}
+		}
+		// Common pending entry fields from /rest/cluster/pending/* endpoints.
+		for _, field := range []string{"name", "address", "time", "offeredBy"} {
+			if _, ok := entry[field]; ok {
+				return true
+			}
+		}
+		return false
+	}
+
+	var walk func(any)
+	walk = func(node any) {
+		switch typed := node.(type) {
+		case map[string]any:
+			if value, ok := typed["devices"]; ok {
+				walk(value)
+			}
+			if value, ok := typed["folders"]; ok {
+				walk(value)
+			}
+			if isEntryMap(typed) {
+				if id := extractEntryID(typed); id != "" {
+					ids = append(ids, id)
+				} else {
+					invalid = append(invalid, "<empty>")
+				}
+				return
+			}
+			for key, value := range typed {
+				key = strings.TrimSpace(key)
+				switch key {
+				case "count", "devices", "folders":
+					continue
+				}
+				if key != "" {
+					ids = append(ids, key)
+					continue
+				}
+				if entry, ok := value.(map[string]any); ok {
+					if id := extractEntryID(entry); id != "" {
+						ids = append(ids, id)
+					} else {
+						invalid = append(invalid, "<empty>")
+					}
+					continue
+				}
+				walk(value)
+			}
+		case []any:
+			for _, item := range typed {
+				walk(item)
+			}
+		}
+	}
+
+	walk(payload)
+	return dedupeSortedNonEmpty(ids), dedupeSortedNonEmpty(invalid)
+}
+
+func dedupeSortedNonEmpty(values []string) []string {
+	if len(values) == 0 {
+		return []string{}
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	if len(out) == 0 {
+		return []string{}
+	}
+	return out
+}
+
+func mergeProjectionWithPhases(base map[string]any, phases map[string]any) map[string]any {
+	out := make(map[string]any, len(base)+1)
+	for key, value := range base {
+		out[key] = value
+	}
+	out["phase_projection"] = phases
+	return out
+}
+
 func equalStringSlices(left, right []string) bool {
 	if len(left) != len(right) {
 		return false
@@ -2336,7 +2805,7 @@ func stringField(payload map[string]any, key string) string {
 
 func stateIsRunnable(state string) bool {
 	switch strings.ToLower(strings.TrimSpace(state)) {
-	case "running", "idle":
+	case "running", "idle", "runnable":
 		return true
 	default:
 		return false

@@ -23,5 +23,67 @@
   },
   "scenario": "external-crash-recovery-restart",
   "source": "rust",
+  "state_projection": {
+    "device_ids": [
+      "EQK7H4K-CUP5I6H-ENNSGM7-NYENOBP-QTZSGTI-G6I53TV-VQA2B6D-QE7ZBAV"
+    ],
+    "folder_summaries": [
+      {
+        "global_files": 2,
+        "id": "default",
+        "local_files": 2,
+        "need_files": 0,
+        "state": "runnable",
+        "type": "sendrecv"
+      }
+    ],
+    "invalid_pending_device_ids": [],
+    "invalid_pending_folder_ids": [],
+    "my_id": "EQK7H4K-CUP5I6H-ENNSGM7-NYENOBP-QTZSGTI-G6I53TV-VQA2B6D-QE7ZBAV",
+    "pending_device_ids": [],
+    "pending_folder_ids": [],
+    "phase_projection": {
+      "post_restart": {
+        "device_ids": [
+          "EQK7H4K-CUP5I6H-ENNSGM7-NYENOBP-QTZSGTI-G6I53TV-VQA2B6D-QE7ZBAV"
+        ],
+        "folder_summaries": [
+          {
+            "global_files": 2,
+            "id": "default",
+            "local_files": 2,
+            "need_files": 0,
+            "state": "runnable",
+            "type": "sendrecv"
+          }
+        ],
+        "invalid_pending_device_ids": [],
+        "invalid_pending_folder_ids": [],
+        "my_id": "EQK7H4K-CUP5I6H-ENNSGM7-NYENOBP-QTZSGTI-G6I53TV-VQA2B6D-QE7ZBAV",
+        "pending_device_ids": [],
+        "pending_folder_ids": []
+      },
+      "pre_crash": {
+        "device_ids": [
+          "EQK7H4K-CUP5I6H-ENNSGM7-NYENOBP-QTZSGTI-G6I53TV-VQA2B6D-QE7ZBAV"
+        ],
+        "folder_summaries": [
+          {
+            "global_files": 2,
+            "id": "default",
+            "local_files": 2,
+            "need_files": 0,
+            "state": "runnable",
+            "type": "sendrecv"
+          }
+        ],
+        "invalid_pending_device_ids": [],
+        "invalid_pending_folder_ids": [],
+        "my_id": "EQK7H4K-CUP5I6H-ENNSGM7-NYENOBP-QTZSGTI-G6I53TV-VQA2B6D-QE7ZBAV",
+        "pending_device_ids": [],
+        "pending_folder_ids": []
+      }
+    }
+  },
   "status": "validated"
 }

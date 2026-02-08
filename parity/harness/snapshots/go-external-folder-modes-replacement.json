@@ -44,5 +44,49 @@
   },
   "scenario": "external-folder-modes-replacement",
   "source": "go",
+  "state_projection": {
+    "device_ids": [
+      "ZV3MTTK-GIXMLOS-R4KLJAI-QHV476Z-VGJYEJN-AG2NCX7-BJCM5ID-FOOC3QG"
+    ],
+    "folder_summaries": [
+      {
+        "global_files": 2,
+        "id": "default",
+        "local_files": 2,
+        "need_files": 0,
+        "state": "runnable",
+        "type": "sendrecv"
+      },
+      {
+        "global_files": 0,
+        "id": "recvenc",
+        "local_files": 2,
+        "need_files": 0,
+        "state": "runnable",
+        "type": "recvenc"
+      },
+      {
+        "global_files": 0,
+        "id": "recvonly",
+        "local_files": 2,
+        "need_files": 0,
+        "state": "runnable",
+        "type": "recvonly"
+      },
+      {
+        "global_files": 2,
+        "id": "sendonly",
+        "local_files": 2,
+        "need_files": 0,
+        "state": "runnable",
+        "type": "sendonly"
+      }
+    ],
+    "invalid_pending_device_ids": [],
+    "invalid_pending_folder_ids": [],
+    "my_id": "ZV3MTTK-GIXMLOS-R4KLJAI-QHV476Z-VGJYEJN-AG2NCX7-BJCM5ID-FOOC3QG",
+    "pending_device_ids": [],
+    "pending_folder_ids": []
+  },
   "status": "validated"
 }

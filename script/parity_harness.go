@@ -124,8 +124,16 @@ type durabilityReport struct {
 	CrashRecovery string `json:"crash_recovery"`
 }
 
+type replacementScenarioRequirement struct {
+	ID              string `json:"id"`
+	GoMinEvidence   string `json:"go_min_evidence"`
+	RustMinEvidence string `json:"rust_min_evidence"`
+}
+
 type replacementGatesConfig struct {
-	RequiredAPIEndpoints []string `json:"required_api_endpoints"`
+	RequiredAPIEndpoints          []string                         `json:"required_api_endpoints"`
+	RequiredStateProjectionFields []string                         `json:"required_state_projection_fields"`
+	RequiredScenarios             []replacementScenarioRequirement `json:"required_scenarios"`
 }
 
 func main() {
@@ -155,6 +163,12 @@ func run(args []string) {
 		"repeat each external-soak scenario this many times (seeded by --seed-base)",
 	)
 	seedBase := fs.Int64("seed-base", 1, "base seed for repeated external-soak runs")
+	onlyTag := fs.String("only-tag", "", "when set, run only scenarios containing this tag")
+	onlyScenarios := fs.String(
+		"only-scenarios",
+		"",
+		"comma-separated scenario IDs to run (empty means run all)",
+	)
 	requiredEvidenceMin := fs.String(
 		"required-evidence-min",
 		"daemon",
@@ -169,6 +183,12 @@ func run(args []string) {
 	requiredEvidence := normalizeScenarioEvidence(*requiredEvidenceMin)
 	if strings.TrimSpace(*requiredEvidenceMin) != "" && requiredEvidence == "" {
 		fatalf("--required-evidence-min must be one of: synthetic, component, daemon, peer-interop, external-soak")
+	}
+	selectedIDs := parseScenarioIDSet(*onlyScenarios)
+	onlyTagNormalized := strings.ToLower(strings.TrimSpace(*onlyTag))
+	requiredScenarioEvidence, err := loadRequiredScenarioEvidence(replacementGatesPath())
+	if err != nil {
+		fatalf("load required scenario evidence from replacement gates: %v", err)
 	}
 
 	cfg, err := readConfig(*configPath)
@@ -199,6 +219,14 @@ func run(args []string) {
 	for _, sc := range cfg.Scenarios {
 		if strings.TrimSpace(sc.ID) == "" {
 			continue
+		}
+		if onlyTagNormalized != "" && !hasTag(sc.Tags, onlyTagNormalized) {
+			continue
+		}
+		if len(selectedIDs) > 0 {
+			if _, ok := selectedIDs[sc.ID]; !ok {
+				continue
+			}
 		}
 		severity := normalizeSeverity(sc.Severity)
 		if severity == "" {
@@ -308,6 +336,45 @@ func run(args []string) {
 					Open:     true,
 					Message:  outcome.Message,
 				})
+			}
+		}
+		if outcome.Status == "pass" {
+			if req, ok := requiredScenarioEvidence[sc.ID]; ok {
+				if req.GoMinEvidence != "" &&
+					scenarioEvidenceRank(outcome.GoEvidence) < scenarioEvidenceRank(req.GoMinEvidence) {
+					outcome.Status = "mismatch"
+					outcome.Message = fmt.Sprintf(
+						"go side evidence too weak for required scenario %q: have=%s need>=%s",
+						sc.ID,
+						outcome.GoEvidence,
+						req.GoMinEvidence,
+					)
+					report.Match = false
+					report.Mismatches = append(report.Mismatches, latestMismatch{
+						ID:       sc.ID,
+						Severity: severity,
+						Open:     true,
+						Message:  outcome.Message,
+					})
+				}
+				if outcome.Status == "pass" &&
+					req.RustMinEvidence != "" &&
+					scenarioEvidenceRank(outcome.RustEvidence) < scenarioEvidenceRank(req.RustMinEvidence) {
+					outcome.Status = "mismatch"
+					outcome.Message = fmt.Sprintf(
+						"rust side evidence too weak for required scenario %q: have=%s need>=%s",
+						sc.ID,
+						outcome.RustEvidence,
+						req.RustMinEvidence,
+					)
+					report.Match = false
+					report.Mismatches = append(report.Mismatches, latestMismatch{
+						ID:       sc.ID,
+						Severity: severity,
+						Open:     true,
+						Message:  outcome.Message,
+					})
+				}
 			}
 		}
 		if outcome.Status == "pass" && declaredEvidenceOverclaim {
@@ -765,6 +832,54 @@ func compareSnapshots(scenarioID, mode string, goSnap, rustSnap map[string]any) 
 			strings.Join(previewRust, ", "),
 			strings.Join(previewGo, ", "),
 		)
+	case "normalized-state-projection":
+		goProjection, err := extractStateProjectionSnapshot(goSnap)
+		if err != nil {
+			return false, fmt.Sprintf("go state projection invalid: %v", err)
+		}
+		rustProjection, err := extractStateProjectionSnapshot(rustSnap)
+		if err != nil {
+			return false, fmt.Sprintf("rust state projection invalid: %v", err)
+		}
+		requiredProjectionFields, err := loadRequiredStateProjectionFields(replacementGatesPath())
+		if err != nil {
+			return false, fmt.Sprintf("load required state projection fields: %v", err)
+		}
+		if len(requiredProjectionFields) == 0 {
+			return false, "required state projection fields list is empty"
+		}
+		if missing := missingMapFields(goProjection, requiredProjectionFields); len(missing) > 0 {
+			return false, fmt.Sprintf("go projection missing required fields: %s", strings.Join(missing, ", "))
+		}
+		if missing := missingMapFields(rustProjection, requiredProjectionFields); len(missing) > 0 {
+			return false, fmt.Sprintf("rust projection missing required fields: %s", strings.Join(missing, ", "))
+		}
+		if err := validateStateProjection(goProjection); err != nil {
+			return false, fmt.Sprintf("go projection integrity failed: %v", err)
+		}
+		if err := validateStateProjection(rustProjection); err != nil {
+			return false, fmt.Sprintf("rust projection integrity failed: %v", err)
+		}
+		if failedChecks := failedCheckKeys(goSnap["checks"]); len(failedChecks) > 0 {
+			return false, fmt.Sprintf("go checks failed: %s", strings.Join(failedChecks, ", "))
+		}
+		if failedChecks := failedCheckKeys(rustSnap["checks"]); len(failedChecks) > 0 {
+			return false, fmt.Sprintf("rust checks failed: %s", strings.Join(failedChecks, ", "))
+		}
+		goComparable := canonicalizeStateProjectionForCompare(goProjection)
+		rustComparable := canonicalizeStateProjectionForCompare(rustProjection)
+		goJSON, err := canonicalJSON(goComparable)
+		if err != nil {
+			return false, fmt.Sprintf("go projection canonicalization failed: %v", err)
+		}
+		rustJSON, err := canonicalJSON(rustComparable)
+		if err != nil {
+			return false, fmt.Sprintf("rust projection canonicalization failed: %v", err)
+		}
+		if bytes.Equal(goJSON, rustJSON) {
+			return true, ""
+		}
+		return false, "normalized state projection differs"
 	default:
 		return false, fmt.Sprintf("unsupported comparator %q", mode)
 	}
@@ -801,6 +916,311 @@ func loadRequiredAPIEndpoints(path string) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+func loadRequiredStateProjectionFields(path string) ([]string, error) {
+	bs, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var gates replacementGatesConfig
+	if err := json.Unmarshal(bs, &gates); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(gates.RequiredStateProjectionFields))
+	seen := make(map[string]struct{}, len(gates.RequiredStateProjectionFields))
+	for _, field := range gates.RequiredStateProjectionFields {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		if _, ok := seen[field]; ok {
+			continue
+		}
+		seen[field] = struct{}{}
+		out = append(out, field)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func loadRequiredScenarioEvidence(path string) (map[string]replacementScenarioRequirement, error) {
+	bs, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var gates replacementGatesConfig
+	if err := json.Unmarshal(bs, &gates); err != nil {
+		return nil, err
+	}
+	out := make(map[string]replacementScenarioRequirement, len(gates.RequiredScenarios))
+	for _, req := range gates.RequiredScenarios {
+		id := strings.TrimSpace(req.ID)
+		if id == "" {
+			return nil, errors.New("required_scenarios entry has empty id")
+		}
+		goMin := normalizeScenarioEvidence(req.GoMinEvidence)
+		if req.GoMinEvidence != "" && goMin == "" {
+			return nil, fmt.Errorf("required_scenarios %q has invalid go_min_evidence %q", id, req.GoMinEvidence)
+		}
+		rustMin := normalizeScenarioEvidence(req.RustMinEvidence)
+		if req.RustMinEvidence != "" && rustMin == "" {
+			return nil, fmt.Errorf("required_scenarios %q has invalid rust_min_evidence %q", id, req.RustMinEvidence)
+		}
+		req.ID = id
+		req.GoMinEvidence = goMin
+		req.RustMinEvidence = rustMin
+		out[id] = req
+	}
+	return out, nil
+}
+
+func extractStateProjectionSnapshot(snapshot map[string]any) (map[string]any, error) {
+	if projection, ok := snapshot["state_projection"]; ok {
+		if typed, ok := projection.(map[string]any); ok {
+			return typed, nil
+		}
+		return nil, errors.New("state_projection must be a JSON object")
+	}
+	if metrics, ok := snapshot["metrics"].(map[string]any); ok {
+		if projection, ok := metrics["state_projection"]; ok {
+			if typed, ok := projection.(map[string]any); ok {
+				return typed, nil
+			}
+			return nil, errors.New("metrics.state_projection must be a JSON object")
+		}
+	}
+	return nil, errors.New("missing state_projection payload")
+}
+
+func missingMapFields(payload map[string]any, required []string) []string {
+	missing := make([]string, 0)
+	for _, key := range required {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if _, ok := payload[key]; ok {
+			continue
+		}
+		missing = append(missing, key)
+	}
+	sort.Strings(missing)
+	return missing
+}
+
+func failedCheckKeys(raw any) []string {
+	checks, ok := raw.(map[string]any)
+	if !ok {
+		return []string{"<missing-checks-map>"}
+	}
+	failed := make([]string, 0)
+	for key, value := range checks {
+		okValue, isBool := value.(bool)
+		if isBool {
+			if okValue {
+				continue
+			}
+			failed = append(failed, key)
+			continue
+		}
+		failed = append(failed, key+"=<non-bool>")
+	}
+	sort.Strings(failed)
+	return failed
+}
+
+func validateStateProjection(projection map[string]any) error {
+	myID := strings.TrimSpace(asString(projection["my_id"]))
+	if myID == "" {
+		return errors.New("my_id is empty")
+	}
+
+	deviceIDs := toStringList(projection["device_ids"])
+	if len(deviceIDs) == 0 {
+		return errors.New("device_ids is empty")
+	}
+	for _, id := range deviceIDs {
+		if strings.TrimSpace(id) == "" {
+			return errors.New("device_ids contains an empty id")
+		}
+	}
+
+	if !isStringArrayLike(projection["pending_device_ids"]) {
+		return errors.New("pending_device_ids must be an array")
+	}
+	if !isStringArrayLike(projection["pending_folder_ids"]) {
+		return errors.New("pending_folder_ids must be an array")
+	}
+	if !isStringArrayLike(projection["invalid_pending_device_ids"]) {
+		return errors.New("invalid_pending_device_ids must be an array")
+	}
+	if !isStringArrayLike(projection["invalid_pending_folder_ids"]) {
+		return errors.New("invalid_pending_folder_ids must be an array")
+	}
+
+	invalidPendingDevices := toStringList(projection["invalid_pending_device_ids"])
+	if len(invalidPendingDevices) > 0 {
+		return fmt.Errorf("invalid_pending_device_ids not empty: %v", invalidPendingDevices)
+	}
+	invalidPendingFolders := toStringList(projection["invalid_pending_folder_ids"])
+	if len(invalidPendingFolders) > 0 {
+		return fmt.Errorf("invalid_pending_folder_ids not empty: %v", invalidPendingFolders)
+	}
+
+	folderSummariesRaw, ok := projection["folder_summaries"].([]any)
+	if !ok {
+		return errors.New("folder_summaries must be an array")
+	}
+	if len(folderSummariesRaw) == 0 {
+		return errors.New("folder_summaries is empty")
+	}
+	for _, raw := range folderSummariesRaw {
+		summary, ok := raw.(map[string]any)
+		if !ok {
+			return errors.New("folder_summaries contains non-object entries")
+		}
+		id := strings.TrimSpace(asString(summary["id"]))
+		if id == "" {
+			return errors.New("folder_summaries contains empty id")
+		}
+		if _, ok := numberAsInt64(summary["local_files"]); !ok {
+			return fmt.Errorf("folder %q missing local_files numeric field", id)
+		}
+		if _, ok := numberAsInt64(summary["global_files"]); !ok {
+			return fmt.Errorf("folder %q missing global_files numeric field", id)
+		}
+		if _, ok := numberAsInt64(summary["need_files"]); !ok {
+			return fmt.Errorf("folder %q missing need_files numeric field", id)
+		}
+	}
+	return nil
+}
+
+func isStringArrayLike(value any) bool {
+	switch value.(type) {
+	case []string, []any:
+		return true
+	default:
+		return false
+	}
+}
+
+func canonicalizeStateProjectionForCompare(projection map[string]any) map[string]any {
+	comparable := deepCloneMap(projection)
+	delete(comparable, "active_peers")
+	delete(comparable, "folder_count")
+	delete(comparable, "phase_projection")
+
+	localID := strings.TrimSpace(asString(comparable["my_id"]))
+	if localID != "" {
+		comparable["my_id"] = "local"
+	}
+	mapIDs := func(key string) {
+		ids := toStringList(comparable[key])
+		if len(ids) == 0 {
+			comparable[key] = []string{}
+			return
+		}
+		mapped := make([]string, 0, len(ids))
+		for _, id := range ids {
+			if strings.TrimSpace(id) == "" {
+				continue
+			}
+			if localID != "" && id == localID {
+				mapped = append(mapped, "local")
+				continue
+			}
+			mapped = append(mapped, "peer")
+		}
+		sort.Strings(mapped)
+		comparable[key] = mapped
+	}
+	mapIDs("device_ids")
+	mapIDs("pending_device_ids")
+
+	if summariesRaw, ok := comparable["folder_summaries"].([]any); ok {
+		for _, raw := range summariesRaw {
+			summary, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			folderType := strings.ToLower(strings.TrimSpace(asString(summary["type"])))
+			if folderType == "recvonly" || folderType == "recvenc" {
+				// Global/need counters are implementation-specific for passive folder modes.
+				delete(summary, "global_files")
+				delete(summary, "need_files")
+			}
+			state := strings.ToLower(strings.TrimSpace(asString(summary["state"])))
+			switch state {
+			case "running", "idle", "runnable":
+				summary["state"] = "runnable"
+			default:
+				summary["state"] = state
+			}
+		}
+	}
+
+	return comparable
+}
+
+func deepCloneMap(in map[string]any) map[string]any {
+	bs, err := canonicalJSON(in)
+	if err != nil {
+		out := make(map[string]any, len(in))
+		for key, value := range in {
+			out[key] = value
+		}
+		return out
+	}
+	var out map[string]any
+	if err := json.Unmarshal(bs, &out); err != nil {
+		return map[string]any{}
+	}
+	return out
+}
+
+func toStringList(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		out := make([]string, 0, len(typed))
+		for _, entry := range typed {
+			entry = strings.TrimSpace(entry)
+			if entry == "" {
+				continue
+			}
+			out = append(out, entry)
+		}
+		return out
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, raw := range typed {
+			entry, ok := raw.(string)
+			if !ok {
+				continue
+			}
+			entry = strings.TrimSpace(entry)
+			if entry == "" {
+				continue
+			}
+			out = append(out, entry)
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func asString(value any) string {
+	if value == nil {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return typed
+	default:
+		return fmt.Sprintf("%v", value)
+	}
 }
 
 func countJSONArray(value any) int {
@@ -942,7 +1362,9 @@ func canonicalJSON(v any) ([]byte, error) {
 		return nil, err
 	}
 	var out any
-	if err := json.Unmarshal(bs, &out); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(bs))
+	dec.UseNumber()
+	if err := dec.Decode(&out); err != nil {
 		return nil, err
 	}
 	return json.Marshal(out)
@@ -966,6 +1388,19 @@ func hasTag(tags []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func parseScenarioIDSet(raw string) map[string]struct{} {
+	parts := strings.Split(raw, ",")
+	out := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		id := strings.TrimSpace(part)
+		if id == "" {
+			continue
+		}
+		out[id] = struct{}{}
+	}
+	return out
 }
 
 func evaluateStatus(total, passed int) string {

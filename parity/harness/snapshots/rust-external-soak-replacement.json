@@ -22,5 +22,30 @@
   },
   "scenario": "external-soak-replacement",
   "source": "rust",
+  "state_projection": {
+    "device_ids": [
+      "EQK7H4K-CUP5I6H-ENNSGM7-NYENOBP-QTZSGTI-G6I53TV-VQA2B6D-QE7ZBAV"
+    ],
+    "folder_summaries": [
+      {
+        "browse_path_count": 2,
+        "browse_paths": [
+          "a.txt",
+          "nested/b.txt"
+        ],
+        "global_files": 2,
+        "id": "default",
+        "local_files": 2,
+        "need_files": 0,
+        "state": "runnable",
+        "type": "sendrecv"
+      }
+    ],
+    "invalid_pending_device_ids": [],
+    "invalid_pending_folder_ids": [],
+    "my_id": "EQK7H4K-CUP5I6H-ENNSGM7-NYENOBP-QTZSGTI-G6I53TV-VQA2B6D-QE7ZBAV",
+    "pending_device_ids": [],
+    "pending_folder_ids": []
+  },
   "status": "validated"
 }

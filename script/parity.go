@@ -229,6 +229,7 @@ type requiredTestEvidence struct {
 	RequiredScenarioIDs  map[string]struct{}
 	ScenarioOutcome      map[string]string
 	ScenarioEvidence     map[string]string
+	ScenarioGoEvidence   map[string]string
 	ScenarioRustEvidence map[string]string
 	ScenarioTags         map[string]map[string]struct{}
 	ScenarioRefs         map[string]int
@@ -916,6 +917,7 @@ func loadRequiredTestEvidence(report *guardrailReport) requiredTestEvidence {
 		RequiredScenarioIDs:  make(map[string]struct{}),
 		ScenarioOutcome:      make(map[string]string),
 		ScenarioEvidence:     make(map[string]string),
+		ScenarioGoEvidence:   make(map[string]string),
 		ScenarioRustEvidence: make(map[string]string),
 		ScenarioTags:         make(map[string]map[string]struct{}),
 		ScenarioRefs:         make(map[string]int),
@@ -980,6 +982,7 @@ func loadRequiredTestEvidence(report *guardrailReport) requiredTestEvidence {
 		}
 		ev.ScenarioOutcome[id] = strings.TrimSpace(sc.Status)
 		ev.ScenarioEvidence[id] = normalizeScenarioEvidence(sc.Evidence)
+		ev.ScenarioGoEvidence[id] = normalizeScenarioEvidence(sc.GoEvidence)
 		ev.ScenarioRustEvidence[id] = normalizeScenarioEvidence(sc.RustEvidence)
 	}
 	return ev
@@ -1167,12 +1170,19 @@ func validateReplacementScenarioEvidence(report *guardrailReport, ev requiredTes
 			})
 		}
 
-		observed := normalizeScenarioEvidence(ev.ScenarioRustEvidence[id])
-		if observed == "" {
-			observed = normalizeScenarioEvidence(ev.ScenarioEvidence[id])
+		goObserved := normalizeScenarioEvidence(ev.ScenarioGoEvidence[id])
+		if goObserved == "" {
+			goObserved = normalizeScenarioEvidence(ev.ScenarioEvidence[id])
 		}
-		if observed == "" {
-			observed = "synthetic"
+		if goObserved == "" {
+			goObserved = "synthetic"
+		}
+		rustObserved := normalizeScenarioEvidence(ev.ScenarioRustEvidence[id])
+		if rustObserved == "" {
+			rustObserved = normalizeScenarioEvidence(ev.ScenarioEvidence[id])
+		}
+		if rustObserved == "" {
+			rustObserved = "synthetic"
 		}
 		required := "daemon"
 		if scenarioHasTag(ev, id, "external-soak") {
@@ -1181,11 +1191,19 @@ func validateReplacementScenarioEvidence(report *guardrailReport, ev requiredTes
 			required = "peer-interop"
 		}
 
-		if scenarioEvidenceRank(observed) < scenarioEvidenceRank(required) {
+		requiredRank := scenarioEvidenceRank(required)
+		if scenarioEvidenceRank(goObserved) < requiredRank {
 			report.Failures = append(report.Failures, reportFailure{
 				Rule:    "replacement-scenario-evidence",
 				Path:    "parity/diff-reports/latest.json",
-				Message: fmt.Sprintf("required scenario %q has insufficient evidence level %q (need >= %q)", id, observed, required),
+				Message: fmt.Sprintf("required scenario %q has insufficient go evidence level %q (need >= %q)", id, goObserved, required),
+			})
+		}
+		if scenarioEvidenceRank(rustObserved) < requiredRank {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "replacement-scenario-evidence",
+				Path:    "parity/diff-reports/latest.json",
+				Message: fmt.Sprintf("required scenario %q has insufficient rust evidence level %q (need >= %q)", id, rustObserved, required),
 			})
 		}
 	}

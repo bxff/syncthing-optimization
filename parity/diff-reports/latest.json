@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-02-08T01:46:30Z",
+  "generated_at": "2026-02-08T01:53:14Z",
   "produced_by": "parity-harness",
   "input_roots": [
     "syncthing-rs/src",
@@ -17,7 +17,7 @@
     "script/parity_harness.go",
     "script/parity_harness_go.go"
   ],
-  "inputs_digest": "fae3cfcc035615deebc87bf8668bcfe9100a82a102659a711d63179531ac9366",
+  "inputs_digest": "d3566e9739949cac28c8391b6cede8365c4098e543892d02ec4d229bcd40abfa",
   "match": true,
   "mismatches": [],
   "scenarios": [

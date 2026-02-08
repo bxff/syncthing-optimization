@@ -329,14 +329,16 @@ func TestValidateReplacementScenarioEvidenceRejectsSyntheticEvidence(t *testing.
 
 	validateReplacementScenarioEvidence(report, ev)
 
-	if len(report.Failures) != 1 {
-		t.Fatalf("expected 1 failure, got %#v", report.Failures)
+	if len(report.Failures) != 2 {
+		t.Fatalf("expected 2 failures, got %#v", report.Failures)
 	}
-	if report.Failures[0].Rule != "replacement-scenario-evidence" {
-		t.Fatalf("unexpected rule: %s", report.Failures[0].Rule)
-	}
-	if !strings.Contains(report.Failures[0].Message, "peer-interop") {
-		t.Fatalf("unexpected message: %s", report.Failures[0].Message)
+	for _, failure := range report.Failures {
+		if failure.Rule != "replacement-scenario-evidence" {
+			t.Fatalf("unexpected rule: %s", failure.Rule)
+		}
+		if !strings.Contains(failure.Message, "peer-interop") {
+			t.Fatalf("unexpected message: %s", failure.Message)
+		}
 	}
 }
 
@@ -391,14 +393,16 @@ func TestValidateReplacementScenarioEvidenceRequiresExternalSoakWhenTagged(t *te
 
 	validateReplacementScenarioEvidence(report, ev)
 
-	if len(report.Failures) != 1 {
-		t.Fatalf("expected 1 failure, got %#v", report.Failures)
+	if len(report.Failures) != 2 {
+		t.Fatalf("expected 2 failures, got %#v", report.Failures)
 	}
-	if report.Failures[0].Rule != "replacement-scenario-evidence" {
-		t.Fatalf("unexpected rule: %s", report.Failures[0].Rule)
-	}
-	if !strings.Contains(report.Failures[0].Message, "external-soak") {
-		t.Fatalf("unexpected message: %s", report.Failures[0].Message)
+	for _, failure := range report.Failures {
+		if failure.Rule != "replacement-scenario-evidence" {
+			t.Fatalf("unexpected rule: %s", failure.Rule)
+		}
+		if !strings.Contains(failure.Message, "external-soak") {
+			t.Fatalf("unexpected message: %s", failure.Message)
+		}
 	}
 }
 

@@ -1,0 +1,24 @@
+{
+  "checks": {
+    "crash_kill_ok": true,
+    "first_boot_ok": true,
+    "folder_configured": true,
+    "post_restart_files_indexed": true,
+    "post_restart_need_files_zero": true,
+    "pre_crash_files_indexed": true,
+    "restart_boot_ok": true,
+    "restart_shutdown_requested": true,
+    "scan_ok": true
+  },
+  "metrics": {
+    "expected_local_files": 2,
+    "post_restart_global_files": 2,
+    "post_restart_local_files": 2,
+    "post_restart_need_files": 0,
+    "pre_crash_global_files": 2,
+    "pre_crash_local_files": 2
+  },
+  "scenario": "external-crash-recovery-restart",
+  "source": "rust",
+  "status": "validated"
+}

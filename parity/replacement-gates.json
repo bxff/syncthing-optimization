@@ -44,7 +44,8 @@
   ],
   "required_external_soak_scenarios": [
     "external-soak-replacement",
-    "external-durability-restart"
+    "external-durability-restart",
+    "external-crash-recovery-restart"
   ],
   "required_memory_diagnostic_fields": [
     "folder",

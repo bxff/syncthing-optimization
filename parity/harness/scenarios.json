@@ -274,6 +274,42 @@
       }
     },
     {
+      "id": "external-crash-recovery-restart",
+      "description": "Run real daemon crash/restart cycle (hard kill) and verify file index durability after restart.",
+      "severity": "P0",
+      "required": false,
+      "tags": [
+        "core",
+        "external-soak",
+        "crash-recovery"
+      ],
+      "comparator": "json-equal",
+      "go": {
+        "command": [
+          "go",
+          "run",
+          "./script/parity_external_soak.go",
+          "scenario",
+          "external-crash-recovery-restart",
+          "--impl",
+          "go"
+        ],
+        "snapshot_path": "parity/harness/snapshots/go-external-crash-recovery-restart.json"
+      },
+      "rust": {
+        "command": [
+          "go",
+          "run",
+          "./script/parity_external_soak.go",
+          "scenario",
+          "external-crash-recovery-restart",
+          "--impl",
+          "rust"
+        ],
+        "snapshot_path": "parity/harness/snapshots/rust-external-crash-recovery-restart.json"
+      }
+    },
+    {
       "id": "path-order-invariant",
       "description": "Validate deterministic filesystem walk order matches ordered DB cursor scans.",
       "severity": "P0",

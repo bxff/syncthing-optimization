@@ -203,14 +203,21 @@ type durabilityReport struct {
 	CrashRecovery string `json:"crash_recovery"`
 }
 
+type replacementScenarioRequirement struct {
+	ID              string `json:"id"`
+	GoMinEvidence   string `json:"go_min_evidence"`
+	RustMinEvidence string `json:"rust_min_evidence"`
+}
+
 type replacementGates struct {
-	SchemaVersion                  int      `json:"schema_version"`
-	RequiredAPIEndpoints           []string `json:"required_api_endpoints"`
-	RequiredBEPMessageTypes        []string `json:"required_bep_message_types"`
-	RequiredFolderModes            []string `json:"required_folder_modes"`
-	RequiredExternalSoakScenarios  []string `json:"required_external_soak_scenarios"`
-	RequiredMemoryDiagnosticFields []string `json:"required_memory_diagnostic_fields"`
-	RequiredDurabilityFields       []string `json:"required_durability_fields"`
+	SchemaVersion                  int                              `json:"schema_version"`
+	RequiredAPIEndpoints           []string                         `json:"required_api_endpoints"`
+	RequiredBEPMessageTypes        []string                         `json:"required_bep_message_types"`
+	RequiredFolderModes            []string                         `json:"required_folder_modes"`
+	RequiredExternalSoakScenarios  []string                         `json:"required_external_soak_scenarios"`
+	RequiredMemoryDiagnosticFields []string                         `json:"required_memory_diagnostic_fields"`
+	RequiredDurabilityFields       []string                         `json:"required_durability_fields"`
+	RequiredScenarios              []replacementScenarioRequirement `json:"required_scenarios"`
 }
 
 type harnessScenarioFile struct {
@@ -1146,67 +1153,159 @@ func validateRequiredScenarioCoverage(report *guardrailReport, ev requiredTestEv
 }
 
 func validateReplacementScenarioEvidence(report *guardrailReport, ev requiredTestEvidence) {
-	ids := make([]string, 0, len(ev.RequiredScenarioIDs))
-	for id := range ev.RequiredScenarioIDs {
-		ids = append(ids, id)
+	gates := replacementGates{}
+	if err := readJSON("parity/replacement-gates.json", &gates); err == nil && len(gates.RequiredScenarios) > 0 {
+		validateReplacementScenarioEvidenceWithGates(report, ev, gates.RequiredScenarios)
+		return
 	}
-	sort.Strings(ids)
 
+	ids := sortedScenarioIDs(ev.RequiredScenarioIDs)
 	for _, id := range ids {
-		status := strings.ToLower(strings.TrimSpace(ev.ScenarioOutcome[id]))
-		if status == "" {
+		goRequired, rustRequired := inferredRequiredEvidenceByScenario(ev, id)
+		validateScenarioEvidence(report, ev, id, goRequired, rustRequired)
+	}
+}
+
+func validateReplacementScenarioEvidenceWithGates(
+	report *guardrailReport,
+	ev requiredTestEvidence,
+	required []replacementScenarioRequirement,
+) {
+	seen := make(map[string]struct{}, len(required))
+
+	for _, item := range required {
+		id := strings.TrimSpace(item.ID)
+		if id == "" {
 			report.Failures = append(report.Failures, reportFailure{
-				Rule:    "replacement-scenario-status",
-				Path:    "parity/diff-reports/latest.json",
-				Message: fmt.Sprintf("required scenario %q is missing from latest differential report", id),
+				Rule:    "replacement-scenario-gates",
+				Path:    "parity/replacement-gates.json",
+				Message: "required_scenarios entry has empty id",
 			})
 			continue
 		}
-		if status != "pass" {
+		if _, dup := seen[id]; dup {
 			report.Failures = append(report.Failures, reportFailure{
-				Rule:    "replacement-scenario-status",
-				Path:    "parity/diff-reports/latest.json",
-				Message: fmt.Sprintf("required scenario %q must pass for replacement readiness (status=%q)", id, status),
+				Rule:    "replacement-scenario-gates",
+				Path:    "parity/replacement-gates.json",
+				Message: fmt.Sprintf("required_scenarios has duplicate id %q", id),
 			})
+			continue
+		}
+		seen[id] = struct{}{}
+
+		if _, known := ev.ScenarioIDs[id]; !known {
+			report.Failures = append(report.Failures, reportFailure{
+				Rule:    "replacement-scenario-gates",
+				Path:    "parity/replacement-gates.json",
+				Message: fmt.Sprintf("required_scenarios references unknown scenario id %q", id),
+			})
+			continue
 		}
 
-		goObserved := normalizeScenarioEvidence(ev.ScenarioGoEvidence[id])
-		if goObserved == "" {
-			goObserved = normalizeScenarioEvidence(ev.ScenarioEvidence[id])
-		}
-		if goObserved == "" {
-			goObserved = "synthetic"
-		}
-		rustObserved := normalizeScenarioEvidence(ev.ScenarioRustEvidence[id])
-		if rustObserved == "" {
-			rustObserved = normalizeScenarioEvidence(ev.ScenarioEvidence[id])
-		}
-		if rustObserved == "" {
-			rustObserved = "synthetic"
-		}
-		required := "daemon"
-		if scenarioHasTag(ev, id, "external-soak") {
-			required = "external-soak"
-		} else if scenarioHasTag(ev, id, "interop") {
-			required = "peer-interop"
-		}
-
-		requiredRank := scenarioEvidenceRank(required)
-		if scenarioEvidenceRank(goObserved) < requiredRank {
+		goRequired := normalizeScenarioEvidence(item.GoMinEvidence)
+		if goRequired == "" {
 			report.Failures = append(report.Failures, reportFailure{
-				Rule:    "replacement-scenario-evidence",
-				Path:    "parity/diff-reports/latest.json",
-				Message: fmt.Sprintf("required scenario %q has insufficient go evidence level %q (need >= %q)", id, goObserved, required),
+				Rule:    "replacement-scenario-gates",
+				Path:    "parity/replacement-gates.json",
+				Message: fmt.Sprintf("required_scenarios %q has invalid go_min_evidence %q", id, item.GoMinEvidence),
 			})
+			continue
 		}
-		if scenarioEvidenceRank(rustObserved) < requiredRank {
+		rustRequired := normalizeScenarioEvidence(item.RustMinEvidence)
+		if rustRequired == "" {
 			report.Failures = append(report.Failures, reportFailure{
-				Rule:    "replacement-scenario-evidence",
-				Path:    "parity/diff-reports/latest.json",
-				Message: fmt.Sprintf("required scenario %q has insufficient rust evidence level %q (need >= %q)", id, rustObserved, required),
+				Rule:    "replacement-scenario-gates",
+				Path:    "parity/replacement-gates.json",
+				Message: fmt.Sprintf("required_scenarios %q has invalid rust_min_evidence %q", id, item.RustMinEvidence),
 			})
+			continue
 		}
+		validateScenarioEvidence(report, ev, id, goRequired, rustRequired)
 	}
+
+	requiredIDs := sortedScenarioIDs(ev.RequiredScenarioIDs)
+	for _, id := range requiredIDs {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-scenario-gates",
+			Path:    "parity/replacement-gates.json",
+			Message: fmt.Sprintf("required scenario %q from parity/harness/scenarios.json is missing in required_scenarios", id),
+		})
+	}
+}
+
+func validateScenarioEvidence(
+	report *guardrailReport,
+	ev requiredTestEvidence,
+	id, goRequired, rustRequired string,
+) {
+	status := strings.ToLower(strings.TrimSpace(ev.ScenarioOutcome[id]))
+	if status == "" {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-scenario-status",
+			Path:    "parity/diff-reports/latest.json",
+			Message: fmt.Sprintf("required scenario %q is missing from latest differential report", id),
+		})
+		return
+	}
+	if status != "pass" {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-scenario-status",
+			Path:    "parity/diff-reports/latest.json",
+			Message: fmt.Sprintf("required scenario %q must pass for replacement readiness (status=%q)", id, status),
+		})
+	}
+
+	goObserved := normalizeScenarioEvidence(ev.ScenarioGoEvidence[id])
+	if goObserved == "" {
+		goObserved = normalizeScenarioEvidence(ev.ScenarioEvidence[id])
+	}
+	if goObserved == "" {
+		goObserved = "synthetic"
+	}
+	rustObserved := normalizeScenarioEvidence(ev.ScenarioRustEvidence[id])
+	if rustObserved == "" {
+		rustObserved = normalizeScenarioEvidence(ev.ScenarioEvidence[id])
+	}
+	if rustObserved == "" {
+		rustObserved = "synthetic"
+	}
+
+	if scenarioEvidenceRank(goObserved) < scenarioEvidenceRank(goRequired) {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-scenario-evidence",
+			Path:    "parity/diff-reports/latest.json",
+			Message: fmt.Sprintf("required scenario %q has insufficient go evidence level %q (need >= %q)", id, goObserved, goRequired),
+		})
+	}
+	if scenarioEvidenceRank(rustObserved) < scenarioEvidenceRank(rustRequired) {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-scenario-evidence",
+			Path:    "parity/diff-reports/latest.json",
+			Message: fmt.Sprintf("required scenario %q has insufficient rust evidence level %q (need >= %q)", id, rustObserved, rustRequired),
+		})
+	}
+}
+
+func inferredRequiredEvidenceByScenario(ev requiredTestEvidence, id string) (string, string) {
+	required := "daemon"
+	if scenarioHasTag(ev, id, "external-soak") {
+		required = "external-soak"
+	} else if scenarioHasTag(ev, id, "interop") {
+		required = "peer-interop"
+	}
+	return required, required
+}
+
+func sortedScenarioIDs(ids map[string]struct{}) []string {
+	out := make([]string, 0, len(ids))
+	for id := range ids {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func scenarioHasTag(ev requiredTestEvidence, scenarioID, tag string) bool {

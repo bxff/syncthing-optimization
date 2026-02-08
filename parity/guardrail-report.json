@@ -1,59 +1,13 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-02-08T01:55:03Z",
+  "generated_at": "2026-02-08T02:09:55Z",
   "mode": "replacement",
   "summary": {
     "total_features": 1466,
     "missing": 0,
     "implemented": 0,
     "parity_verified": 1466,
-    "failures": 9
+    "failures": 0
   },
-  "failures": [
-    {
-      "rule": "replacement-scenario-evidence",
-      "path": "parity/diff-reports/latest.json",
-      "message": "required scenario \"conflict-and-ignore-semantics\" has insufficient go evidence level \"synthetic\" (need \u003e= \"daemon\")"
-    },
-    {
-      "rule": "replacement-scenario-evidence",
-      "path": "parity/diff-reports/latest.json",
-      "message": "required scenario \"crash-recovery\" has insufficient go evidence level \"synthetic\" (need \u003e= \"daemon\")"
-    },
-    {
-      "rule": "replacement-scenario-evidence",
-      "path": "parity/diff-reports/latest.json",
-      "message": "required scenario \"folder-type-behavior\" has insufficient go evidence level \"synthetic\" (need \u003e= \"daemon\")"
-    },
-    {
-      "rule": "replacement-scenario-evidence",
-      "path": "parity/diff-reports/latest.json",
-      "message": "required scenario \"index-sequence-behavior\" has insufficient go evidence level \"synthetic\" (need \u003e= \"peer-interop\")"
-    },
-    {
-      "rule": "replacement-scenario-evidence",
-      "path": "parity/diff-reports/latest.json",
-      "message": "required scenario \"memory-cap-50mb\" has insufficient go evidence level \"synthetic\" (need \u003e= \"daemon\")"
-    },
-    {
-      "rule": "replacement-scenario-evidence",
-      "path": "parity/diff-reports/latest.json",
-      "message": "required scenario \"memory-cap-diagnostics\" has insufficient go evidence level \"synthetic\" (need \u003e= \"daemon\")"
-    },
-    {
-      "rule": "replacement-scenario-evidence",
-      "path": "parity/diff-reports/latest.json",
-      "message": "required scenario \"path-order-invariant\" has insufficient go evidence level \"synthetic\" (need \u003e= \"daemon\")"
-    },
-    {
-      "rule": "replacement-scenario-evidence",
-      "path": "parity/diff-reports/latest.json",
-      "message": "required scenario \"protocol-state-transition\" has insufficient go evidence level \"synthetic\" (need \u003e= \"peer-interop\")"
-    },
-    {
-      "rule": "replacement-scenario-evidence",
-      "path": "parity/diff-reports/latest.json",
-      "message": "required scenario \"wal-free-durability\" has insufficient go evidence level \"synthetic\" (need \u003e= \"daemon\")"
-    }
-  ]
+  "failures": null
 }

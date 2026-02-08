@@ -309,101 +309,202 @@ func TestValidateMemoryCapStatusRejectsNon50MBProfile(t *testing.T) {
 }
 
 func TestValidateReplacementScenarioEvidenceRejectsSyntheticEvidence(t *testing.T) {
-	report := &guardrailReport{}
-	ev := requiredTestEvidence{
-		RequiredScenarioIDs: map[string]struct{}{
-			"protocol-state-transition": {},
-		},
-		ScenarioOutcome: map[string]string{
-			"protocol-state-transition": "pass",
-		},
-		ScenarioEvidence: map[string]string{
-			"protocol-state-transition": "synthetic",
-		},
-		ScenarioTags: map[string]map[string]struct{}{
-			"protocol-state-transition": {
-				"interop": {},
+	withTempRepoLayout(t, func() {
+		report := &guardrailReport{}
+		ev := requiredTestEvidence{
+			RequiredScenarioIDs: map[string]struct{}{
+				"protocol-state-transition": {},
 			},
-		},
-	}
-
-	validateReplacementScenarioEvidence(report, ev)
-
-	if len(report.Failures) != 2 {
-		t.Fatalf("expected 2 failures, got %#v", report.Failures)
-	}
-	for _, failure := range report.Failures {
-		if failure.Rule != "replacement-scenario-evidence" {
-			t.Fatalf("unexpected rule: %s", failure.Rule)
+			ScenarioOutcome: map[string]string{
+				"protocol-state-transition": "pass",
+			},
+			ScenarioEvidence: map[string]string{
+				"protocol-state-transition": "synthetic",
+			},
+			ScenarioTags: map[string]map[string]struct{}{
+				"protocol-state-transition": {
+					"interop": {},
+				},
+			},
 		}
-		if !strings.Contains(failure.Message, "peer-interop") {
-			t.Fatalf("unexpected message: %s", failure.Message)
+
+		validateReplacementScenarioEvidence(report, ev)
+
+		if len(report.Failures) != 2 {
+			t.Fatalf("expected 2 failures, got %#v", report.Failures)
 		}
-	}
+		for _, failure := range report.Failures {
+			if failure.Rule != "replacement-scenario-evidence" {
+				t.Fatalf("unexpected rule: %s", failure.Rule)
+			}
+			if !strings.Contains(failure.Message, "peer-interop") {
+				t.Fatalf("unexpected message: %s", failure.Message)
+			}
+		}
+	})
 }
 
 func TestValidateReplacementScenarioEvidenceAllowsStrongEvidence(t *testing.T) {
-	report := &guardrailReport{}
-	ev := requiredTestEvidence{
-		RequiredScenarioIDs: map[string]struct{}{
-			"memory-cap-50mb":           {},
-			"protocol-state-transition": {},
-		},
-		ScenarioOutcome: map[string]string{
-			"memory-cap-50mb":           "pass",
-			"protocol-state-transition": "pass",
-		},
-		ScenarioEvidence: map[string]string{
-			"memory-cap-50mb":           "daemon",
-			"protocol-state-transition": "peer-interop",
-		},
-		ScenarioTags: map[string]map[string]struct{}{
-			"memory-cap-50mb": {},
-			"protocol-state-transition": {
-				"interop": {},
+	withTempRepoLayout(t, func() {
+		report := &guardrailReport{}
+		ev := requiredTestEvidence{
+			RequiredScenarioIDs: map[string]struct{}{
+				"memory-cap-50mb":           {},
+				"protocol-state-transition": {},
 			},
-		},
-	}
+			ScenarioOutcome: map[string]string{
+				"memory-cap-50mb":           "pass",
+				"protocol-state-transition": "pass",
+			},
+			ScenarioEvidence: map[string]string{
+				"memory-cap-50mb":           "daemon",
+				"protocol-state-transition": "peer-interop",
+			},
+			ScenarioTags: map[string]map[string]struct{}{
+				"memory-cap-50mb": {},
+				"protocol-state-transition": {
+					"interop": {},
+				},
+			},
+		}
 
-	validateReplacementScenarioEvidence(report, ev)
+		validateReplacementScenarioEvidence(report, ev)
 
-	if len(report.Failures) != 0 {
-		t.Fatalf("expected no failures, got %#v", report.Failures)
-	}
+		if len(report.Failures) != 0 {
+			t.Fatalf("expected no failures, got %#v", report.Failures)
+		}
+	})
 }
 
 func TestValidateReplacementScenarioEvidenceRequiresExternalSoakWhenTagged(t *testing.T) {
-	report := &guardrailReport{}
-	ev := requiredTestEvidence{
-		RequiredScenarioIDs: map[string]struct{}{
-			"external-soak-replacement": {},
-		},
-		ScenarioOutcome: map[string]string{
-			"external-soak-replacement": "pass",
-		},
-		ScenarioEvidence: map[string]string{
-			"external-soak-replacement": "daemon",
-		},
-		ScenarioTags: map[string]map[string]struct{}{
-			"external-soak-replacement": {
-				"external-soak": {},
+	withTempRepoLayout(t, func() {
+		report := &guardrailReport{}
+		ev := requiredTestEvidence{
+			RequiredScenarioIDs: map[string]struct{}{
+				"external-soak-replacement": {},
 			},
-		},
-	}
-
-	validateReplacementScenarioEvidence(report, ev)
-
-	if len(report.Failures) != 2 {
-		t.Fatalf("expected 2 failures, got %#v", report.Failures)
-	}
-	for _, failure := range report.Failures {
-		if failure.Rule != "replacement-scenario-evidence" {
-			t.Fatalf("unexpected rule: %s", failure.Rule)
+			ScenarioOutcome: map[string]string{
+				"external-soak-replacement": "pass",
+			},
+			ScenarioEvidence: map[string]string{
+				"external-soak-replacement": "daemon",
+			},
+			ScenarioTags: map[string]map[string]struct{}{
+				"external-soak-replacement": {
+					"external-soak": {},
+				},
+			},
 		}
-		if !strings.Contains(failure.Message, "external-soak") {
-			t.Fatalf("unexpected message: %s", failure.Message)
+
+		validateReplacementScenarioEvidence(report, ev)
+
+		if len(report.Failures) != 2 {
+			t.Fatalf("expected 2 failures, got %#v", report.Failures)
 		}
-	}
+		for _, failure := range report.Failures {
+			if failure.Rule != "replacement-scenario-evidence" {
+				t.Fatalf("unexpected rule: %s", failure.Rule)
+			}
+			if !strings.Contains(failure.Message, "external-soak") {
+				t.Fatalf("unexpected message: %s", failure.Message)
+			}
+		}
+	})
+}
+
+func TestValidateReplacementScenarioEvidenceUsesExplicitGateMatrix(t *testing.T) {
+	withTempRepoLayout(t, func() {
+		writeReplacementGates(t, replacementGates{
+			SchemaVersion: schemaVersion,
+			RequiredScenarios: []replacementScenarioRequirement{
+				{
+					ID:              "path-order-invariant",
+					GoMinEvidence:   "synthetic",
+					RustMinEvidence: "daemon",
+				},
+			},
+		})
+
+		report := &guardrailReport{}
+		ev := requiredTestEvidence{
+			ScenarioIDs: map[string]struct{}{
+				"path-order-invariant": {},
+			},
+			RequiredScenarioIDs: map[string]struct{}{
+				"path-order-invariant": {},
+			},
+			ScenarioOutcome: map[string]string{
+				"path-order-invariant": "pass",
+			},
+			ScenarioGoEvidence: map[string]string{
+				"path-order-invariant": "synthetic",
+			},
+			ScenarioRustEvidence: map[string]string{
+				"path-order-invariant": "synthetic",
+			},
+		}
+
+		validateReplacementScenarioEvidence(report, ev)
+		if len(report.Failures) != 1 {
+			t.Fatalf("expected 1 failure, got %#v", report.Failures)
+		}
+		if report.Failures[0].Rule != "replacement-scenario-evidence" {
+			t.Fatalf("unexpected rule: %s", report.Failures[0].Rule)
+		}
+		if !strings.Contains(report.Failures[0].Message, "rust evidence") {
+			t.Fatalf("unexpected message: %s", report.Failures[0].Message)
+		}
+	})
+}
+
+func TestValidateReplacementScenarioEvidenceGateRequiresRequiredScenarios(t *testing.T) {
+	withTempRepoLayout(t, func() {
+		writeReplacementGates(t, replacementGates{
+			SchemaVersion: schemaVersion,
+			RequiredScenarios: []replacementScenarioRequirement{
+				{
+					ID:              "index-sequence-behavior",
+					GoMinEvidence:   "synthetic",
+					RustMinEvidence: "peer-interop",
+				},
+			},
+		})
+
+		report := &guardrailReport{}
+		ev := requiredTestEvidence{
+			ScenarioIDs: map[string]struct{}{
+				"index-sequence-behavior": {},
+				"path-order-invariant":    {},
+			},
+			RequiredScenarioIDs: map[string]struct{}{
+				"path-order-invariant": {},
+			},
+			ScenarioOutcome: map[string]string{
+				"index-sequence-behavior": "pass",
+				"path-order-invariant":    "pass",
+			},
+			ScenarioGoEvidence: map[string]string{
+				"index-sequence-behavior": "synthetic",
+				"path-order-invariant":    "synthetic",
+			},
+			ScenarioRustEvidence: map[string]string{
+				"index-sequence-behavior": "peer-interop",
+				"path-order-invariant":    "daemon",
+			},
+		}
+
+		validateReplacementScenarioEvidence(report, ev)
+		found := false
+		for _, failure := range report.Failures {
+			if failure.Rule == "replacement-scenario-gates" && strings.Contains(failure.Message, "path-order-invariant") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected replacement-scenario-gates failure, got %#v", report.Failures)
+		}
+	})
 }
 
 func TestNormalizeScenarioEvidenceSupportsExternalSoak(t *testing.T) {
@@ -730,6 +831,18 @@ func writeLatestDiffReport(t *testing.T, report differentialReport) {
 	path := filepath.Join("parity", "diff-reports", "latest.json")
 	if err := os.WriteFile(path, bs, 0o644); err != nil {
 		t.Fatalf("write report: %v", err)
+	}
+}
+
+func writeReplacementGates(t *testing.T, gates replacementGates) {
+	t.Helper()
+	path := filepath.Join("parity", "replacement-gates.json")
+	bs, err := json.MarshalIndent(gates, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal gates: %v", err)
+	}
+	if err := os.WriteFile(path, bs, 0o644); err != nil {
+		t.Fatalf("write replacement gates: %v", err)
 	}
 }
 

@@ -47,6 +47,68 @@
     "external-durability-restart",
     "external-crash-recovery-restart"
   ],
+  "required_scenarios": [
+    {
+      "id": "conflict-and-ignore-semantics",
+      "go_min_evidence": "synthetic",
+      "rust_min_evidence": "daemon"
+    },
+    {
+      "id": "crash-recovery",
+      "go_min_evidence": "synthetic",
+      "rust_min_evidence": "daemon"
+    },
+    {
+      "id": "folder-type-behavior",
+      "go_min_evidence": "synthetic",
+      "rust_min_evidence": "daemon"
+    },
+    {
+      "id": "index-sequence-behavior",
+      "go_min_evidence": "synthetic",
+      "rust_min_evidence": "peer-interop"
+    },
+    {
+      "id": "memory-cap-50mb",
+      "go_min_evidence": "synthetic",
+      "rust_min_evidence": "daemon"
+    },
+    {
+      "id": "memory-cap-diagnostics",
+      "go_min_evidence": "synthetic",
+      "rust_min_evidence": "daemon"
+    },
+    {
+      "id": "path-order-invariant",
+      "go_min_evidence": "synthetic",
+      "rust_min_evidence": "daemon"
+    },
+    {
+      "id": "protocol-state-transition",
+      "go_min_evidence": "synthetic",
+      "rust_min_evidence": "peer-interop"
+    },
+    {
+      "id": "wal-free-durability",
+      "go_min_evidence": "synthetic",
+      "rust_min_evidence": "daemon"
+    },
+    {
+      "id": "external-soak-replacement",
+      "go_min_evidence": "external-soak",
+      "rust_min_evidence": "external-soak"
+    },
+    {
+      "id": "external-durability-restart",
+      "go_min_evidence": "external-soak",
+      "rust_min_evidence": "external-soak"
+    },
+    {
+      "id": "external-crash-recovery-restart",
+      "go_min_evidence": "external-soak",
+      "rust_min_evidence": "external-soak"
+    }
+  ],
   "required_memory_diagnostic_fields": [
     "folder",
     "subsystem",

@@ -124,6 +124,10 @@ type durabilityReport struct {
 	CrashRecovery string `json:"crash_recovery"`
 }
 
+type replacementGatesConfig struct {
+	RequiredAPIEndpoints []string `json:"required_api_endpoints"`
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		fatalf("usage: go run script/parity_harness.go run [flags]")
@@ -153,7 +157,7 @@ func run(args []string) {
 	seedBase := fs.Int64("seed-base", 1, "base seed for repeated external-soak runs")
 	requiredEvidenceMin := fs.String(
 		"required-evidence-min",
-		"synthetic",
+		"daemon",
 		"when set (synthetic|component|daemon|peer-interop|external-soak), fail required scenarios with weaker inferred evidence",
 	)
 	if err := fs.Parse(args); err != nil {
@@ -698,30 +702,105 @@ func compareSnapshots(scenarioID, mode string, goSnap, rustSnap map[string]any) 
 	case "endpoint-surface":
 		goCovered := toStringSet(goSnap["covered_endpoints"])
 		rustCovered := toStringSet(rustSnap["covered_endpoints"])
-		missing := make([]string, 0)
+		if scenarioID == "daemon-api-surface" {
+			requiredEndpoints, err := loadRequiredAPIEndpoints(replacementGatesPath())
+			if err != nil {
+				return false, fmt.Sprintf("load required api endpoints: %v", err)
+			}
+			if len(requiredEndpoints) == 0 {
+				return false, "required api endpoints list is empty"
+			}
+			missingGoRequired := make([]string, 0)
+			missingRustRequired := make([]string, 0)
+			for _, endpoint := range requiredEndpoints {
+				if _, ok := goCovered[endpoint]; !ok {
+					missingGoRequired = append(missingGoRequired, endpoint)
+				}
+				if _, ok := rustCovered[endpoint]; !ok {
+					missingRustRequired = append(missingRustRequired, endpoint)
+				}
+			}
+			if len(missingGoRequired) > 0 || len(missingRustRequired) > 0 {
+				sort.Strings(missingGoRequired)
+				sort.Strings(missingRustRequired)
+				return false, fmt.Sprintf(
+					"required endpoints missing (go_missing=%d rust_missing=%d)",
+					len(missingGoRequired),
+					len(missingRustRequired),
+				)
+			}
+		}
+
+		missingInRust := make([]string, 0)
 		for endpoint := range goCovered {
 			if _, ok := rustCovered[endpoint]; ok {
 				continue
 			}
-			missing = append(missing, endpoint)
+			missingInRust = append(missingInRust, endpoint)
 		}
-		sort.Strings(missing)
-		if len(missing) == 0 {
+		missingInGo := make([]string, 0)
+		for endpoint := range rustCovered {
+			if _, ok := goCovered[endpoint]; ok {
+				continue
+			}
+			missingInGo = append(missingInGo, endpoint)
+		}
+		sort.Strings(missingInRust)
+		sort.Strings(missingInGo)
+		if len(missingInRust) == 0 && len(missingInGo) == 0 {
 			return true, ""
 		}
-		preview := missing
-		if len(preview) > 25 {
-			preview = preview[:25]
+		previewRust := missingInRust
+		previewGo := missingInGo
+		if len(previewRust) > 12 {
+			previewRust = previewRust[:12]
+		}
+		if len(previewGo) > 12 {
+			previewGo = previewGo[:12]
 		}
 		return false, fmt.Sprintf(
-			"rust api surface missing %d go endpoint(s), first %d: %s",
-			len(missing),
-			len(preview),
-			strings.Join(preview, ", "),
+			"endpoint sets differ (rust_missing_go=%d go_missing_rust=%d; rust_missing_preview=[%s]; go_missing_preview=[%s])",
+			len(missingInRust),
+			len(missingInGo),
+			strings.Join(previewRust, ", "),
+			strings.Join(previewGo, ", "),
 		)
 	default:
 		return false, fmt.Sprintf("unsupported comparator %q", mode)
 	}
+}
+
+func replacementGatesPath() string {
+	if path := strings.TrimSpace(os.Getenv("PARITY_REPLACEMENT_GATES_PATH")); path != "" {
+		return path
+	}
+	return "parity/replacement-gates.json"
+}
+
+func loadRequiredAPIEndpoints(path string) ([]string, error) {
+	bs, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var gates replacementGatesConfig
+	if err := json.Unmarshal(bs, &gates); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(gates.RequiredAPIEndpoints))
+	seen := make(map[string]struct{}, len(gates.RequiredAPIEndpoints))
+	for _, endpoint := range gates.RequiredAPIEndpoints {
+		endpoint = strings.TrimSpace(endpoint)
+		if endpoint == "" {
+			continue
+		}
+		if _, ok := seen[endpoint]; ok {
+			continue
+		}
+		seen[endpoint] = struct{}{}
+		out = append(out, endpoint)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func countJSONArray(value any) int {

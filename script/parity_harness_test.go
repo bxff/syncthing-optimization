@@ -112,9 +112,9 @@ func TestInferSideEvidenceDetectsExternalSoakScenarioCommand(t *testing.T) {
 	}
 }
 
-func TestCompareSnapshotsEndpointSurfaceAcceptsSuperset(t *testing.T) {
+func TestCompareSnapshotsEndpointSurfaceAcceptsEqualSets(t *testing.T) {
 	ok, msg := compareSnapshots(
-		"daemon-api-surface",
+		"endpoint-test",
 		"endpoint-surface",
 		map[string]any{
 			"covered_endpoints": []string{
@@ -126,7 +126,6 @@ func TestCompareSnapshotsEndpointSurfaceAcceptsSuperset(t *testing.T) {
 			"covered_endpoints": []string{
 				"GET /rest/system/version",
 				"GET /rest/system/status",
-				"GET /rest/db/status",
 			},
 		},
 	)
@@ -137,7 +136,7 @@ func TestCompareSnapshotsEndpointSurfaceAcceptsSuperset(t *testing.T) {
 
 func TestCompareSnapshotsEndpointSurfaceRejectsMissingGoEndpoint(t *testing.T) {
 	ok, msg := compareSnapshots(
-		"daemon-api-surface",
+		"endpoint-test",
 		"endpoint-surface",
 		map[string]any{
 			"covered_endpoints": []string{
@@ -156,6 +155,67 @@ func TestCompareSnapshotsEndpointSurfaceRejectsMissingGoEndpoint(t *testing.T) {
 	}
 	if msg == "" {
 		t.Fatal("expected mismatch message")
+	}
+}
+
+func TestCompareSnapshotsEndpointSurfaceRejectsRustOnlyEndpoint(t *testing.T) {
+	ok, msg := compareSnapshots(
+		"endpoint-test",
+		"endpoint-surface",
+		map[string]any{
+			"covered_endpoints": []string{
+				"GET /rest/system/version",
+			},
+		},
+		map[string]any{
+			"covered_endpoints": []string{
+				"GET /rest/system/version",
+				"GET /rest/system/status",
+			},
+		},
+	)
+	if ok {
+		t.Fatal("expected endpoint-surface comparator to fail")
+	}
+	if msg == "" {
+		t.Fatal("expected mismatch message")
+	}
+}
+
+func TestCompareSnapshotsEndpointSurfaceEnforcesRequiredReplacementEndpoints(t *testing.T) {
+	dir := t.TempDir()
+	gatesPath := filepath.Join(dir, "replacement-gates.json")
+	if err := os.WriteFile(gatesPath, []byte(`{"required_api_endpoints":["GET /rest/system/version","GET /rest/system/status"]}`), 0o644); err != nil {
+		t.Fatalf("write replacement gates: %v", err)
+	}
+	t.Setenv("PARITY_REPLACEMENT_GATES_PATH", gatesPath)
+
+	ok, _ := compareSnapshots(
+		"daemon-api-surface",
+		"endpoint-surface",
+		map[string]any{
+			"covered_endpoints": []string{"GET /rest/system/version"},
+		},
+		map[string]any{
+			"covered_endpoints": []string{"GET /rest/system/version", "GET /rest/system/status"},
+		},
+	)
+	if ok {
+		t.Fatal("expected required endpoint enforcement to fail when go side is incomplete")
+	}
+
+	ok, msg := compareSnapshots(
+		"daemon-api-surface",
+		"endpoint-surface",
+		map[string]any{
+			"covered_endpoints": []string{"GET /rest/system/version", "GET /rest/system/status"},
+		},
+		map[string]any{
+			"covered_endpoints": []string{"GET /rest/system/version", "GET /rest/system/status"},
+		},
+	)
+	if !ok {
+		t.Fatalf("expected required endpoint enforcement to pass, got msg=%q", msg)
 	}
 }
 

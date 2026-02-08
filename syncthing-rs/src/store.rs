@@ -1,7 +1,7 @@
 use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::ops::Bound;
@@ -136,6 +136,10 @@ pub(crate) struct StoreStats {
     pub(crate) memory_budget_bytes: usize,
 }
 
+type PathStore = BTreeMap<String, StoredFileMetadata>;
+type DeviceStore = BTreeMap<String, PathStore>;
+type FolderStore = BTreeMap<String, DeviceStore>;
+
 #[derive(Debug)]
 pub(crate) struct Store {
     config: StoreConfig,
@@ -143,7 +147,8 @@ pub(crate) struct Store {
     manifest: StoreManifest,
     journal_path: PathBuf,
     block_blob_path: PathBuf,
-    files: BTreeMap<String, StoredFileMetadata>,
+    files: FolderStore,
+    file_count: usize,
     deleted_tombstones: VecDeque<String>,
     tombstone_set: HashSet<String>,
     approx_memory_bytes: usize,
@@ -203,7 +208,7 @@ impl Store {
             .open(&block_blob_path)?;
         blob.sync_all()?;
 
-        let (files, deleted_tombstones, approx_memory_bytes) = Self::load_from_segments(
+        let (flat_files, deleted_tombstones, approx_memory_bytes) = Self::load_from_segments(
             &config.root,
             &manifest.segments,
             &block_blob_path,
@@ -220,6 +225,8 @@ impl Store {
             ));
         }
         let tombstone_set = deleted_tombstones.iter().cloned().collect();
+        let file_count = flat_files.len();
+        let files = build_folder_store(flat_files)?;
 
         Ok(Self {
             config,
@@ -228,6 +235,7 @@ impl Store {
             journal_path,
             block_blob_path,
             files,
+            file_count,
             deleted_tombstones,
             tombstone_set,
             approx_memory_bytes,
@@ -240,7 +248,7 @@ impl Store {
         budget_file.block_hashes = in_memory_block_hash_shape(&budget_file.block_hashes);
         let next_bytes = projected_upsert_memory_bytes(
             self.approx_memory_bytes,
-            self.files.get(&key),
+            self.stored_for_key(&key),
             &key,
             &budget_file,
         );
@@ -268,10 +276,11 @@ impl Store {
         })?;
 
         let key = composite_key(folder, device, path);
-        if let Some(prev) = self.files.remove(&key) {
+        if let Some(prev) = self.remove_stored_by_key(&key) {
             self.approx_memory_bytes = self
                 .approx_memory_bytes
                 .saturating_sub(estimate_entry_bytes(&key, &prev));
+            self.file_count = self.file_count.saturating_sub(1);
         }
         self.record_tombstone(&key);
 
@@ -280,7 +289,7 @@ impl Store {
 
     pub(crate) fn get_file(&self, folder: &str, device: &str, path: &str) -> Option<FileMetadata> {
         let key = composite_key(folder, device, path);
-        let stored = self.files.get(&key)?;
+        let stored = self.stored_for_key(&key)?;
         file_from_entry(&key, stored)
     }
 
@@ -302,10 +311,14 @@ impl Store {
     }
 
     pub(crate) fn all_files_lexicographic(&self) -> Vec<FileMetadata> {
-        self.files
-            .iter()
-            .filter_map(|(key, value)| file_from_entry(key, value))
-            .collect()
+        let mut out = Vec::with_capacity(self.file_count);
+        self.iter_all_entries(|folder, device, path_key, value| {
+            if let Some(file) = file_from_parts(folder, device, path_key, value) {
+                out.push(file);
+            }
+            true
+        });
+        out
     }
 
     pub(crate) fn all_files_in_folder_prefix(
@@ -314,15 +327,14 @@ impl Store {
         prefix: &str,
     ) -> Vec<FileMetadata> {
         let mut out = Vec::new();
-        let folder_prefix = folder_prefix(folder);
-
-        for (key, value) in self.files.range(folder_prefix.clone()..) {
-            if !key.starts_with(&folder_prefix) {
-                break;
-            }
-            if let Some(file) = file_from_entry(key, value) {
-                if file.path.starts_with(prefix) {
-                    out.push(file);
+        if let Some(device_store) = self.files.get(folder) {
+            for (device, path_store) in device_store {
+                for (path_key, value) in path_store {
+                    if let Some(file) = file_from_parts(folder, device, path_key, value) {
+                        if file.path.starts_with(prefix) {
+                            out.push(file);
+                        }
+                    }
                 }
             }
         }
@@ -334,30 +346,28 @@ impl Store {
     where
         F: FnMut(FileMetadata) -> bool,
     {
-        for (key, value) in &self.files {
-            let Some(file) = file_from_entry(key, value) else {
-                continue;
+        self.iter_all_entries(|folder, device, path_key, value| {
+            let Some(file) = file_from_parts(folder, device, path_key, value) else {
+                return true;
             };
-            if !visit(file) {
-                break;
-            }
-        }
+            visit(file)
+        });
     }
 
     pub(crate) fn for_each_file_in_folder<F>(&self, folder: &str, mut visit: F)
     where
         F: FnMut(FileMetadata) -> bool,
     {
-        let prefix = folder_prefix(folder);
-        for (key, value) in self.files.range(prefix.clone()..) {
-            if !key.starts_with(&prefix) {
-                break;
-            }
-            let Some(file) = file_from_entry(key, value) else {
-                continue;
-            };
-            if !visit(file) {
-                break;
+        if let Some(device_store) = self.files.get(folder) {
+            for (device, path_store) in device_store {
+                for (path_key, value) in path_store {
+                    let Some(file) = file_from_parts(folder, device, path_key, value) else {
+                        continue;
+                    };
+                    if !visit(file) {
+                        return;
+                    }
+                }
             }
         }
     }
@@ -366,36 +376,31 @@ impl Store {
     where
         F: FnMut(FileMetadata) -> bool,
     {
-        let prefix = folder_device_prefix(folder, device);
-        for (key, value) in self.files.range(prefix.clone()..) {
-            if !key.starts_with(&prefix) {
-                break;
-            }
-            let Some(file) = file_from_entry(key, value) else {
-                continue;
-            };
-            if !visit(file) {
-                break;
+        if let Some(path_store) = self
+            .files
+            .get(folder)
+            .and_then(|devices| devices.get(device))
+        {
+            for (path_key, value) in path_store {
+                let Some(file) = file_from_parts(folder, device, path_key, value) else {
+                    continue;
+                };
+                if !visit(file) {
+                    return;
+                }
             }
         }
     }
 
     pub(crate) fn devices_in_folder(&self, folder: &str) -> Vec<String> {
-        let prefix = folder_prefix(folder);
-        let mut devices = BTreeSet::new();
-        for (key, _) in self.files.range(prefix.clone()..) {
-            if !key.starts_with(&prefix) {
-                break;
-            }
-            if let Some((_, device, _)) = split_composite_key(key) {
-                devices.insert(device);
-            }
-        }
-        devices.into_iter().collect()
+        self.files
+            .get(folder)
+            .map(|devices| devices.keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     pub(crate) fn file_count(&self) -> usize {
-        self.files.len()
+        self.file_count
     }
 
     pub(crate) fn tombstone_count(&self) -> usize {
@@ -420,29 +425,21 @@ impl Store {
         }
 
         let mut items = Vec::with_capacity(limit.saturating_add(1));
-        match start_after {
-            Some(cursor) => {
-                let start_key = composite_key(&cursor.folder, &cursor.device, &cursor.path);
-                for (entry_key, value) in self
-                    .files
-                    .range((Bound::Excluded(start_key), Bound::Unbounded))
-                    .take(limit.saturating_add(1))
-                {
-                    let Some(file) = file_from_entry(entry_key, value) else {
-                        continue;
-                    };
-                    items.push(file);
+        let start_key =
+            start_after.map(|cursor| composite_key(&cursor.folder, &cursor.device, &cursor.path));
+        self.iter_all_entries(|folder, device, path_key, value| {
+            let entry_key = composite_key_from_path_key(folder, device, path_key);
+            if let Some(start) = &start_key {
+                if entry_key <= *start {
+                    return true;
                 }
             }
-            None => {
-                for (key, value) in self.files.iter().take(limit.saturating_add(1)) {
-                    let Some(file) = file_from_entry(key, value) else {
-                        continue;
-                    };
-                    items.push(file);
-                }
-            }
-        }
+            let Some(file) = file_from_parts(folder, device, path_key, value) else {
+                return true;
+            };
+            items.push(file);
+            items.len() <= limit
+        });
 
         finalize_page(items, limit)
     }
@@ -461,22 +458,25 @@ impl Store {
         }
 
         let mut items = Vec::with_capacity(limit.saturating_add(1));
-        let folder_start = folder_prefix(folder);
-        for (key, value) in self.files.range(folder_start.clone()..) {
-            if !key.starts_with(&folder_start) {
-                break;
-            }
-            let Some(file) = file_from_entry(key, value) else {
-                continue;
-            };
-            if let Some(start_path) = start_after_path {
-                if compare_path_order(&file.path, start_path) != Ordering::Greater {
-                    continue;
+        if let Some(device_store) = self.files.get(folder) {
+            for (device, path_store) in device_store {
+                for (path_key, value) in path_store {
+                    let Some(file) = file_from_parts(folder, device, path_key, value) else {
+                        continue;
+                    };
+                    if let Some(start_path) = start_after_path {
+                        if compare_path_order(&file.path, start_path) != Ordering::Greater {
+                            continue;
+                        }
+                    }
+                    items.push(file);
+                    if items.len() > limit {
+                        break;
+                    }
                 }
-            }
-            items.push(file);
-            if items.len() > limit {
-                break;
+                if items.len() > limit {
+                    break;
+                }
             }
         }
 
@@ -498,36 +498,37 @@ impl Store {
         }
 
         let mut items = Vec::with_capacity(limit.saturating_add(1));
-        let prefix = folder_device_prefix(folder, device);
-        let start_key = start_after_path.map(|p| composite_key(folder, device, p));
-
-        match start_key {
-            Some(key) => {
-                for (entry_key, value) in self.files.range((Bound::Excluded(key), Bound::Unbounded))
-                {
-                    if !entry_key.starts_with(&prefix) {
-                        break;
-                    }
-                    let Some(file) = file_from_entry(entry_key, value) else {
-                        continue;
-                    };
-                    items.push(file);
-                    if items.len() > limit {
-                        break;
+        let start_path_key = start_after_path.map(encode_path_key);
+        if let Some(path_store) = self
+            .files
+            .get(folder)
+            .and_then(|devices| devices.get(device))
+        {
+            match start_path_key {
+                Some(path_key) => {
+                    for (entry_path_key, value) in
+                        path_store.range((Bound::Excluded(path_key), Bound::Unbounded))
+                    {
+                        let Some(file) = file_from_parts(folder, device, entry_path_key, value)
+                        else {
+                            continue;
+                        };
+                        items.push(file);
+                        if items.len() > limit {
+                            break;
+                        }
                     }
                 }
-            }
-            None => {
-                for (entry_key, value) in self.files.range(prefix.clone()..) {
-                    if !entry_key.starts_with(&prefix) {
-                        break;
-                    }
-                    let Some(file) = file_from_entry(entry_key, value) else {
-                        continue;
-                    };
-                    items.push(file);
-                    if items.len() > limit {
-                        break;
+                None => {
+                    for (entry_path_key, value) in path_store {
+                        let Some(file) = file_from_parts(folder, device, entry_path_key, value)
+                        else {
+                            continue;
+                        };
+                        items.push(file);
+                        if items.len() > limit {
+                            break;
+                        }
                     }
                 }
             }
@@ -552,32 +553,33 @@ impl Store {
         }
 
         let mut items = Vec::with_capacity(limit.saturating_add(1));
-        let device_prefix = folder_device_prefix(folder, device);
-        let start_key = match start_after_path {
-            Some(path) => composite_key(folder, device, path),
-            None => composite_key(folder, device, prefix),
+        let start_path_key = match start_after_path {
+            Some(path) => encode_path_key(path),
+            None => encode_path_key(prefix),
         };
         let range_start = match start_after_path {
-            Some(_) => Bound::Excluded(start_key),
-            None => Bound::Included(start_key),
+            Some(_) => Bound::Excluded(start_path_key),
+            None => Bound::Included(start_path_key),
         };
-
-        for (entry_key, value) in self.files.range((range_start, Bound::Unbounded)) {
-            if !entry_key.starts_with(&device_prefix) {
-                break;
-            }
-            let Some(file) = file_from_entry(entry_key, value) else {
-                continue;
-            };
-            if !file.path.starts_with(prefix) {
-                if compare_path_order(&file.path, prefix) == Ordering::Greater {
+        if let Some(path_store) = self
+            .files
+            .get(folder)
+            .and_then(|devices| devices.get(device))
+        {
+            for (entry_path_key, value) in path_store.range((range_start, Bound::Unbounded)) {
+                let Some(file) = file_from_parts(folder, device, entry_path_key, value) else {
+                    continue;
+                };
+                if !file.path.starts_with(prefix) {
+                    if compare_path_order(&file.path, prefix) == Ordering::Greater {
+                        break;
+                    }
+                    continue;
+                }
+                items.push(file);
+                if items.len() > limit {
                     break;
                 }
-                continue;
-            }
-            items.push(file);
-            if items.len() > limit {
-                break;
             }
         }
 
@@ -588,12 +590,17 @@ impl Store {
         let tmp = self.config.root.join(COMPACT_SEGMENT_TMP_NAME);
         let mut file = File::create(&tmp)?;
 
-        for (key, record) in &self.files {
-            let Some(mut materialized) = file_from_entry(key, record) else {
-                continue;
-            };
-            materialized.block_hashes = self.resolve_file_block_hashes(&materialized)?;
-            Self::write_record(&mut file, &JournalOp::Upsert(materialized))?;
+        for (folder, devices) in &self.files {
+            for (device, paths) in devices {
+                for (path_key, record) in paths {
+                    let Some(mut materialized) = file_from_parts(folder, device, path_key, record)
+                    else {
+                        continue;
+                    };
+                    materialized.block_hashes = self.resolve_file_block_hashes(&materialized)?;
+                    Self::write_record(&mut file, &JournalOp::Upsert(materialized))?;
+                }
+            }
         }
         for tombstone in &self.deleted_tombstones {
             if let Some((folder, device, path)) = split_composite_key(tombstone) {
@@ -634,7 +641,7 @@ impl Store {
 
     pub(crate) fn stats(&self) -> StoreStats {
         StoreStats {
-            file_count: self.files.len(),
+            file_count: self.file_count,
             deleted_tombstone_count: self.deleted_tombstones.len(),
             estimated_memory_bytes: self.approx_memory_bytes,
             memory_budget_bytes: self.config.memory_budget_bytes(),
@@ -783,11 +790,81 @@ impl Store {
         Ok(())
     }
 
+    fn stored_for_key(&self, key: &str) -> Option<&StoredFileMetadata> {
+        let (folder, device, path_key) = split_composite_key_raw(key)?;
+        self.files.get(folder)?.get(device)?.get(path_key)
+    }
+
+    fn remove_stored_by_key(&mut self, key: &str) -> Option<StoredFileMetadata> {
+        let (folder, device, path_key) = split_composite_key_raw(key)?;
+        let mut remove_folder = false;
+        let removed = if let Some(device_store) = self.files.get_mut(folder) {
+            let mut remove_device = false;
+            let removed = if let Some(path_store) = device_store.get_mut(device) {
+                let removed = path_store.remove(path_key);
+                if path_store.is_empty() {
+                    remove_device = true;
+                }
+                removed
+            } else {
+                None
+            };
+            if remove_device {
+                device_store.remove(device);
+            }
+            if device_store.is_empty() {
+                remove_folder = true;
+            }
+            removed
+        } else {
+            None
+        };
+        if remove_folder {
+            self.files.remove(folder);
+        }
+        removed
+    }
+
+    fn insert_stored_by_key(
+        &mut self,
+        key: &str,
+        file: StoredFileMetadata,
+    ) -> Option<StoredFileMetadata> {
+        let (folder, device, path_key) = split_composite_key_raw(key)?;
+        Some(
+            self.files
+                .entry(folder.to_string())
+                .or_default()
+                .entry(device.to_string())
+                .or_default()
+                .insert(path_key.to_string(), file),
+        )
+        .flatten()
+    }
+
+    fn iter_all_entries<F>(&self, mut visit: F)
+    where
+        F: FnMut(&str, &str, &str, &StoredFileMetadata) -> bool,
+    {
+        for (folder, devices) in &self.files {
+            for (device, paths) in devices {
+                for (path_key, value) in paths {
+                    if !visit(folder, device, path_key, value) {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     fn apply_upsert(&mut self, key: String, file: StoredFileMetadata) {
-        if let Some(prev) = self.files.insert(key.clone(), file.clone()) {
+        let prev = self.insert_stored_by_key(&key, file.clone());
+        if let Some(prev) = prev {
             self.approx_memory_bytes = self
                 .approx_memory_bytes
                 .saturating_sub(estimate_entry_bytes(&key, &prev));
+        } else {
+            self.file_count = self.file_count.saturating_add(1);
         }
         self.approx_memory_bytes = self
             .approx_memory_bytes
@@ -1017,6 +1094,24 @@ fn apply_op(
     Ok(())
 }
 
+fn build_folder_store(flat_files: BTreeMap<String, StoredFileMetadata>) -> io::Result<FolderStore> {
+    let mut out: FolderStore = BTreeMap::new();
+    for (key, value) in flat_files {
+        let (folder, device, path_key) = split_composite_key_raw(&key).ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::InvalidData,
+                format!("invalid composite key in store state: {key}"),
+            )
+        })?;
+        out.entry(folder.to_string())
+            .or_default()
+            .entry(device.to_string())
+            .or_default()
+            .insert(path_key.to_string(), value);
+    }
+    Ok(out)
+}
+
 fn encode_op(op: &JournalOp) -> Vec<u8> {
     let line = match op {
         JournalOp::Upsert(file) => {
@@ -1226,22 +1321,23 @@ fn checksum(bytes: &[u8]) -> u32 {
 
 fn composite_key(folder: &str, device: &str, path: &str) -> String {
     let path_key = encode_path_key(path);
+    composite_key_from_path_key(folder, device, &path_key)
+}
+
+fn composite_key_from_path_key(folder: &str, device: &str, path_key: &str) -> String {
     format!("{folder}{KEY_SEP}{device}{KEY_SEP}{path_key}")
 }
 
-fn split_composite_key(key: &str) -> Option<(String, String, String)> {
+fn split_composite_key_raw(key: &str) -> Option<(&str, &str, &str)> {
     let (folder, rest) = key.split_once(KEY_SEP)?;
     let (device, path_key) = rest.split_once(KEY_SEP)?;
+    Some((folder, device, path_key))
+}
+
+fn split_composite_key(key: &str) -> Option<(String, String, String)> {
+    let (folder, device, path_key) = split_composite_key_raw(key)?;
     let path = decode_path_key(path_key)?;
     Some((folder.to_string(), device.to_string(), path))
-}
-
-fn folder_prefix(folder: &str) -> String {
-    format!("{folder}{KEY_SEP}")
-}
-
-fn folder_device_prefix(folder: &str, device: &str) -> String {
-    format!("{folder}{KEY_SEP}{device}{KEY_SEP}")
 }
 
 pub(crate) fn encode_path_key(path: &str) -> String {
@@ -1474,10 +1570,20 @@ fn stored_from_file(file: &FileMetadata) -> StoredFileMetadata {
 }
 
 fn file_from_entry(key: &str, stored: &StoredFileMetadata) -> Option<FileMetadata> {
-    let (folder, device, path) = split_composite_key(key)?;
+    let (folder, device, path_key) = split_composite_key_raw(key)?;
+    file_from_parts(folder, device, path_key, stored)
+}
+
+fn file_from_parts(
+    folder: &str,
+    device: &str,
+    path_key: &str,
+    stored: &StoredFileMetadata,
+) -> Option<FileMetadata> {
+    let path = decode_path_key(path_key)?;
     Some(FileMetadata {
-        folder,
-        device,
+        folder: folder.to_string(),
+        device: device.to_string(),
         path,
         sequence: stored.sequence,
         deleted: stored.deleted,
@@ -1811,8 +1917,7 @@ mod tests {
 
         let key = composite_key(folder, device, path);
         let stored = store
-            .files
-            .get(&key)
+            .stored_for_key(&key)
             .expect("stored entry should exist")
             .clone();
         let expected = key.len() + estimate_stored_file_bytes(&stored);
@@ -2145,7 +2250,7 @@ mod tests {
         store.upsert_file(file).expect("upsert");
 
         let key = composite_key("alpha", "local", "blob.bin");
-        let stored = store.files.get(&key).expect("stored entry");
+        let stored = store.stored_for_key(&key).expect("stored entry");
         match &stored.block_hashes {
             StoredBlockHashes::Ref(reference) => {
                 assert!(reference.len > 0);

@@ -73,10 +73,59 @@ struct StoredFileMetadata {
     deleted: bool,
     ignored: bool,
     local_flags: u32,
-    file_type: String,
+    file_type: CompactFileType,
     modified_ns: u64,
     size: u64,
-    block_hashes: Vec<String>,
+    block_hashes: StoredBlockHashes,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CompactFileType {
+    File,
+    Directory,
+    Symlink,
+    Other(String),
+}
+
+impl CompactFileType {
+    fn from_str(value: &str) -> Self {
+        match value {
+            "file" => Self::File,
+            "directory" => Self::Directory,
+            "symlink" => Self::Symlink,
+            other => Self::Other(other.to_string()),
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        match self {
+            Self::File => "file",
+            Self::Directory => "directory",
+            Self::Symlink => "symlink",
+            Self::Other(other) => other.as_str(),
+        }
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        match self {
+            Self::Other(other) => other.len(),
+            _ => 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BlockHashReference {
+    offset: u64,
+    len: u32,
+    checksum: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StoredBlockHashes {
+    None,
+    Ref(BlockHashReference),
+    Inline(Vec<String>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1259,11 +1308,14 @@ fn finalize_page(mut items: Vec<FileMetadata>, limit: usize) -> FilePage {
     FilePage { items, next_cursor }
 }
 
-fn in_memory_block_hash_shape(hashes: &[String]) -> Vec<String> {
-    if hashes.is_empty() {
-        Vec::new()
-    } else {
-        vec![format!("{BLOCK_BLOB_MARKER_PREFIX}0:0:0")]
+fn in_memory_block_hash_shape(hashes: &StoredBlockHashes) -> StoredBlockHashes {
+    match hashes {
+        StoredBlockHashes::None => StoredBlockHashes::None,
+        _ => StoredBlockHashes::Ref(BlockHashReference {
+            offset: 0,
+            len: 0,
+            checksum: 0,
+        }),
     }
 }
 
@@ -1377,16 +1429,47 @@ fn parse_block_blob_marker(marker: &str) -> Option<(u64, u32, u32)> {
     Some((offset, len, checksum))
 }
 
+fn marker_from_block_ref(reference: &BlockHashReference) -> String {
+    format!(
+        "{BLOCK_BLOB_MARKER_PREFIX}{}:{}:{}",
+        reference.offset, reference.len, reference.checksum
+    )
+}
+
+fn stored_block_hashes_from_runtime_hashes(hashes: &[String]) -> StoredBlockHashes {
+    if hashes.is_empty() {
+        return StoredBlockHashes::None;
+    }
+    if hashes.len() == 1 {
+        if let Some((offset, len, checksum)) = parse_block_blob_marker(&hashes[0]) {
+            return StoredBlockHashes::Ref(BlockHashReference {
+                offset,
+                len,
+                checksum,
+            });
+        }
+    }
+    StoredBlockHashes::Inline(hashes.to_vec())
+}
+
+fn runtime_hashes_from_stored_block_hashes(hashes: &StoredBlockHashes) -> Vec<String> {
+    match hashes {
+        StoredBlockHashes::None => Vec::new(),
+        StoredBlockHashes::Ref(reference) => vec![marker_from_block_ref(reference)],
+        StoredBlockHashes::Inline(values) => values.clone(),
+    }
+}
+
 fn stored_from_file(file: &FileMetadata) -> StoredFileMetadata {
     StoredFileMetadata {
         sequence: file.sequence,
         deleted: file.deleted,
         ignored: file.ignored,
         local_flags: file.local_flags,
-        file_type: file.file_type.clone(),
+        file_type: CompactFileType::from_str(&file.file_type),
         modified_ns: file.modified_ns,
         size: file.size,
-        block_hashes: file.block_hashes.clone(),
+        block_hashes: stored_block_hashes_from_runtime_hashes(&file.block_hashes),
     }
 }
 
@@ -1400,16 +1483,20 @@ fn file_from_entry(key: &str, stored: &StoredFileMetadata) -> Option<FileMetadat
         deleted: stored.deleted,
         ignored: stored.ignored,
         local_flags: stored.local_flags,
-        file_type: stored.file_type.clone(),
+        file_type: stored.file_type.as_str().to_string(),
         modified_ns: stored.modified_ns,
         size: stored.size,
-        block_hashes: stored.block_hashes.clone(),
+        block_hashes: runtime_hashes_from_stored_block_hashes(&stored.block_hashes),
     })
 }
 
 fn estimate_stored_file_bytes(file: &StoredFileMetadata) -> usize {
-    let hash_bytes: usize = file.block_hashes.iter().map(String::len).sum();
-    file.file_type.len() + hash_bytes + 64
+    let hash_bytes = match &file.block_hashes {
+        StoredBlockHashes::None => 0,
+        StoredBlockHashes::Ref(_) => std::mem::size_of::<BlockHashReference>(),
+        StoredBlockHashes::Inline(hashes) => hashes.iter().map(String::len).sum(),
+    };
+    file.file_type.estimated_bytes() + hash_bytes + 64
 }
 
 fn estimate_entry_bytes(key: &str, file: &StoredFileMetadata) -> usize {
@@ -1722,13 +1809,13 @@ mod tests {
             })
             .expect("upsert");
 
+        let key = composite_key(folder, device, path);
         let stored = store
-            .get_file(folder, device, path)
-            .expect("stored entry should exist");
-        let expected = composite_key(folder, device, path).len()
-            + stored.file_type.len()
-            + stored.block_hashes.iter().map(String::len).sum::<usize>()
-            + 64;
+            .files
+            .get(&key)
+            .expect("stored entry should exist")
+            .clone();
+        let expected = key.len() + estimate_stored_file_bytes(&stored);
 
         assert_eq!(store.stats().estimated_memory_bytes, expected);
 
@@ -2043,6 +2130,59 @@ mod tests {
                 .expect("file present");
             assert_eq!(materialized.block_hashes, expected);
         }
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn stored_entry_uses_compact_block_hash_reference() {
+        let root = temp_root("compact-block-ref");
+        let cfg = StoreConfig::new(&root).with_memory_cap_mb(50);
+        let mut store = Store::open(cfg).expect("open");
+
+        let mut file = meta("alpha", "blob.bin", 1);
+        file.block_hashes = vec!["h1".to_string(), "h2".to_string(), "h3".to_string()];
+        store.upsert_file(file).expect("upsert");
+
+        let key = composite_key("alpha", "local", "blob.bin");
+        let stored = store.files.get(&key).expect("stored entry");
+        match &stored.block_hashes {
+            StoredBlockHashes::Ref(reference) => {
+                assert!(reference.len > 0);
+                assert!(reference.checksum > 0);
+            }
+            other => panic!("expected compact block ref, got {other:?}"),
+        }
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn compact_file_type_preserves_unknown_values() {
+        let root = temp_root("compact-file-type");
+        let cfg = StoreConfig::new(&root).with_memory_cap_mb(50);
+        let mut store = Store::open(cfg).expect("open");
+
+        store
+            .upsert_file(FileMetadata {
+                folder: "alpha".to_string(),
+                device: "local".to_string(),
+                path: "custom.type".to_string(),
+                sequence: 1,
+                deleted: false,
+                ignored: false,
+                local_flags: 0,
+                file_type: "special".to_string(),
+                modified_ns: 1,
+                size: 1,
+                block_hashes: vec![],
+            })
+            .expect("upsert");
+
+        let roundtrip = store
+            .get_file("alpha", "local", "custom.type")
+            .expect("roundtrip file");
+        assert_eq!(roundtrip.file_type, "special");
 
         fs::remove_dir_all(root).expect("cleanup");
     }

@@ -10,6 +10,7 @@ use lz4_flex::{compress_prepend_size, decompress_size_prepended};
 use serde::{Deserialize, Serialize};
 
 const MAX_HEADER_BYTES: usize = 32 * 1024;
+const MAX_DECODED_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
 const COMPRESSION_THRESHOLD_BYTES: usize = 128;
 const MESSAGE_TYPE_HELLO: i32 = -1;
 
@@ -176,6 +177,13 @@ pub(crate) fn decode_frame(frame: &[u8]) -> Result<BepMessage, String> {
             .map_err(|err| format!("lz4 decompress payload: {err}"))?,
         other => return Err(format!("unknown message compression {other}")),
     };
+    if decoded_payload.len() > MAX_DECODED_PAYLOAD_BYTES {
+        return Err(format!(
+            "decompressed payload too large: {} > {}",
+            decoded_payload.len(),
+            MAX_DECODED_PAYLOAD_BYTES
+        ));
+    }
 
     let message: BepMessage = serde_json::from_slice(&decoded_payload)
         .map_err(|err| format!("decode message payload: {err}"))?;
@@ -270,6 +278,8 @@ pub(crate) fn message_name(message: &BepMessage) -> &'static str {
 mod tests {
     use super::*;
     use crate::bep_core::{Header, MessageCompression_MESSAGE_COMPRESSION_NONE};
+    use lz4_flex::compress_prepend_size;
+    use std::panic;
 
     fn parse_header(frame: &[u8]) -> Header {
         let header_len = u16::from_be_bytes([frame[0], frame[1]]) as usize;
@@ -343,5 +353,42 @@ mod tests {
         );
         let decoded = decode_frame(&frame).expect("decode");
         assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn decompressed_payload_size_is_capped() {
+        let oversized = vec![0x41_u8; MAX_DECODED_PAYLOAD_BYTES + 1];
+        let compressed = compress_prepend_size(&oversized);
+        let header = Header {
+            Type: MessageType_MESSAGE_TYPE_PING,
+            Compression: MessageCompression_MESSAGE_COMPRESSION_LZ4,
+        };
+        let header_bytes = serde_json::to_vec(&header).expect("encode header");
+        let mut frame = Vec::with_capacity(2 + header_bytes.len() + 4 + compressed.len());
+        frame.extend_from_slice(&(header_bytes.len() as u16).to_be_bytes());
+        frame.extend_from_slice(&header_bytes);
+        frame.extend_from_slice(&(compressed.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&compressed);
+
+        let err = decode_frame(&frame).expect_err("must reject oversized decompressed payload");
+        assert!(err.contains("decompressed payload too large"));
+    }
+
+    #[test]
+    fn decode_random_frames_never_panics() {
+        let mut seed: u64 = 0xA1B2_C3D4_E5F6_1020;
+        for _ in 0..512 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let len = ((seed >> 32) as usize) % 4096;
+            let mut data = vec![0_u8; len];
+            for byte in &mut data {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                *byte = (seed >> 56) as u8;
+            }
+            let result = panic::catch_unwind(|| {
+                let _ = decode_frame(&data);
+            });
+            assert!(result.is_ok(), "decode_frame panicked for len={len}");
+        }
     }
 }

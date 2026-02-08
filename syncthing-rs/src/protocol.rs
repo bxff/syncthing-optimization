@@ -119,6 +119,11 @@ pub(crate) fn run_message_exchange(messages: &[BepMessage]) -> Result<Vec<&'stat
         let event = event_from_message(message);
         match message {
             BepMessage::Request { id, .. } => {
+                if let Some(existing) = pending_request {
+                    return Err(format!(
+                        "request {id} received while request {existing} is still pending"
+                    ));
+                }
                 pending_request = Some(*id);
             }
             BepMessage::Response { id, .. } => {
@@ -215,5 +220,35 @@ mod tests {
         }
         let err = run_message_exchange(&messages).expect_err("must fail");
         assert!(err.contains("response id mismatch"));
+    }
+
+    #[test]
+    fn response_without_pending_request_fails_with_specific_error() {
+        let mut messages = default_exchange();
+        messages.retain(|message| !matches!(message, BepMessage::Request { .. }));
+        let err = run_message_exchange(&messages).expect_err("must fail");
+        assert!(err.contains("received without pending request"));
+    }
+
+    #[test]
+    fn second_request_while_pending_fails() {
+        let mut messages = default_exchange();
+        let response_idx = messages
+            .iter()
+            .position(|message| matches!(message, BepMessage::Response { .. }))
+            .expect("default exchange includes a response");
+        messages.insert(
+            response_idx,
+            BepMessage::Request {
+                id: 2,
+                folder: "default".to_string(),
+                name: "b.txt".to_string(),
+                offset: 0,
+                size: 1,
+                hash: "h3".to_string(),
+            },
+        );
+        let err = run_message_exchange(&messages).expect_err("must fail");
+        assert!(err.contains("is still pending"));
     }
 }

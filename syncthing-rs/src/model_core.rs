@@ -102,7 +102,8 @@ impl FolderCompletion {
             return;
         }
         let done = (self.GlobalItems - self.NeedItems - self.NeedDeletes).max(0);
-        self.CompletionPct = (done * 100 / self.GlobalItems).clamp(0, 100);
+        let pct = (done as i64 * 100 / self.GlobalItems as i64).clamp(0, 100);
+        self.CompletionPct = pct as i32;
     }
 
     pub(crate) fn Map(&self) -> BTreeMap<&'static str, Value> {
@@ -315,7 +316,7 @@ impl Default for model {
 }
 
 fn model_with_runtime(db_root: PathBuf, db_memory_cap_mb: usize) -> model {
-    let (sdb, runtime_init_warning) = open_runtime_db_with_fallback(&db_root, db_memory_cap_mb);
+    let sdb = open_runtime_db(&db_root, db_memory_cap_mb).unwrap_or_else(|err| panic!("{err}"));
     model {
         id: "local-device".to_string(),
         shortID: "local".to_string(),
@@ -349,39 +350,7 @@ fn model_with_runtime(db_root: PathBuf, db_memory_cap_mb: usize) -> model {
         mut_count: 0,
         sdb: Arc::new(RwLock::new(sdb)),
         evLogger: Vec::new(),
-        fatalChan: runtime_init_warning,
-    }
-}
-
-fn open_runtime_db_with_fallback(
-    db_root: &Path,
-    db_memory_cap_mb: usize,
-) -> (db::WalFreeDb, Option<String>) {
-    match open_runtime_db(db_root, db_memory_cap_mb) {
-        Ok(db) => return (db, None),
-        Err(primary_err) => {
-            let fallback_root = runtime_fallback_db_root();
-            match open_runtime_db(&fallback_root, db_memory_cap_mb) {
-                Ok(db) => {
-                    let msg = format!(
-                        "runtime db fallback engaged: primary={} error={} fallback={}",
-                        db_root.display(),
-                        primary_err,
-                        fallback_root.display(),
-                    );
-                    return (db, Some(msg));
-                }
-                Err(fallback_err) => {
-                    panic!(
-                        "failed to initialize runtime db (primary={} error={}; fallback={} error={})",
-                        db_root.display(),
-                        primary_err,
-                        fallback_root.display(),
-                        fallback_err,
-                    );
-                }
-            }
-        }
+        fatalChan: None,
     }
 }
 
@@ -394,17 +363,6 @@ fn open_runtime_db(db_root: &Path, db_memory_cap_mb: usize) -> Result<db::WalFre
     })?;
     db::WalFreeDb::open_runtime(db_root, db_memory_cap_mb)
         .map_err(|err| format!("failed to open runtime db at {}: {err}", db_root.display()))
-}
-
-fn runtime_fallback_db_root() -> PathBuf {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let suffix = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut root = std::env::temp_dir();
-    root.push(format!(
-        "syncthing-rs-db-fallback-{}-{suffix}",
-        std::process::id()
-    ));
-    root
 }
 
 fn runtime_db_root() -> PathBuf {
@@ -493,7 +451,8 @@ impl model {
     }
 
     pub(crate) fn FolderProgressBytesCompleted(&self, folder_id: &str) -> i64 {
-        self.folderCompletion(folder_id).GlobalBytes - self.folderCompletion(folder_id).NeedBytes
+        let completion = self.folderCompletion(folder_id);
+        completion.GlobalBytes - completion.NeedBytes
     }
 
     pub(crate) fn FolderStatistics(&self, folder_id: &str) -> BTreeMap<String, Value> {
@@ -1525,32 +1484,44 @@ pub(crate) fn readEncryptionToken(folder_id: &str) -> Result<String, String> {
     fs::read_to_string(path).map_err(|e| format!("{errEncryptionTokenRead}: {e}"))
 }
 
-pub(crate) fn readOffsetIntoBuf(
-    path: &PathBuf,
-    offset: u64,
-    len: usize,
-) -> Result<Vec<u8>, String> {
+pub(crate) fn readOffsetIntoBuf(path: &Path, offset: u64, len: usize) -> Result<Vec<u8>, String> {
     let mut f = fs::File::open(path).map_err(|e| format!("open: {e}"))?;
     f.seek(SeekFrom::Start(offset))
         .map_err(|e| format!("seek: {e}"))?;
     let mut buf = vec![0_u8; len];
-    let n = f.read(&mut buf).map_err(|e| format!("read: {e}"))?;
-    buf.truncate(n);
+    let mut read = 0usize;
+    while read < len {
+        let n = f.read(&mut buf[read..]).map_err(|e| format!("read: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        read += n;
+    }
+    buf.truncate(read);
     Ok(buf)
 }
 
 fn fileInfoFromIndexEntry(folder: &str, file: &IndexEntry) -> db::FileInfo {
+    let sequence = clamp_u64_to_i64(file.sequence);
     db::FileInfo {
         folder: folder.to_string(),
         path: file.path.clone(),
-        sequence: file.sequence as i64,
-        modified_ns: file.sequence as i64,
-        size: file.size as i64,
+        sequence,
+        modified_ns: sequence,
+        size: clamp_u64_to_i64(file.size),
         deleted: file.deleted,
         ignored: false,
         local_flags: 0,
         file_type: db::FileInfoType::File,
         block_hashes: file.block_hashes.clone(),
+    }
+}
+
+fn clamp_u64_to_i64(value: u64) -> i64 {
+    if value > i64::MAX as u64 {
+        i64::MAX
+    } else {
+        value as i64
     }
 }
 
@@ -1567,9 +1538,14 @@ fn safe_join_folder_relative(root: &Path, relative: &str) -> Result<PathBuf, Str
 }
 
 pub(crate) fn redactPathError(path: &str, err: &str) -> redactedError {
+    let redacted = if path.is_empty() {
+        err.to_string()
+    } else {
+        err.replace(path, "<redacted>")
+    };
     redactedError {
         error: err.to_string(),
-        redacted: path.replace(path, "<redacted>"),
+        redacted,
     }
 }
 
@@ -1675,7 +1651,7 @@ mod tests {
     }
 
     #[test]
-    fn new_model_with_runtime_falls_back_when_root_is_not_directory() {
+    fn new_model_with_runtime_fails_when_root_is_not_directory() {
         let root = std::env::temp_dir().join(format!(
             "syncthing-rs-runtime-invalid-root-{}",
             std::process::id()
@@ -1683,20 +1659,42 @@ mod tests {
         let _ = fs::remove_file(&root);
         fs::write(&root, b"not-a-directory").expect("create blocking file");
 
-        let m = NewModelWithRuntime(Some(root.clone()), Some(7));
-        let db = m.sdb.read().expect("lock db");
-        assert_ne!(db.runtime_root(), &root);
-        assert_eq!(db.memory_budget_bytes(), 7 * 1024 * 1024);
-        drop(db);
-
-        let warning = m
-            .fatalChan
-            .as_ref()
-            .expect("fallback warning should be recorded");
-        assert!(warning.contains("runtime db fallback engaged"));
-        assert!(warning.contains("failed to create runtime db root"));
+        let panic_result = std::panic::catch_unwind(|| {
+            let _ = NewModelWithRuntime(Some(root.clone()), Some(7));
+        });
+        assert!(panic_result.is_err(), "invalid runtime root must fail fast");
 
         let _ = fs::remove_file(root);
+    }
+
+    #[test]
+    fn file_info_from_index_entry_uses_sequence_for_modified_time() {
+        let entry = IndexEntry {
+            path: "a.txt".to_string(),
+            sequence: 42,
+            deleted: false,
+            size: 7,
+            block_hashes: vec!["h1".to_string()],
+        };
+        let info = fileInfoFromIndexEntry("default", &entry);
+        assert_eq!(info.sequence, 42);
+        assert_eq!(info.modified_ns, 42);
+        assert_eq!(info.size, 7);
+    }
+
+    #[test]
+    fn file_info_from_index_entry_clamps_large_numbers() {
+        let entry = IndexEntry {
+            path: "large.bin".to_string(),
+            sequence: u64::MAX,
+            deleted: false,
+            size: u64::MAX,
+            block_hashes: Vec::new(),
+        };
+        let info = fileInfoFromIndexEntry("default", &entry);
+        assert_eq!(info.sequence, i64::MAX);
+        assert_eq!(info.modified_ns, i64::MAX);
+        assert_eq!(info.size, i64::MAX);
     }
 
     #[test]

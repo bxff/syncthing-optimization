@@ -722,6 +722,7 @@ impl Store {
                 )?;
             }
         }
+        block_blob.sync_data()?;
 
         let approx_bytes = files
             .iter()
@@ -1062,7 +1063,8 @@ fn apply_op(
 ) -> io::Result<()> {
     match op {
         JournalOp::Upsert(mut file) => {
-            file.block_hashes = spill_block_hashes_to_writer(block_blob, &file.block_hashes)?;
+            file.block_hashes =
+                spill_block_hashes_to_writer(block_blob, &file.block_hashes, false)?;
             let key = composite_key(&file.folder, &file.device, &file.path);
             files.insert(key.clone(), stored_from_file(&file));
             if tombstone_set.remove(&key) {
@@ -1420,12 +1422,13 @@ fn spill_block_hashes(block_blob_path: &Path, hashes: &[String]) -> io::Result<V
         .create(true)
         .append(true)
         .open(block_blob_path)?;
-    spill_block_hashes_to_writer(&mut blob, hashes)
+    spill_block_hashes_to_writer(&mut blob, hashes, true)
 }
 
 fn spill_block_hashes_to_writer(
     block_blob: &mut File,
     hashes: &[String],
+    sync_data: bool,
 ) -> io::Result<Vec<String>> {
     if hashes.is_empty() {
         return Ok(Vec::new());
@@ -1452,7 +1455,9 @@ fn spill_block_hashes_to_writer(
     block_blob.write_all(&len.to_le_bytes())?;
     block_blob.write_all(&checksum.to_le_bytes())?;
     block_blob.write_all(&payload)?;
-    block_blob.sync_data()?;
+    if sync_data {
+        block_blob.sync_data()?;
+    }
 
     Ok(vec![format!(
         "{BLOCK_BLOB_MARKER_PREFIX}{offset}:{len}:{checksum}"

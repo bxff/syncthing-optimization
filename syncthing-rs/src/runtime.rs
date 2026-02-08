@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
@@ -231,13 +231,13 @@ pub(crate) fn parse_daemon_args(args: &[String]) -> Result<DaemonConfig, String>
 }
 
 pub(crate) fn run_daemon(config: DaemonConfig) -> Result<(), String> {
-    let model = Arc::new(Mutex::new(NewModelWithRuntime(
+    let model = Arc::new(RwLock::new(NewModelWithRuntime(
         config.db_root.as_ref().map(PathBuf::from),
         config.memory_max_mb,
     )));
     {
         let mut guard = model
-            .lock()
+            .write()
             .map_err(|_| "model lock poisoned".to_string())?;
         for folder in &config.folders {
             guard.newFolder(newFolderConfiguration(&folder.id, &folder.path));
@@ -248,13 +248,13 @@ pub(crate) fn run_daemon(config: DaemonConfig) -> Result<(), String> {
     let shutdown_requested = Arc::new(AtomicBool::new(false));
     if let Some(api_addr) = config.api_listen_addr.as_ref() {
         let local_id = model
-            .lock()
+            .read()
             .map_err(|_| "model lock poisoned".to_string())?
             .id
             .clone();
         let runtime = DaemonApiRuntime {
             model: model.clone(),
-            state: Arc::new(Mutex::new(ApiRuntimeState::new(&local_id))),
+            state: Arc::new(RwLock::new(ApiRuntimeState::new(&local_id))),
             active_peers: active_peers.clone(),
             max_peers: config.max_peers,
             start_time: SystemTime::now(),
@@ -302,8 +302,8 @@ fn load_runtime_config(path: &str) -> Result<RuntimeConfigFile, String> {
 
 #[derive(Clone)]
 struct DaemonApiRuntime {
-    model: Arc<Mutex<model>>,
-    state: Arc<Mutex<ApiRuntimeState>>,
+    model: Arc<RwLock<model>>,
+    state: Arc<RwLock<ApiRuntimeState>>,
     active_peers: Arc<AtomicUsize>,
     max_peers: usize,
     start_time: SystemTime,
@@ -426,7 +426,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
     if let Some(folder_id) = path_param(path, "/rest/config/folders/") {
         return match method {
             Method::Get => {
-                let guard = match runtime.model.lock() {
+                let guard = match runtime.model.read() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "model lock poisoned"),
                 };
@@ -436,7 +436,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 }
             }
             Method::Put | Method::Patch => {
-                let mut guard = match runtime.model.lock() {
+                let mut guard = match runtime.model.write() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "model lock poisoned"),
                 };
@@ -516,7 +516,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
     if let Some(device_id) = path_param(path, "/rest/config/devices/") {
         return match method {
             Method::Get => {
-                let state = match runtime.state.lock() {
+                let state = match runtime.state.read() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "api state lock poisoned"),
                 };
@@ -526,7 +526,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 }
             }
             Method::Put | Method::Patch => {
-                let mut state = match runtime.state.lock() {
+                let mut state = match runtime.state.write() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "api state lock poisoned"),
                 };
@@ -569,7 +569,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 ApiReply::json(200, json!({"saved": true, "device": cfg}))
             }
             Method::Delete => {
-                let mut state = match runtime.state.lock() {
+                let mut state = match runtime.state.write() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "api state lock poisoned"),
                 };
@@ -625,7 +625,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 .get("user")
                 .cloned()
                 .unwrap_or_else(|| "anonymous".to_string());
-            let mut state = match runtime.state.lock() {
+            let mut state = match runtime.state.write() {
                 Ok(guard) => guard,
                 Err(_) => return make_api_error(500, "api state lock poisoned"),
             };
@@ -640,7 +640,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 .get("user")
                 .cloned()
                 .unwrap_or_else(|| "anonymous".to_string());
-            let mut state = match runtime.state.lock() {
+            let mut state = match runtime.state.write() {
                 Ok(guard) => guard,
                 Err(_) => return make_api_error(500, "api state lock poisoned"),
             };
@@ -683,7 +683,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             if method != &Method::Get {
                 return make_api_error(405, "method not allowed");
             }
-            let guard = match runtime.model.lock() {
+            let guard = match runtime.model.read() {
                 Ok(guard) => guard,
                 Err(_) => return make_api_error(500, "model lock poisoned"),
             };
@@ -740,7 +740,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         }
         "/rest/system/error" => match method {
             Method::Get => {
-                let state = match runtime.state.lock() {
+                let state = match runtime.state.read() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "api state lock poisoned"),
                 };
@@ -756,7 +756,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 let Some(message) = params.get("message") else {
                     return make_api_error(400, "missing message query parameter");
                 };
-                let mut state = match runtime.state.lock() {
+                let mut state = match runtime.state.write() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "api state lock poisoned"),
                 };
@@ -772,7 +772,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             if method != &Method::Post {
                 return make_api_error(405, "method not allowed");
             }
-            let mut state = match runtime.state.lock() {
+            let mut state = match runtime.state.write() {
                 Ok(guard) => guard,
                 Err(_) => return make_api_error(500, "api state lock poisoned"),
             };
@@ -783,7 +783,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             if method != &Method::Get {
                 return make_api_error(405, "method not allowed");
             }
-            let state = match runtime.state.lock() {
+            let state = match runtime.state.read() {
                 Ok(guard) => guard,
                 Err(_) => return make_api_error(500, "api state lock poisoned"),
             };
@@ -798,7 +798,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         }
         "/rest/system/loglevels" => match method {
             Method::Get => {
-                let state = match runtime.state.lock() {
+                let state = match runtime.state.read() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "api state lock poisoned"),
                 };
@@ -810,7 +810,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 )
             }
             Method::Post => {
-                let mut state = match runtime.state.lock() {
+                let mut state = match runtime.state.write() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "api state lock poisoned"),
                 };
@@ -859,7 +859,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 }
             } else {
                 let folder_ids = {
-                    let guard = match runtime.model.lock() {
+                    let guard = match runtime.model.read() {
                         Ok(guard) => guard,
                         Err(_) => return make_api_error(500, "model lock poisoned"),
                     };
@@ -906,7 +906,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             let pause = path.ends_with("/pause");
             let mut touched = Vec::new();
             {
-                let mut state = match runtime.state.lock() {
+                let mut state = match runtime.state.write() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "api state lock poisoned"),
                 };
@@ -967,7 +967,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             let section = path.trim_start_matches("/rest/config/");
             match method {
                 Method::Get => {
-                    let state = match runtime.state.lock() {
+                    let state = match runtime.state.read() {
                         Ok(guard) => guard,
                         Err(_) => return make_api_error(500, "api state lock poisoned"),
                     };
@@ -980,7 +980,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     ApiReply::json(200, payload)
                 }
                 Method::Put | Method::Patch => {
-                    let mut state = match runtime.state.lock() {
+                    let mut state = match runtime.state.write() {
                         Ok(guard) => guard,
                         Err(_) => return make_api_error(500, "api state lock poisoned"),
                     };
@@ -1008,7 +1008,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             let folder_section = path.ends_with("/folder");
             match method {
                 Method::Get => {
-                    let state = match runtime.state.lock() {
+                    let state = match runtime.state.read() {
                         Ok(guard) => guard,
                         Err(_) => return make_api_error(500, "api state lock poisoned"),
                     };
@@ -1020,7 +1020,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     ApiReply::json(200, payload)
                 }
                 Method::Put | Method::Patch => {
-                    let mut state = match runtime.state.lock() {
+                    let mut state = match runtime.state.write() {
                         Ok(guard) => guard,
                         Err(_) => return make_api_error(500, "api state lock poisoned"),
                     };
@@ -1047,14 +1047,14 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         }
         "/rest/config/defaults/ignores" => match method {
             Method::Get => {
-                let state = match runtime.state.lock() {
+                let state = match runtime.state.read() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "api state lock poisoned"),
                 };
                 ApiReply::json(200, json!({"lines": state.default_ignores}))
             }
             Method::Put => {
-                let mut state = match runtime.state.lock() {
+                let mut state = match runtime.state.write() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "api state lock poisoned"),
                 };
@@ -1116,7 +1116,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                         ApiReply::json(200, payload)
                     }
                     Err(ApiConfigError::Conflict(_)) if method == &Method::Put => {
-                        let mut guard = match runtime.model.lock() {
+                        let mut guard = match runtime.model.write() {
                             Ok(guard) => guard,
                             Err(_) => return make_api_error(500, "model lock poisoned"),
                         };
@@ -1161,7 +1161,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         },
         "/rest/config/devices" => match method {
             Method::Get => {
-                let state = match runtime.state.lock() {
+                let state = match runtime.state.read() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "api state lock poisoned"),
                 };
@@ -1173,7 +1173,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 let Some(device_id) = params.get("id").or_else(|| params.get("deviceID")) else {
                     return make_api_error(400, "missing id query parameter");
                 };
-                let mut state = match runtime.state.lock() {
+                let mut state = match runtime.state.write() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "api state lock poisoned"),
                 };
@@ -1199,7 +1199,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         },
         "/rest/cluster/pending/devices" => match method {
             Method::Get => {
-                let guard = match runtime.model.lock() {
+                let guard = match runtime.model.read() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "model lock poisoned"),
                 };
@@ -1210,7 +1210,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 let Some(device) = params.get("device") else {
                     return make_api_error(400, "missing device query parameter");
                 };
-                let mut guard = match runtime.model.lock() {
+                let mut guard = match runtime.model.write() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "model lock poisoned"),
                 };
@@ -1221,7 +1221,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         },
         "/rest/cluster/pending/folders" => match method {
             Method::Get => {
-                let guard = match runtime.model.lock() {
+                let guard = match runtime.model.read() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "model lock poisoned"),
                 };
@@ -1232,7 +1232,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 let Some(folder) = params.get("folder") else {
                     return make_api_error(400, "missing folder query parameter");
                 };
-                let mut guard = match runtime.model.lock() {
+                let mut guard = match runtime.model.write() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "model lock poisoned"),
                 };
@@ -1267,7 +1267,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             if method != &Method::Get {
                 return make_api_error(405, "method not allowed");
             }
-            let guard = match runtime.model.lock() {
+            let guard = match runtime.model.read() {
                 Ok(guard) => guard,
                 Err(_) => return make_api_error(500, "model lock poisoned"),
             };
@@ -1281,7 +1281,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             if method != &Method::Get {
                 return make_api_error(405, "method not allowed");
             }
-            let guard = match runtime.model.lock() {
+            let guard = match runtime.model.read() {
                 Ok(guard) => guard,
                 Err(_) => return make_api_error(500, "model lock poisoned"),
             };
@@ -1309,7 +1309,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             if method != &Method::Get {
                 return make_api_error(405, "method not allowed");
             }
-            let guard = match runtime.model.lock() {
+            let guard = match runtime.model.read() {
                 Ok(guard) => guard,
                 Err(_) => return make_api_error(500, "model lock poisoned"),
             };
@@ -1344,7 +1344,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             let Some(folder) = params.get("folder") else {
                 return make_api_error(400, "missing folder query parameter");
             };
-            let guard = match runtime.model.lock() {
+            let guard = match runtime.model.read() {
                 Ok(guard) => guard,
                 Err(_) => return make_api_error(500, "model lock poisoned"),
             };
@@ -1366,7 +1366,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 let Some(folder) = params.get("folder") else {
                     return make_api_error(400, "missing folder query parameter");
                 };
-                let guard = match runtime.model.lock() {
+                let guard = match runtime.model.read() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "model lock poisoned"),
                 };
@@ -1377,7 +1377,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 let Some(folder) = params.get("folder") else {
                     return make_api_error(400, "missing folder query parameter");
                 };
-                let mut guard = match runtime.model.lock() {
+                let mut guard = match runtime.model.write() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "model lock poisoned"),
                 };
@@ -1597,7 +1597,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                let mut guard = match runtime.model.lock() {
+                let mut guard = match runtime.model.write() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "model lock poisoned"),
                 };
@@ -1933,7 +1933,7 @@ fn make_api_error(status: u16, message: impl Into<String>) -> ApiReply {
 }
 
 fn append_event(runtime: &DaemonApiRuntime, event_type: &str, data: Value, disk: bool) {
-    let Ok(mut state) = runtime.state.lock() else {
+    let Ok(mut state) = runtime.state.write() else {
         return;
     };
     let next_id = state.event_log.len() as u64 + 1;
@@ -1950,7 +1950,7 @@ fn append_event(runtime: &DaemonApiRuntime, event_type: &str, data: Value, disk:
 }
 
 fn api_events(runtime: &DaemonApiRuntime, disk_only: bool, since: u64, limit: usize) -> ApiReply {
-    let state = match runtime.state.lock() {
+    let state = match runtime.state.read() {
         Ok(guard) => guard,
         Err(_) => return make_api_error(500, "api state lock poisoned"),
     };
@@ -1979,7 +1979,7 @@ fn build_config_document(runtime: &DaemonApiRuntime) -> Result<Value, String> {
     let (folders, local_id) = {
         let guard = runtime
             .model
-            .lock()
+            .read()
             .map_err(|_| "model lock poisoned".to_string())?;
         let mut folders = guard
             .folderCfgs
@@ -1991,7 +1991,7 @@ fn build_config_document(runtime: &DaemonApiRuntime) -> Result<Value, String> {
     };
     let state = runtime
         .state
-        .lock()
+        .read()
         .map_err(|_| "api state lock poisoned".to_string())?;
     let mut devices = state.device_configs.values().cloned().collect::<Vec<_>>();
     if !state.device_configs.contains_key(&local_id) {
@@ -2042,7 +2042,7 @@ fn system_status(runtime: &DaemonApiRuntime) -> Result<Value, String> {
     let (my_id, db_estimated_bytes, db_budget_bytes, folder_count) = {
         let guard = runtime
             .model
-            .lock()
+            .read()
             .map_err(|_| "model lock poisoned".to_string())?;
         let db = guard
             .sdb
@@ -2072,7 +2072,7 @@ fn system_status(runtime: &DaemonApiRuntime) -> Result<Value, String> {
 fn system_connections(runtime: &DaemonApiRuntime) -> Result<Value, String> {
     let guard = runtime
         .model
-        .lock()
+        .read()
         .map_err(|_| "model lock poisoned".to_string())?;
     let mut connections = BTreeMap::new();
     for (device, conn) in &guard.connections {
@@ -2111,7 +2111,7 @@ enum ApiConfigError {
 fn folder_status(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiFolderStatusError> {
     let guard = runtime
         .model
-        .lock()
+        .read()
         .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
     if !guard.folderCfgs.contains_key(folder) {
         return Err(ApiFolderStatusError::MissingFolder);
@@ -2145,7 +2145,7 @@ fn folder_completion(
 ) -> Result<Value, ApiFolderStatusError> {
     let guard = runtime
         .model
-        .lock()
+        .read()
         .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
     if !guard.folderCfgs.contains_key(folder) {
         return Err(ApiFolderStatusError::MissingFolder);
@@ -2173,7 +2173,7 @@ fn folder_file(
 ) -> Result<Value, ApiFolderStatusError> {
     let guard = runtime
         .model
-        .lock()
+        .read()
         .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
     if !guard.folderCfgs.contains_key(folder) {
         return Err(ApiFolderStatusError::MissingFolder);
@@ -2221,7 +2221,7 @@ fn folder_local_changed(
 ) -> Result<Value, ApiFolderStatusError> {
     let guard = runtime
         .model
-        .lock()
+        .read()
         .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
     if !guard.folderCfgs.contains_key(folder) {
         return Err(ApiFolderStatusError::MissingFolder);
@@ -2241,7 +2241,7 @@ fn folder_remote_need(
 ) -> Result<Value, ApiFolderStatusError> {
     let guard = runtime
         .model
-        .lock()
+        .read()
         .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
     if !guard.folderCfgs.contains_key(folder) {
         return Err(ApiFolderStatusError::MissingFolder);
@@ -2270,7 +2270,7 @@ fn folder_remote_need(
 fn folder_jobs(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiFolderStatusError> {
     let guard = runtime
         .model
-        .lock()
+        .read()
         .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
     if !guard.folderCfgs.contains_key(folder) {
         return Err(ApiFolderStatusError::MissingFolder);
@@ -2292,7 +2292,7 @@ fn folder_jobs(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiFol
 fn bring_to_front(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiFolderStatusError> {
     let mut guard = runtime
         .model
-        .lock()
+        .write()
         .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
     guard.BringToFront(folder).map_err(|err| {
         if err.contains("folder missing") {
@@ -2311,7 +2311,7 @@ fn bring_to_front(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, Api
 fn folder_ignores(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiFolderStatusError> {
     let guard = runtime
         .model
-        .lock()
+        .read()
         .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
     if !guard.folderCfgs.contains_key(folder) {
         return Err(ApiFolderStatusError::MissingFolder);
@@ -2331,7 +2331,7 @@ fn scan_folder(
 ) -> Result<Value, ApiFolderStatusError> {
     let mut guard = runtime
         .model
-        .lock()
+        .write()
         .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
     if !guard.folderCfgs.contains_key(folder) {
         return Err(ApiFolderStatusError::MissingFolder);
@@ -2366,7 +2366,7 @@ fn scan_folder(
 fn pull_folder(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiFolderStatusError> {
     let mut guard = runtime
         .model
-        .lock()
+        .write()
         .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
     if !guard.folderCfgs.contains_key(folder) {
         return Err(ApiFolderStatusError::MissingFolder);
@@ -2409,7 +2409,7 @@ fn override_folder(
 ) -> Result<Value, ApiFolderStatusError> {
     let mut guard = runtime
         .model
-        .lock()
+        .write()
         .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
     guard.Override(folder).map_err(|err| {
         if err.contains("folder missing") {
@@ -2428,7 +2428,7 @@ fn override_folder(
 fn revert_folder(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiFolderStatusError> {
     let mut guard = runtime
         .model
-        .lock()
+        .write()
         .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
     guard.Revert(folder).map_err(|err| {
         if err.contains("folder missing") {
@@ -2447,7 +2447,7 @@ fn revert_folder(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiF
 fn reset_folder(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiFolderStatusError> {
     let mut guard = runtime
         .model
-        .lock()
+        .write()
         .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
     if !guard.folderCfgs.contains_key(folder) {
         return Err(ApiFolderStatusError::MissingFolder);
@@ -2474,7 +2474,7 @@ fn browse_local_files(
 ) -> Result<Value, ApiFolderStatusError> {
     let guard = runtime
         .model
-        .lock()
+        .read()
         .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
     if !guard.folderCfgs.contains_key(folder) {
         return Err(ApiFolderStatusError::MissingFolder);
@@ -2516,7 +2516,7 @@ fn browse_needed_files(
 ) -> Result<Value, ApiFolderStatusError> {
     let guard = runtime
         .model
-        .lock()
+        .read()
         .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
     if !guard.folderCfgs.contains_key(folder) {
         return Err(ApiFolderStatusError::MissingFolder);
@@ -2553,7 +2553,7 @@ fn browse_needed_files(
 fn list_config_folders(runtime: &DaemonApiRuntime) -> Result<Value, ApiConfigError> {
     let guard = runtime
         .model
-        .lock()
+        .read()
         .map_err(|_| ApiConfigError::Internal("model lock poisoned".to_string()))?;
     let mut folders = guard
         .folderCfgs
@@ -2592,7 +2592,7 @@ fn add_config_folder(
     }
     let mut guard = runtime
         .model
-        .lock()
+        .write()
         .map_err(|_| ApiConfigError::Internal("model lock poisoned".to_string()))?;
     if guard.folderCfgs.contains_key(folder_id) {
         return Err(ApiConfigError::Conflict(folder_id.to_string()));
@@ -2614,7 +2614,7 @@ fn remove_config_folder(
 ) -> Result<Value, ApiConfigError> {
     let mut guard = runtime
         .model
-        .lock()
+        .write()
         .map_err(|_| ApiConfigError::Internal("model lock poisoned".to_string()))?;
     if !guard.folderCfgs.contains_key(folder_id) {
         return Err(ApiConfigError::Missing(folder_id.to_string()));
@@ -2635,7 +2635,7 @@ fn restart_config_folder(
 ) -> Result<Value, ApiConfigError> {
     let mut guard = runtime
         .model
-        .lock()
+        .write()
         .map_err(|_| ApiConfigError::Internal("model lock poisoned".to_string()))?;
     guard.restartFolder(folder_id).map_err(|err| {
         if err.contains("folder missing") {
@@ -2652,7 +2652,7 @@ fn restart_config_folder(
 
 fn run_daemon_with_listener(
     listener: TcpListener,
-    model: Arc<Mutex<model>>,
+    model: Arc<RwLock<model>>,
     once: bool,
     max_peers: usize,
     active_peers: Arc<AtomicUsize>,
@@ -2731,7 +2731,7 @@ impl Drop for ActivePeerGuard {
 pub(crate) fn handle_peer_connection(
     stream: &mut TcpStream,
     peer_id: &str,
-    model: &Arc<Mutex<model>>,
+    model: &Arc<RwLock<model>>,
 ) -> Result<(), String> {
     let mut seen_hello = false;
     loop {
@@ -2750,7 +2750,7 @@ pub(crate) fn handle_peer_connection(
         }
         let outbound = {
             let mut guard = model
-                .lock()
+                .write()
                 .map_err(|_| "model lock poisoned".to_string())?;
             guard.ApplyBepMessage(peer_id, &inbound)?
         };
@@ -2838,13 +2838,13 @@ pub(crate) fn run_parity_probe(with_peer_interop: bool) -> Result<(), String> {
         .map_err(|err| format!("seed parity probe file: {err}"))?;
 
     let result = (|| {
-        let model = Arc::new(Mutex::new(NewModelWithRuntime(
+        let model = Arc::new(RwLock::new(NewModelWithRuntime(
             Some(root.join("db")),
             Some(64),
         )));
         {
             let mut guard = model
-                .lock()
+                .write()
                 .map_err(|_| "model lock poisoned".to_string())?;
             guard.newFolder(newFolderConfiguration(
                 DEFAULT_FOLDER_ID,
@@ -2853,7 +2853,7 @@ pub(crate) fn run_parity_probe(with_peer_interop: bool) -> Result<(), String> {
         }
         let runtime = DaemonApiRuntime {
             model: model.clone(),
-            state: Arc::new(Mutex::new(ApiRuntimeState::new("local-device"))),
+            state: Arc::new(RwLock::new(ApiRuntimeState::new("local-device"))),
             active_peers: Arc::new(AtomicUsize::new(0)),
             max_peers: DEFAULT_MAX_PEERS,
             start_time: SystemTime::now(),
@@ -2912,13 +2912,13 @@ pub(crate) fn run_api_surface_probe() -> Result<Vec<String>, String> {
     let docs_path = root.join("docs");
 
     let result = (|| {
-        let model = Arc::new(Mutex::new(NewModelWithRuntime(
+        let model = Arc::new(RwLock::new(NewModelWithRuntime(
             Some(root.join("db")),
             Some(64),
         )));
         {
             let mut guard = model
-                .lock()
+                .write()
                 .map_err(|_| "model lock poisoned".to_string())?;
             guard.newFolder(newFolderConfiguration(
                 DEFAULT_FOLDER_ID,
@@ -2927,7 +2927,7 @@ pub(crate) fn run_api_surface_probe() -> Result<Vec<String>, String> {
         }
         let runtime = DaemonApiRuntime {
             model,
-            state: Arc::new(Mutex::new(ApiRuntimeState::new("local-device"))),
+            state: Arc::new(RwLock::new(ApiRuntimeState::new("local-device"))),
             active_peers: Arc::new(AtomicUsize::new(0)),
             max_peers: DEFAULT_MAX_PEERS,
             start_time: SystemTime::now(),
@@ -3587,7 +3587,7 @@ fn ensure_api_ok(reply: &ApiReply) -> Result<Value, String> {
         .map_err(|err| format!("decode probe api response payload: {err}"))
 }
 
-fn run_parity_peer_probe(model: &Arc<Mutex<model>>) -> Result<(), String> {
+fn run_parity_peer_probe(model: &Arc<RwLock<model>>) -> Result<(), String> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .map_err(|err| format!("bind parity peer probe listener: {err}"))?;
     let addr = listener
@@ -3840,14 +3840,14 @@ mod tests {
     }
 
     fn test_api_runtime(
-        model: Arc<Mutex<model>>,
+        model: Arc<RwLock<model>>,
         _folders: Vec<FolderSpec>,
         active_peers: usize,
     ) -> DaemonApiRuntime {
-        let local_id = model.lock().expect("lock model").id.clone();
+        let local_id = model.read().expect("lock model").id.clone();
         let runtime = DaemonApiRuntime {
             model,
-            state: Arc::new(Mutex::new(ApiRuntimeState::new(&local_id))),
+            state: Arc::new(RwLock::new(ApiRuntimeState::new(&local_id))),
             active_peers: Arc::new(AtomicUsize::new(active_peers)),
             max_peers: 16,
             start_time: SystemTime::now(),
@@ -3859,7 +3859,7 @@ mod tests {
 
     #[test]
     fn api_ping_returns_pong() {
-        let runtime = test_api_runtime(Arc::new(Mutex::new(NewModel())), Vec::new(), 3);
+        let runtime = test_api_runtime(Arc::new(RwLock::new(NewModel())), Vec::new(), 3);
 
         let reply = build_api_response(&Method::Get, "/rest/system/ping", &runtime);
         assert_eq!(reply.status_code, StatusCode(200));
@@ -3869,7 +3869,7 @@ mod tests {
 
     #[test]
     fn api_shutdown_endpoint_sets_shutdown_flag() {
-        let runtime = test_api_runtime(Arc::new(Mutex::new(NewModel())), Vec::new(), 0);
+        let runtime = test_api_runtime(Arc::new(RwLock::new(NewModel())), Vec::new(), 0);
         assert!(!runtime.shutdown_requested.load(Ordering::Acquire));
 
         let reply = build_api_response(&Method::Post, "/rest/system/shutdown", &runtime);
@@ -3880,9 +3880,9 @@ mod tests {
     #[test]
     fn api_status_reports_memory_and_peer_fields() {
         let root = temp_root("api-system-status");
-        let model = Arc::new(Mutex::new(NewModel()));
+        let model = Arc::new(RwLock::new(NewModel()));
         {
-            let mut guard = model.lock().expect("lock");
+            let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
         }
         let runtime = test_api_runtime(model, Vec::new(), 2);
@@ -3899,7 +3899,7 @@ mod tests {
     #[test]
     fn api_db_status_requires_folder_and_rejects_unknown() {
         let runtime = test_api_runtime(
-            Arc::new(Mutex::new(NewModel())),
+            Arc::new(RwLock::new(NewModel())),
             vec![FolderSpec {
                 id: "default".to_string(),
                 path: "/tmp/default".to_string(),
@@ -3917,12 +3917,12 @@ mod tests {
     #[test]
     fn api_db_status_returns_folder_metrics() {
         let root = temp_root("api-db-status");
-        let model = Arc::new(Mutex::new(NewModelWithRuntime(
+        let model = Arc::new(RwLock::new(NewModelWithRuntime(
             Some(root.clone()),
             Some(50),
         )));
         {
-            let mut guard = model.lock().expect("lock");
+            let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
         }
 
@@ -3946,7 +3946,7 @@ mod tests {
     #[test]
     fn api_system_connections_returns_empty_map() {
         let runtime = test_api_runtime(
-            Arc::new(Mutex::new(NewModel())),
+            Arc::new(RwLock::new(NewModel())),
             vec![FolderSpec {
                 id: "default".to_string(),
                 path: "/tmp/default".to_string(),
@@ -3964,12 +3964,12 @@ mod tests {
     fn api_db_scan_and_jobs_endpoints_work() {
         let root = temp_root("api-db-scan-jobs");
         fs::write(root.join("a.txt"), b"hello").expect("write");
-        let model = Arc::new(Mutex::new(NewModelWithRuntime(
+        let model = Arc::new(RwLock::new(NewModelWithRuntime(
             Some(root.clone()),
             Some(50),
         )));
         {
-            let mut guard = model.lock().expect("lock");
+            let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
         }
 
@@ -4006,12 +4006,12 @@ mod tests {
     #[test]
     fn api_db_pull_endpoint_applies_remote_file() {
         let root = temp_root("api-db-pull");
-        let model = Arc::new(Mutex::new(NewModelWithRuntime(
+        let model = Arc::new(RwLock::new(NewModelWithRuntime(
             Some(root.clone()),
             Some(50),
         )));
         {
-            let mut guard = model.lock().expect("lock");
+            let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
             guard
                 .Index("default", &[file_info("remote.bin", 1, 9)])
@@ -4040,12 +4040,12 @@ mod tests {
     #[test]
     fn api_db_browse_returns_ordered_pages() {
         let root = temp_root("api-db-browse");
-        let model = Arc::new(Mutex::new(NewModelWithRuntime(
+        let model = Arc::new(RwLock::new(NewModelWithRuntime(
             Some(root.clone()),
             Some(50),
         )));
         {
-            let mut guard = model.lock().expect("lock");
+            let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
             let mut db = guard.sdb.lock().expect("db lock");
             db.update(
@@ -4091,12 +4091,12 @@ mod tests {
     #[test]
     fn api_db_file_endpoint_returns_local_and_global_entries() {
         let root = temp_root("api-db-file");
-        let model = Arc::new(Mutex::new(NewModelWithRuntime(
+        let model = Arc::new(RwLock::new(NewModelWithRuntime(
             Some(root.clone()),
             Some(50),
         )));
         {
-            let mut guard = model.lock().expect("lock");
+            let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
             {
                 let mut db = guard.sdb.lock().expect("db lock");
@@ -4152,12 +4152,12 @@ mod tests {
     #[test]
     fn api_db_completion_localchanged_and_remoteneed_endpoints_work() {
         let root = temp_root("api-db-completion-localchanged-remoteneed");
-        let model = Arc::new(Mutex::new(NewModelWithRuntime(
+        let model = Arc::new(RwLock::new(NewModelWithRuntime(
             Some(root.clone()),
             Some(50),
         )));
         {
-            let mut guard = model.lock().expect("lock");
+            let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
             {
                 let mut db = guard.sdb.lock().expect("db lock");
@@ -4226,12 +4226,12 @@ mod tests {
     #[test]
     fn api_db_override_and_revert_endpoints_work() {
         let root = temp_root("api-db-override-revert");
-        let model = Arc::new(Mutex::new(NewModelWithRuntime(
+        let model = Arc::new(RwLock::new(NewModelWithRuntime(
             Some(root.clone()),
             Some(50),
         )));
         {
-            let mut guard = model.lock().expect("lock");
+            let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
         }
         let runtime = test_api_runtime(
@@ -4269,12 +4269,12 @@ mod tests {
     #[test]
     fn api_db_bringtofront_endpoint_works() {
         let root = temp_root("api-db-bringtofront");
-        let model = Arc::new(Mutex::new(NewModelWithRuntime(
+        let model = Arc::new(RwLock::new(NewModelWithRuntime(
             Some(root.clone()),
             Some(50),
         )));
         {
-            let mut guard = model.lock().expect("lock");
+            let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
         }
         let runtime = test_api_runtime(
@@ -4308,12 +4308,12 @@ mod tests {
     #[test]
     fn api_db_ignores_and_reset_endpoints_work() {
         let root = temp_root("api-db-ignores-reset");
-        let model = Arc::new(Mutex::new(NewModelWithRuntime(
+        let model = Arc::new(RwLock::new(NewModelWithRuntime(
             Some(root.clone()),
             Some(50),
         )));
         {
-            let mut guard = model.lock().expect("lock");
+            let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
             guard.SetIgnores(
                 "default",
@@ -4368,12 +4368,12 @@ mod tests {
     #[test]
     fn api_db_need_returns_needed_page() {
         let root = temp_root("api-db-need");
-        let model = Arc::new(Mutex::new(NewModelWithRuntime(
+        let model = Arc::new(RwLock::new(NewModelWithRuntime(
             Some(root.clone()),
             Some(50),
         )));
         {
-            let mut guard = model.lock().expect("lock");
+            let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
             {
                 let mut db = guard.sdb.lock().expect("db lock");
@@ -4417,7 +4417,7 @@ mod tests {
     #[test]
     fn api_control_endpoints_reject_wrong_methods() {
         let runtime = test_api_runtime(
-            Arc::new(Mutex::new(NewModel())),
+            Arc::new(RwLock::new(NewModel())),
             vec![FolderSpec {
                 id: "default".to_string(),
                 path: "/tmp/default".to_string(),
@@ -4477,7 +4477,7 @@ mod tests {
         let root = temp_root("api-config-folders");
         let folder_path = root.join("docs");
         fs::create_dir_all(&folder_path).expect("create folder");
-        let runtime = test_api_runtime(Arc::new(Mutex::new(NewModel())), Vec::new(), 0);
+        let runtime = test_api_runtime(Arc::new(RwLock::new(NewModel())), Vec::new(), 0);
 
         let add = build_api_response(
             &Method::Post,
@@ -4532,7 +4532,7 @@ mod tests {
 
     #[test]
     fn api_config_folders_validate_inputs() {
-        let runtime = test_api_runtime(Arc::new(Mutex::new(NewModel())), Vec::new(), 0);
+        let runtime = test_api_runtime(Arc::new(RwLock::new(NewModel())), Vec::new(), 0);
 
         let missing_id = build_api_response(
             &Method::Post,
@@ -4607,9 +4607,9 @@ mod tests {
         let root = temp_root("peer-connection");
         fs::write(root.join("a.txt"), b"hello-world").expect("write");
 
-        let model = Arc::new(Mutex::new(NewModel()));
+        let model = Arc::new(RwLock::new(NewModel()));
         {
-            let mut guard = model.lock().expect("lock");
+            let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
         }
 
@@ -4645,7 +4645,7 @@ mod tests {
         );
 
         server.join().expect("join server");
-        let guard = model.lock().expect("lock");
+        let guard = model.read().expect("lock");
         assert_eq!(
             guard.RemoteSequences("default").get("remote").copied(),
             Some(2)
@@ -4660,9 +4660,9 @@ mod tests {
         let root = temp_root("invalid-request");
         fs::write(root.join("ok.txt"), b"ok").expect("write");
 
-        let model = Arc::new(Mutex::new(NewModel()));
+        let model = Arc::new(RwLock::new(NewModel()));
         {
-            let mut guard = model.lock().expect("lock");
+            let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
         }
 
@@ -4727,9 +4727,9 @@ mod tests {
         let root = temp_root("missing-hello");
         fs::write(root.join("ok.txt"), b"ok").expect("write");
 
-        let model = Arc::new(Mutex::new(NewModel()));
+        let model = Arc::new(RwLock::new(NewModel()));
         {
-            let mut guard = model.lock().expect("lock");
+            let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
         }
 

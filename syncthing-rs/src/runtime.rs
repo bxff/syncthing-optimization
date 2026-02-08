@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -260,6 +260,7 @@ pub(crate) fn run_daemon(config: DaemonConfig) -> Result<(), String> {
             start_time: SystemTime::now(),
             bep_listen_addr: config.listen_addr.clone(),
             shutdown_requested: shutdown_requested.clone(),
+            gui_root: resolve_gui_root(),
         };
         let _api_thread = start_api_server(api_addr, runtime)?;
     }
@@ -309,6 +310,7 @@ struct DaemonApiRuntime {
     start_time: SystemTime,
     bep_listen_addr: String,
     shutdown_requested: Arc<AtomicBool>,
+    gui_root: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -386,6 +388,7 @@ impl ApiRuntimeState {
 struct ApiReply {
     status_code: StatusCode,
     body: Vec<u8>,
+    content_type: String,
 }
 
 impl ApiReply {
@@ -395,6 +398,15 @@ impl ApiReply {
         Self {
             status_code: StatusCode(status_code),
             body,
+            content_type: "application/json".to_string(),
+        }
+    }
+
+    fn bytes(status_code: u16, body: Vec<u8>, content_type: &str) -> Self {
+        Self {
+            status_code: StatusCode(status_code),
+            body,
+            content_type: content_type.to_string(),
         }
     }
 }
@@ -409,7 +421,7 @@ fn start_api_server(
             let reply = build_api_response(request.method(), request.url(), &runtime);
             let mut response = Response::from_data(reply.body).with_status_code(reply.status_code);
             if let Ok(content_type) =
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                Header::from_bytes(&b"Content-Type"[..], reply.content_type.as_bytes())
             {
                 response = response.with_header(content_type);
             }
@@ -422,6 +434,10 @@ fn start_api_server(
 fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) -> ApiReply {
     let (path, query) = split_url(url);
     let params = parse_query(query);
+
+    if !path.starts_with("/rest/") {
+        return build_gui_response(method, path, runtime);
+    }
 
     if let Some(folder_id) = path_param(path, "/rest/config/folders/") {
         return match method {
@@ -1828,6 +1844,98 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
     }
 }
 
+fn resolve_gui_root() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(path) = std::env::var("SYNCTHING_RS_GUI_DIR") {
+        if !path.trim().is_empty() {
+            candidates.push(PathBuf::from(path));
+        }
+    }
+
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            candidates.push(exe_dir.join("gui/default"));
+            candidates.push(exe_dir.join("../gui/default"));
+        }
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("gui/default"));
+        candidates.push(cwd.join("gui").join("default"));
+    }
+
+    for candidate in candidates {
+        let index = candidate.join("index.html");
+        if index.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn build_gui_response(method: &Method, path: &str, runtime: &DaemonApiRuntime) -> ApiReply {
+    if method != &Method::Get {
+        return make_api_error(405, "method not allowed");
+    }
+
+    let Some(gui_root) = runtime.gui_root.as_ref() else {
+        return make_api_error(404, "gui not found");
+    };
+
+    let Some(mut relative_path) = sanitize_gui_path(path) else {
+        return make_api_error(400, "invalid path");
+    };
+    if relative_path.as_os_str().is_empty() || path.ends_with('/') {
+        relative_path.push("index.html");
+    }
+
+    let mut file_path = gui_root.join(relative_path);
+    if file_path.is_dir() {
+        file_path = file_path.join("index.html");
+    }
+    if !file_path.is_file() {
+        return make_api_error(404, "not found");
+    }
+
+    let body = match fs::read(&file_path) {
+        Ok(data) => data,
+        Err(err) => return make_api_error(500, format!("read gui asset: {err}")),
+    };
+    ApiReply::bytes(200, body, mime_type_for_path(&file_path))
+}
+
+fn sanitize_gui_path(path: &str) -> Option<PathBuf> {
+    let raw = path.trim_start_matches('/');
+    let mut out = PathBuf::new();
+    for comp in Path::new(raw).components() {
+        match comp {
+            Component::Normal(segment) => out.push(segment),
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+fn mime_type_for_path(path: &Path) -> &'static str {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("js") => "application/javascript; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("ico") => "image/x-icon",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
+        Some("ttf") => "font/ttf",
+        Some("eot") => "application/vnd.ms-fontobject",
+        Some("txt") => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
 fn split_url(url: &str) -> (&str, &str) {
     match url.split_once('?') {
         Some((path, query)) => (path, query),
@@ -2907,6 +3015,7 @@ pub(crate) fn run_parity_probe(with_peer_interop: bool) -> Result<(), String> {
             start_time: SystemTime::now(),
             bep_listen_addr: DEFAULT_LISTEN_ADDR.to_string(),
             shutdown_requested: Arc::new(AtomicBool::new(false)),
+            gui_root: None,
         };
 
         ensure_api_ok(&build_api_response(
@@ -2995,6 +3104,7 @@ pub(crate) fn run_api_surface_probe() -> Result<ApiSurfaceProbeResult, String> {
             start_time: SystemTime::now(),
             bep_listen_addr: DEFAULT_LISTEN_ADDR.to_string(),
             shutdown_requested: Arc::new(AtomicBool::new(false)),
+            gui_root: None,
         };
 
         let cases: Vec<(&str, Method, String, u16)> = vec![
@@ -3991,6 +4101,7 @@ mod tests {
             start_time: SystemTime::now(),
             bep_listen_addr: "127.0.0.1:22000".to_string(),
             shutdown_requested: Arc::new(AtomicBool::new(false)),
+            gui_root: None,
         };
         runtime
     }

@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -144,8 +145,26 @@ func run(args []string) {
 	outInterop := fs.String("interop", "parity/diff-reports/interop.json", "interop report output")
 	outDur := fs.String("durability", "parity/diff-reports/durability.json", "durability report output")
 	profileMB := fs.Int("profile-mb", 50, "memory cap profile used by tests")
+	repeatExternal := fs.Int(
+		"repeat-external-soak",
+		1,
+		"repeat each external-soak scenario this many times (seeded by --seed-base)",
+	)
+	seedBase := fs.Int64("seed-base", 1, "base seed for repeated external-soak runs")
+	requiredEvidenceMin := fs.String(
+		"required-evidence-min",
+		"synthetic",
+		"when set (synthetic|component|daemon|peer-interop|external-soak), fail required scenarios with weaker inferred evidence",
+	)
 	if err := fs.Parse(args); err != nil {
 		fatalf("parse flags: %v", err)
+	}
+	if *repeatExternal <= 0 {
+		fatalf("--repeat-external-soak must be greater than zero")
+	}
+	requiredEvidence := normalizeScenarioEvidence(*requiredEvidenceMin)
+	if strings.TrimSpace(*requiredEvidenceMin) != "" && requiredEvidence == "" {
+		fatalf("--required-evidence-min must be one of: synthetic, component, daemon, peer-interop, external-soak")
 	}
 
 	cfg, err := readConfig(*configPath)
@@ -185,15 +204,6 @@ func run(args []string) {
 			sc.Comparator = "json-equal"
 		}
 
-		goSnap, goErr := loadSideSnapshot(sc.Go, defaultTimeout)
-		rustSnap, rustErr := loadSideSnapshot(sc.Rust, defaultTimeout)
-		if goErr == nil {
-			goErr = validateScenarioSnapshot(sc.ID, "go", goSnap)
-		}
-		if rustErr == nil {
-			rustErr = validateScenarioSnapshot(sc.ID, "rust", rustSnap)
-		}
-
 		outcome := scenarioOutcome{ID: sc.ID, Severity: severity, Required: sc.Required}
 		outcome.GoEvidence = normalizeScenarioEvidence(inferSideEvidence(sc.Go))
 		outcome.RustEvidence = normalizeScenarioEvidence(inferSideEvidence(sc.Rust))
@@ -208,37 +218,108 @@ func run(args []string) {
 			outcome.RustEvidence = "synthetic"
 		}
 		declaredEvidence := normalizeScenarioEvidence(sc.Evidence)
+		declaredEvidenceOverclaim := false
 		if declaredEvidence != "" {
 			outcome.DeclaredEvidence = declaredEvidence
+			if scenarioEvidenceRank(declaredEvidence) > scenarioEvidenceRank(outcome.Evidence) {
+				declaredEvidenceOverclaim = true
+			}
 		}
 
-		switch {
-		case goErr != nil && rustErr != nil:
-			outcome.Status = "blocked"
-			outcome.Message = fmt.Sprintf("go and rust sides unavailable: %v | %v", goErr, rustErr)
-			report.Match = false
-			report.Mismatches = append(report.Mismatches, latestMismatch{ID: sc.ID, Severity: severity, Open: true, Message: outcome.Message})
-		case goErr != nil:
-			outcome.Status = "blocked"
-			outcome.Message = fmt.Sprintf("go side unavailable: %v", goErr)
-			report.Match = false
-			report.Mismatches = append(report.Mismatches, latestMismatch{ID: sc.ID, Severity: severity, Open: true, Message: outcome.Message})
-		case rustErr != nil:
-			outcome.Status = "blocked"
-			outcome.Message = fmt.Sprintf("rust side unavailable: %v", rustErr)
-			report.Match = false
-			report.Mismatches = append(report.Mismatches, latestMismatch{ID: sc.ID, Severity: severity, Open: true, Message: outcome.Message})
-		default:
-			ok, msg := compareSnapshots(sc.ID, sc.Comparator, goSnap, rustSnap)
-			if ok {
-				outcome.Status = "pass"
-				outcome.Message = "go and rust outputs match"
-			} else {
-				outcome.Status = "mismatch"
-				outcome.Message = msg
-				report.Match = false
-				report.Mismatches = append(report.Mismatches, latestMismatch{ID: sc.ID, Severity: severity, Open: true, Message: msg})
+		runs := 1
+		if hasTag(sc.Tags, "external-soak") {
+			runs = *repeatExternal
+		}
+		for runIdx := 0; runIdx < runs; runIdx++ {
+			seed := *seedBase + int64(runIdx)
+			goSide := sc.Go
+			rustSide := sc.Rust
+			if hasTag(sc.Tags, "external-soak") {
+				goSide = sideWithSeedEnv(goSide, seed)
+				rustSide = sideWithSeedEnv(rustSide, seed)
 			}
+
+			goErr := validateSideCommand("go", goSide)
+			rustErr := validateSideCommand("rust", rustSide)
+			var goSnap map[string]any
+			var rustSnap map[string]any
+			if goErr == nil {
+				goSnap, goErr = loadSideSnapshot(goSide, defaultTimeout)
+			}
+			if rustErr == nil {
+				rustSnap, rustErr = loadSideSnapshot(rustSide, defaultTimeout)
+			}
+			if goErr == nil {
+				goErr = validateScenarioSnapshot(sc.ID, "go", goSnap)
+			}
+			if rustErr == nil {
+				rustErr = validateScenarioSnapshot(sc.ID, "rust", rustSnap)
+			}
+
+			switch {
+			case goErr != nil && rustErr != nil:
+				outcome.Status = "blocked"
+				outcome.Message = fmt.Sprintf("go and rust sides unavailable (run=%d seed=%d): %v | %v", runIdx+1, seed, goErr, rustErr)
+			case goErr != nil:
+				outcome.Status = "blocked"
+				outcome.Message = fmt.Sprintf("go side unavailable (run=%d seed=%d): %v", runIdx+1, seed, goErr)
+			case rustErr != nil:
+				outcome.Status = "blocked"
+				outcome.Message = fmt.Sprintf("rust side unavailable (run=%d seed=%d): %v", runIdx+1, seed, rustErr)
+			default:
+				ok, msg := compareSnapshots(sc.ID, sc.Comparator, goSnap, rustSnap)
+				if ok {
+					outcome.Status = "pass"
+					outcome.Message = fmt.Sprintf("go and rust outputs match (runs=%d)", runs)
+				} else {
+					outcome.Status = "mismatch"
+					outcome.Message = fmt.Sprintf("run=%d seed=%d: %s", runIdx+1, seed, msg)
+				}
+			}
+
+			if outcome.Status != "pass" {
+				report.Match = false
+				report.Mismatches = append(report.Mismatches, latestMismatch{
+					ID:       sc.ID,
+					Severity: severity,
+					Open:     true,
+					Message:  outcome.Message,
+				})
+				break
+			}
+		}
+
+		if outcome.Status == "pass" && sc.Required && requiredEvidence != "" {
+			if scenarioEvidenceRank(outcome.Evidence) < scenarioEvidenceRank(requiredEvidence) {
+				outcome.Status = "mismatch"
+				outcome.Message = fmt.Sprintf(
+					"required scenario evidence too weak: have=%s need>=%s",
+					outcome.Evidence,
+					requiredEvidence,
+				)
+				report.Match = false
+				report.Mismatches = append(report.Mismatches, latestMismatch{
+					ID:       sc.ID,
+					Severity: severity,
+					Open:     true,
+					Message:  outcome.Message,
+				})
+			}
+		}
+		if outcome.Status == "pass" && declaredEvidenceOverclaim {
+			outcome.Status = "mismatch"
+			outcome.Message = fmt.Sprintf(
+				"declared scenario evidence overclaims inferred evidence: declared=%s inferred=%s",
+				declaredEvidence,
+				outcome.Evidence,
+			)
+			report.Match = false
+			report.Mismatches = append(report.Mismatches, latestMismatch{
+				ID:       sc.ID,
+				Severity: severity,
+				Open:     true,
+				Message:  outcome.Message,
+			})
 		}
 
 		report.Scenarios = append(report.Scenarios, outcome)
@@ -323,6 +404,17 @@ func run(args []string) {
 	}
 }
 
+func sideWithSeedEnv(side sideConfig, seed int64) sideConfig {
+	out := side
+	env := make(map[string]string, len(side.Env)+1)
+	for k, v := range side.Env {
+		env[k] = v
+	}
+	env["PARITY_SEED"] = strconv.FormatInt(seed, 10)
+	out.Env = env
+	return out
+}
+
 func validateScenarioSnapshot(expectedID, expectedSource string, snap map[string]any) error {
 	getString := func(key string) (string, error) {
 		raw, ok := snap[key]
@@ -360,10 +452,91 @@ func validateScenarioSnapshot(expectedID, expectedSource string, snap map[string
 	if err != nil {
 		return err
 	}
-	if strings.EqualFold(status, "prototype") {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "validated", "verified", "parity-verified":
+		// Allowed.
+	case "prototype":
 		return errors.New("scenario status=prototype is not allowed for parity gating")
+	default:
+		return fmt.Errorf("unsupported scenario status %q (allowed: validated, verified, parity-verified)", status)
 	}
 	return nil
+}
+
+func validateSideCommand(expectedSource string, side sideConfig) error {
+	if len(side.Command) == 0 {
+		if strings.TrimSpace(side.SnapshotPath) != "" {
+			return errors.New("snapshot-only side config is not allowed; command is required")
+		}
+		return nil
+	}
+	cmdLine := strings.ToLower(strings.Join(side.Command, " "))
+	switch strings.ToLower(strings.TrimSpace(expectedSource)) {
+	case "go":
+		if value, ok := findFlagValue(side.Command, "--impl"); ok && strings.EqualFold(value, "rust") {
+			return errors.New("go side command must not set --impl rust")
+		}
+		if strings.Contains(cmdLine, "syncthing-rs") && !strings.Contains(cmdLine, "parity_external_soak.go") {
+			return errors.New("go side command unexpectedly references syncthing-rs")
+		}
+	case "rust":
+		if strings.Contains(cmdLine, "parity_harness_go.go") {
+			return errors.New("rust side command must not reference parity_harness_go.go")
+		}
+		if value, ok := findFlagValue(side.Command, "--impl"); ok && strings.EqualFold(value, "go") {
+			return errors.New("rust side command must not set --impl go")
+		}
+		if strings.Contains(cmdLine, "parity_external_soak.go") {
+			value, ok := findFlagValue(side.Command, "--impl")
+			if !ok || !strings.EqualFold(value, "rust") {
+				return errors.New("rust external soak command must include --impl rust")
+			}
+			return nil
+		}
+		if strings.EqualFold(side.Command[0], "go") {
+			if value, ok := findFlagValue(side.Command, "--impl"); ok && strings.EqualFold(value, "rust") {
+				return nil
+			}
+			return errors.New("rust side command must not start with go unless it dispatches --impl rust")
+		}
+	default:
+		return fmt.Errorf("unsupported source %q", expectedSource)
+	}
+	return nil
+}
+
+func findFlagValue(args []string, flag string) (string, bool) {
+	normalized := strings.TrimLeft(strings.TrimSpace(flag), "-")
+	if normalized == "" {
+		return "", false
+	}
+	var value string
+	found := false
+	matches := 0
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		trimmed := strings.TrimLeft(arg, "-")
+		if trimmed == normalized {
+			if i+1 >= len(args) {
+				continue
+			}
+			value = strings.TrimSpace(args[i+1])
+			found = true
+			matches++
+			i++
+			continue
+		}
+		if strings.HasPrefix(trimmed, normalized+"=") {
+			value = strings.TrimSpace(strings.TrimPrefix(trimmed, normalized+"="))
+			found = true
+			matches++
+			continue
+		}
+	}
+	if !found || matches != 1 {
+		return "", false
+	}
+	return value, true
 }
 
 func readConfig(path string) (harnessConfig, error) {
@@ -462,6 +635,66 @@ func compareSnapshots(scenarioID, mode string, goSnap, rustSnap map[string]any) 
 			return true, ""
 		}
 		return false, "json outputs differ"
+	case "protocol-semantics":
+		goComparable := normalizeComparisonSnapshot(scenarioID, goSnap)
+		rustComparable := normalizeComparisonSnapshot(scenarioID, rustSnap)
+		goFrameCount := countJSONArray(goComparable["frame_sizes"])
+		rustFrameCount := countJSONArray(rustComparable["frame_sizes"])
+		delete(goComparable, "frame_sizes")
+		delete(rustComparable, "frame_sizes")
+		goJSON, err := canonicalJSON(goComparable)
+		if err != nil {
+			return false, fmt.Sprintf("go snapshot canonicalization failed: %v", err)
+		}
+		rustJSON, err := canonicalJSON(rustComparable)
+		if err != nil {
+			return false, fmt.Sprintf("rust snapshot canonicalization failed: %v", err)
+		}
+		if !bytes.Equal(goJSON, rustJSON) {
+			return false, "protocol semantic fields differ"
+		}
+		if goFrameCount != rustFrameCount {
+			return false, fmt.Sprintf("protocol frame count differs (go=%d rust=%d)", goFrameCount, rustFrameCount)
+		}
+		return true, ""
+	case "memory-cap":
+		goComparable := normalizeComparisonSnapshot(scenarioID, goSnap)
+		rustComparable := normalizeComparisonSnapshot(scenarioID, rustSnap)
+		for _, key := range []string{"estimated_memory_bytes"} {
+			delete(goComparable, key)
+			delete(rustComparable, key)
+		}
+		goJSON, err := canonicalJSON(goComparable)
+		if err != nil {
+			return false, fmt.Sprintf("go snapshot canonicalization failed: %v", err)
+		}
+		rustJSON, err := canonicalJSON(rustComparable)
+		if err != nil {
+			return false, fmt.Sprintf("rust snapshot canonicalization failed: %v", err)
+		}
+		if !bytes.Equal(goJSON, rustJSON) {
+			return false, "memory-cap semantic fields differ"
+		}
+		goEstimated, goEstimatedOK := numberAsInt64(goSnap["estimated_memory_bytes"])
+		rustEstimated, rustEstimatedOK := numberAsInt64(rustSnap["estimated_memory_bytes"])
+		goBudget, goBudgetOK := numberAsInt64(goSnap["memory_budget_bytes"])
+		rustBudget, rustBudgetOK := numberAsInt64(rustSnap["memory_budget_bytes"])
+		if !goEstimatedOK || !rustEstimatedOK || !goBudgetOK || !rustBudgetOK {
+			return false, "memory-cap snapshots missing numeric memory fields"
+		}
+		if goEstimated < 0 || rustEstimated < 0 || goBudget <= 0 || rustBudget <= 0 {
+			return false, "memory-cap snapshots contain invalid numeric memory values"
+		}
+		if goEstimated > goBudget || rustEstimated > rustBudget {
+			return false, fmt.Sprintf(
+				"memory cap exceeded (go=%d/%d rust=%d/%d)",
+				goEstimated,
+				goBudget,
+				rustEstimated,
+				rustBudget,
+			)
+		}
+		return true, ""
 	case "endpoint-surface":
 		goCovered := toStringSet(goSnap["covered_endpoints"])
 		rustCovered := toStringSet(rustSnap["covered_endpoints"])
@@ -488,6 +721,51 @@ func compareSnapshots(scenarioID, mode string, goSnap, rustSnap map[string]any) 
 		)
 	default:
 		return false, fmt.Sprintf("unsupported comparator %q", mode)
+	}
+}
+
+func countJSONArray(value any) int {
+	switch typed := value.(type) {
+	case []any:
+		return len(typed)
+	case []string:
+		return len(typed)
+	default:
+		return 0
+	}
+}
+
+func numberAsInt64(value any) (int64, bool) {
+	switch typed := value.(type) {
+	case int:
+		return int64(typed), true
+	case int32:
+		return int64(typed), true
+	case int64:
+		return typed, true
+	case uint:
+		return int64(typed), true
+	case uint32:
+		return int64(typed), true
+	case uint64:
+		if typed > uint64(1<<63-1) {
+			return 0, false
+		}
+		return int64(typed), true
+	case float32:
+		return int64(typed), true
+	case float64:
+		return int64(typed), true
+	case json.Number:
+		if i, err := typed.Int64(); err == nil {
+			return i, true
+		}
+		if f, err := typed.Float64(); err == nil {
+			return int64(f), true
+		}
+		return 0, false
+	default:
+		return 0, false
 	}
 }
 
@@ -563,19 +841,15 @@ func scenarioEvidenceRank(evidence string) int {
 	}
 }
 
-func normalizeComparisonSnapshot(scenarioID string, snap map[string]any) map[string]any {
+func normalizeComparisonSnapshot(_ string, snap map[string]any) map[string]any {
 	out := make(map[string]any, len(snap))
 	for k, v := range snap {
-		if k == "source" || k == "status" {
-			continue
-		}
-		if scenarioID == "memory-cap-50mb" && k == "estimated_memory_bytes" {
-			continue
-		}
-		if scenarioID == "protocol-state-transition" && k == "frame_sizes" {
-			continue
-		}
-		if scenarioID == "daemon-api-surface" && k == "endpoint_assertions" {
+		if k == "scenario" ||
+			k == "source" ||
+			k == "status" ||
+			k == "generated_at" ||
+			k == "version" ||
+			k == "produced_by" {
 			continue
 		}
 		out[k] = v

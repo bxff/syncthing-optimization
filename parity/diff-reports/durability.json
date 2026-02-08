@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-02-08T08:04:34Z",
-  "durability": "failed",
-  "crash_recovery": "failed"
+  "generated_at": "2026-02-08T08:28:13Z",
+  "durability": "passed",
+  "crash_recovery": "passed"
 }

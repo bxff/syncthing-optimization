@@ -240,6 +240,7 @@ type requiredTestEvidence struct {
 	ScenarioRustEvidence map[string]string
 	ScenarioTags         map[string]map[string]struct{}
 	ScenarioRefs         map[string]int
+	ScenarioParityBlocks map[string]int
 }
 
 type dashboardJSON struct {
@@ -501,6 +502,7 @@ func runCheck(args []string) {
 	}
 
 	validateRequiredScenarioCoverage(&report, testEvidence)
+	validateParityVerifiedScenarioStatus(&report, testEvidence)
 	if *mode == "replacement" {
 		validateReplacementScenarioEvidence(&report, testEvidence)
 		validateReplacementCapabilityCoverage(&report)
@@ -928,6 +930,7 @@ func loadRequiredTestEvidence(report *guardrailReport) requiredTestEvidence {
 		ScenarioRustEvidence: make(map[string]string),
 		ScenarioTags:         make(map[string]map[string]struct{}),
 		ScenarioRefs:         make(map[string]int),
+		ScenarioParityBlocks: make(map[string]int),
 	}
 
 	cfg := harnessScenarioFile{}
@@ -1117,11 +1120,7 @@ func validateImplementedLike(report *guardrailReport, feat featureItem, mi mappi
 		if mi.Status == "parity-verified" {
 			status := strings.ToLower(strings.TrimSpace(ev.ScenarioOutcome[scenarioID]))
 			if status != "pass" {
-				report.Failures = append(report.Failures, reportFailure{
-					Rule:    "mapping-required-tests",
-					ID:      mi.ID,
-					Message: fmt.Sprintf("parity-verified feature requires passing %q (current status=%q)", testRef, status),
-				})
+				ev.ScenarioParityBlocks[scenarioID]++
 			}
 		}
 	}
@@ -1222,6 +1221,27 @@ func validateRequiredScenarioCoverage(report *guardrailReport, ev requiredTestEv
 			Rule:    "required-scenario-unmapped",
 			Path:    "parity/harness/scenarios.json",
 			Message: fmt.Sprintf("required scenario %q is not referenced by any feature required_tests", id),
+		})
+	}
+}
+
+func validateParityVerifiedScenarioStatus(report *guardrailReport, ev requiredTestEvidence) {
+	ids := make([]string, 0, len(ev.ScenarioParityBlocks))
+	for id, count := range ev.ScenarioParityBlocks {
+		if count > 0 {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		status := strings.ToLower(strings.TrimSpace(ev.ScenarioOutcome[id]))
+		if status == "" {
+			status = "unknown"
+		}
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "mapping-required-tests",
+			Path:    "parity/diff-reports/latest.json",
+			Message: fmt.Sprintf("parity-verified features require passing %q (current status=%q, affected features=%d)", "scenario/"+id, status, ev.ScenarioParityBlocks[id]),
 		})
 	}
 }

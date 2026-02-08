@@ -110,7 +110,8 @@ func TestValidateImplementedLikeRequiresPassingScenarioForParityVerified(t *test
 		ScenarioOutcome: map[string]string{
 			"index-sequence-behavior": "blocked",
 		},
-		ScenarioRefs: make(map[string]int),
+		ScenarioRefs:         make(map[string]int),
+		ScenarioParityBlocks: make(map[string]int),
 	}
 	feat := featureItem{
 		ID:     "feat-test",
@@ -130,15 +131,14 @@ func TestValidateImplementedLikeRequiresPassingScenarioForParityVerified(t *test
 	if ev.ScenarioRefs["index-sequence-behavior"] != 1 {
 		t.Fatalf("expected scenario ref to be counted, got %d", ev.ScenarioRefs["index-sequence-behavior"])
 	}
-	found := false
-	for _, failure := range report.Failures {
-		if failure.Rule == "mapping-required-tests" && strings.Contains(failure.Message, "current status=\"blocked\"") {
-			found = true
-			break
-		}
+	if ev.ScenarioParityBlocks["index-sequence-behavior"] != 1 {
+		t.Fatalf(
+			"expected parity block count to be tracked, got %d",
+			ev.ScenarioParityBlocks["index-sequence-behavior"],
+		)
 	}
-	if !found {
-		t.Fatalf("expected mapping-required-tests failure, got %#v", report.Failures)
+	if len(report.Failures) != 0 {
+		t.Fatalf("expected no immediate failure; aggregation happens later, got %#v", report.Failures)
 	}
 }
 
@@ -151,7 +151,8 @@ func TestValidateImplementedLikeAllowsImplementedWithoutPassingScenario(t *testi
 		ScenarioOutcome: map[string]string{
 			"index-sequence-behavior": "blocked",
 		},
-		ScenarioRefs: make(map[string]int),
+		ScenarioRefs:         make(map[string]int),
+		ScenarioParityBlocks: make(map[string]int),
 	}
 	feat := featureItem{
 		ID:     "feat-test",
@@ -172,6 +173,35 @@ func TestValidateImplementedLikeAllowsImplementedWithoutPassingScenario(t *testi
 		if strings.Contains(failure.Message, "current status=") {
 			t.Fatalf("did not expect pass-status failure for implemented feature: %#v", report.Failures)
 		}
+	}
+}
+
+func TestValidateParityVerifiedScenarioStatusAggregatesByScenario(t *testing.T) {
+	report := &guardrailReport{}
+	ev := requiredTestEvidence{
+		ScenarioOutcome: map[string]string{
+			"index-sequence-behavior": "mismatch",
+			"crash-recovery":          "blocked",
+		},
+		ScenarioParityBlocks: map[string]int{
+			"index-sequence-behavior": 3,
+			"crash-recovery":          1,
+		},
+	}
+
+	validateParityVerifiedScenarioStatus(report, ev)
+
+	if len(report.Failures) != 2 {
+		t.Fatalf("expected two aggregated failures, got %#v", report.Failures)
+	}
+	if report.Failures[0].Rule != "mapping-required-tests" {
+		t.Fatalf("unexpected rule for first failure: %#v", report.Failures[0])
+	}
+	if !strings.Contains(report.Failures[0].Message, "scenario/crash-recovery") {
+		t.Fatalf("expected crash-recovery in first message, got %q", report.Failures[0].Message)
+	}
+	if !strings.Contains(report.Failures[1].Message, "scenario/index-sequence-behavior") {
+		t.Fatalf("expected index-sequence-behavior in second message, got %q", report.Failures[1].Message)
 	}
 }
 

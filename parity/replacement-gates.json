@@ -61,7 +61,17 @@
       "rust_min_evidence": "daemon"
     },
     {
+      "id": "daemon-api-surface",
+      "go_min_evidence": "synthetic",
+      "rust_min_evidence": "daemon"
+    },
+    {
       "id": "folder-type-behavior",
+      "go_min_evidence": "synthetic",
+      "rust_min_evidence": "daemon"
+    },
+    {
+      "id": "global-need-decision",
       "go_min_evidence": "synthetic",
       "rust_min_evidence": "daemon"
     },

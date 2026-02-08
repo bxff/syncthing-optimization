@@ -41,7 +41,8 @@ jobs:
             --test-status parity/diff-reports/test-status.json \
             --interop parity/diff-reports/interop.json \
             --durability parity/diff-reports/durability.json \
-            --profile-mb 50 || true
+            --profile-mb 50 \
+            --required-evidence-min synthetic || true
 
       - name: Verify committed parity artifacts are up to date
         run: git diff --exit-code -- parity/feature-manifest.json parity/mapping-rust.json parity/exceptions.json parity/diff-reports parity/harness
@@ -95,7 +96,8 @@ jobs:
             --test-status parity/diff-reports/test-status.json \
             --interop parity/diff-reports/interop.json \
             --durability parity/diff-reports/durability.json \
-            --profile-mb 50 || true
+            --profile-mb 50 \
+            --required-evidence-min synthetic || true
 
       - name: Enforce parity guardrails (release mode)
         run: go run ./script/parity.go check --mode release --report parity/guardrail-report-release.json

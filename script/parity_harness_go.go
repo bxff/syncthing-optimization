@@ -615,6 +615,11 @@ func scenarioCrashRecovery() map[string]any {
 }
 
 func baseScenario(id string, fields map[string]any) map[string]any {
+	for k := range fields {
+		if k == "scenario" || k == stSource || k == stScenario {
+			fatalf("baseScenario field key %q collides with reserved metadata key", k)
+		}
+	}
 	out := map[string]any{
 		"scenario": id,
 		stSource:   "go",

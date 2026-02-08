@@ -16,7 +16,9 @@
     "local_files": 2,
     "need_files": 0,
     "scan_attempts": 1,
-    "status_poll_attempts": 1
+    "seed": 1,
+    "status_poll_attempts": 1,
+    "workload_digest": "ec50985004af717874c6a8ca37aaab523cd06311dce0687185129c5d1de26fd7"
   },
   "scenario": "external-soak-replacement",
   "source": "go",

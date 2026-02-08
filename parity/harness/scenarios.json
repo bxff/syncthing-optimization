@@ -41,7 +41,7 @@
       "id": "global-need-decision",
       "description": "Validate global winner and local-need decisions for mixed versions/deletes.",
       "severity": "P0",
-      "required": false,
+      "required": true,
       "tags": [
         "core"
       ],
@@ -144,7 +144,7 @@
       "tags": [
         "interop"
       ],
-      "comparator": "json-equal",
+      "comparator": "protocol-semantics",
       "go": {
         "command": [
           "go",
@@ -173,7 +173,7 @@
       "id": "daemon-api-surface",
       "description": "Validate Rust daemon API surface coverage for replacement readiness.",
       "severity": "P0",
-      "required": false,
+      "required": true,
       "tags": [
         "core"
       ],
@@ -206,7 +206,7 @@
       "id": "external-soak-replacement",
       "description": "Run real daemon processes (Go and Rust), configure a folder, scan, verify status and shutdown semantics.",
       "severity": "P0",
-      "required": false,
+      "required": true,
       "tags": [
         "core",
         "external-soak"
@@ -422,7 +422,7 @@
       "tags": [
         "memory-cap"
       ],
-      "comparator": "json-equal",
+      "comparator": "memory-cap",
       "go": {
         "command": [
           "go",

@@ -28,6 +28,17 @@ func TestValidateScenarioSnapshotAcceptsValidatedPayload(t *testing.T) {
 	}
 }
 
+func TestValidateScenarioSnapshotRejectsUnknownStatus(t *testing.T) {
+	err := validateScenarioSnapshot("index-sequence-behavior", "go", map[string]any{
+		"scenario": "index-sequence-behavior",
+		"source":   "go",
+		"status":   "stub",
+	})
+	if err == nil {
+		t.Fatal("expected unknown status to fail validation")
+	}
+}
+
 func TestValidateScenarioSnapshotRejectsSourceMismatch(t *testing.T) {
 	err := validateScenarioSnapshot("index-sequence-behavior", "go", map[string]any{
 		"scenario": "index-sequence-behavior",
@@ -145,6 +156,175 @@ func TestCompareSnapshotsEndpointSurfaceRejectsMissingGoEndpoint(t *testing.T) {
 	}
 	if msg == "" {
 		t.Fatal("expected mismatch message")
+	}
+}
+
+func TestCompareSnapshotsProtocolSemanticsIgnoresFrameSizeValues(t *testing.T) {
+	ok, msg := compareSnapshots(
+		"protocol-state-transition",
+		"protocol-semantics",
+		map[string]any{
+			"transitions":   []any{"dial", "hello", "close"},
+			"message_types": []any{"hello", "close"},
+			"frame_sizes":   []any{10.0, 20.0, 30.0},
+		},
+		map[string]any{
+			"transitions":   []any{"dial", "hello", "close"},
+			"message_types": []any{"hello", "close"},
+			"frame_sizes":   []any{12.0, 25.0, 31.0},
+		},
+	)
+	if !ok {
+		t.Fatalf("expected protocol-semantics comparator to pass, got msg=%q", msg)
+	}
+}
+
+func TestCompareSnapshotsMemoryCapAllowsDifferentEstimatedBytesUnderBudget(t *testing.T) {
+	ok, msg := compareSnapshots(
+		"memory-cap-50mb",
+		"memory-cap",
+		map[string]any{
+			"file_count":             float64(10_000),
+			"page_count":             float64(10),
+			"scanned_entries":        float64(10_000),
+			"under_budget":           true,
+			"memory_budget_bytes":    float64(52_428_800),
+			"estimated_memory_bytes": float64(1_200_000),
+		},
+		map[string]any{
+			"file_count":             float64(10_000),
+			"page_count":             float64(10),
+			"scanned_entries":        float64(10_000),
+			"under_budget":           true,
+			"memory_budget_bytes":    float64(52_428_800),
+			"estimated_memory_bytes": float64(1_080_000),
+		},
+	)
+	if !ok {
+		t.Fatalf("expected memory-cap comparator to pass, got msg=%q", msg)
+	}
+}
+
+func TestCompareSnapshotsMemoryCapRejectsOverBudget(t *testing.T) {
+	ok, msg := compareSnapshots(
+		"memory-cap-50mb",
+		"memory-cap",
+		map[string]any{
+			"file_count":             float64(10_000),
+			"page_count":             float64(10),
+			"scanned_entries":        float64(10_000),
+			"under_budget":           true,
+			"memory_budget_bytes":    float64(100),
+			"estimated_memory_bytes": float64(101),
+		},
+		map[string]any{
+			"file_count":             float64(10_000),
+			"page_count":             float64(10),
+			"scanned_entries":        float64(10_000),
+			"under_budget":           true,
+			"memory_budget_bytes":    float64(100),
+			"estimated_memory_bytes": float64(50),
+		},
+	)
+	if ok {
+		t.Fatal("expected memory-cap comparator to fail for over-budget sample")
+	}
+	if msg == "" {
+		t.Fatal("expected mismatch message for over-budget sample")
+	}
+}
+
+func TestSideWithSeedEnvAddsSeedWithoutDroppingExistingEnv(t *testing.T) {
+	side := sideConfig{
+		Command: []string{"go", "run", "./script/parity_external_soak.go"},
+		Env: map[string]string{
+			"FOO": "bar",
+		},
+	}
+	out := sideWithSeedEnv(side, 42)
+	if got := out.Env["FOO"]; got != "bar" {
+		t.Fatalf("expected original env var to be preserved, got %q", got)
+	}
+	if got := out.Env["PARITY_SEED"]; got != "42" {
+		t.Fatalf("expected PARITY_SEED=42, got %q", got)
+	}
+	if _, ok := side.Env["PARITY_SEED"]; ok {
+		t.Fatal("expected original env map to remain unmodified")
+	}
+}
+
+func TestEvidenceRankOrderingSupportsStrictRequiredThresholds(t *testing.T) {
+	levels := []string{"synthetic", "component", "daemon", "peer-interop", "external-soak"}
+	for i := 1; i < len(levels); i++ {
+		prev := levels[i-1]
+		cur := levels[i]
+		if scenarioEvidenceRank(cur) <= scenarioEvidenceRank(prev) {
+			t.Fatalf("expected %s to rank above %s", cur, prev)
+		}
+	}
+}
+
+func TestNormalizeScenarioEvidenceRejectsUnknownValues(t *testing.T) {
+	if got := normalizeScenarioEvidence("nonsense"); got != "" {
+		t.Fatalf("expected unknown evidence to normalize to empty, got %q", got)
+	}
+	if got := normalizeScenarioEvidence("  INTEROP  "); got != "peer-interop" {
+		t.Fatalf("expected interop alias normalization, got %q", got)
+	}
+}
+
+func TestFindFlagValueSupportsSingleDashAndDoubleDashForms(t *testing.T) {
+	args := []string{"go", "run", "./script/parity_external_soak.go", "scenario", "x", "-impl", "rust"}
+	if got, ok := findFlagValue(args, "--impl"); !ok || got != "rust" {
+		t.Fatalf("expected to parse -impl rust using --impl lookup, got ok=%v value=%q", ok, got)
+	}
+
+	args = []string{"go", "run", "./script/parity_external_soak.go", "scenario", "x", "--impl=rust"}
+	if got, ok := findFlagValue(args, "--impl"); !ok || got != "rust" {
+		t.Fatalf("expected to parse --impl=rust, got ok=%v value=%q", ok, got)
+	}
+}
+
+func TestFindFlagValueRejectsDuplicateFlags(t *testing.T) {
+	args := []string{"go", "run", "./script/parity_external_soak.go", "scenario", "x", "--impl", "rust", "--impl", "go"}
+	if got, ok := findFlagValue(args, "--impl"); ok {
+		t.Fatalf("expected duplicate --impl to be rejected, got ok=%v value=%q", ok, got)
+	}
+}
+
+func TestValidateSideCommandAllowsGoWrapperForRustWhenImplFlagIsRust(t *testing.T) {
+	err := validateSideCommand("rust", sideConfig{
+		Command: []string{
+			"go", "run", "./script/parity_external_soak.go", "scenario", "external-soak-replacement", "--impl", "rust",
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected go wrapper with --impl rust to be accepted, got %v", err)
+	}
+}
+
+func TestValidateSideCommandRejectsSnapshotOnlyConfig(t *testing.T) {
+	err := validateSideCommand("go", sideConfig{SnapshotPath: "/tmp/example.json"})
+	if err == nil {
+		t.Fatal("expected snapshot-only config to be rejected")
+	}
+}
+
+func TestNormalizeComparisonSnapshotStripsMetadataKeys(t *testing.T) {
+	got := normalizeComparisonSnapshot("x", map[string]any{
+		"scenario":     "x",
+		"source":       "go",
+		"status":       "validated",
+		"generated_at": "now",
+		"version":      "1",
+		"produced_by":  "tool",
+		"payload":      42,
+	})
+	if _, ok := got["scenario"]; ok {
+		t.Fatal("expected scenario key to be stripped")
+	}
+	if _, ok := got["payload"]; !ok {
+		t.Fatal("expected payload key to remain")
 	}
 }
 

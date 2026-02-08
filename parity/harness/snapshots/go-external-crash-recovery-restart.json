@@ -16,7 +16,10 @@
     "post_restart_local_files": 2,
     "post_restart_need_files": 0,
     "pre_crash_global_files": 2,
-    "pre_crash_local_files": 2
+    "pre_crash_local_files": 2,
+    "seed": 1,
+    "status_poll_attempts": 2,
+    "workload_digest": "2eee032f38cbb0a907c51f99ee80e417965d13c5f29cd6cbe21e33fa617dc10b"
   },
   "scenario": "external-crash-recovery-restart",
   "source": "go",

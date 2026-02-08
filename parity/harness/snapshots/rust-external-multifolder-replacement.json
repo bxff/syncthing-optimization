@@ -34,7 +34,9 @@
     "media_local_files": 6,
     "media_need_files": 0,
     "scan_attempts": 2,
-    "status_poll_attempts": 2
+    "seed": 1,
+    "status_poll_attempts": 2,
+    "workload_digest": "2db01b536e6c63d94876fb1e6283c71906cd56ca4588184672f041ee8905d9ca"
   },
   "scenario": "external-multifolder-replacement",
   "source": "rust",

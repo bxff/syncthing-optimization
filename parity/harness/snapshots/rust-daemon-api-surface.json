@@ -153,19 +153,13 @@
       "status_code": 200
     },
     "GET /rest/cluster/pending/devices": {
-      "present_keys": [
-        "count",
-        "devices"
-      ],
+      "present_keys": [],
       "required_keys": [],
       "response_kind": "object",
       "status_code": 200
     },
     "GET /rest/cluster/pending/folders": {
-      "present_keys": [
-        "count",
-        "folders"
-      ],
+      "present_keys": [],
       "required_keys": [],
       "response_kind": "object",
       "status_code": 200
@@ -177,9 +171,17 @@
         "folders",
         "gui",
         "ldap",
-        "options"
+        "options",
+        "remoteIgnoredDevices"
       ],
-      "required_keys": [],
+      "required_keys": [
+        "devices",
+        "folders",
+        "options",
+        "gui",
+        "defaults",
+        "remoteIgnoredDevices"
+      ],
       "response_kind": "object",
       "status_code": 200
     },
@@ -198,17 +200,28 @@
     },
     "GET /rest/config/defaults/folder": {
       "present_keys": [
+        "copiers",
+        "devices",
+        "filesystemType",
         "fsWatcherDelayS",
         "fsWatcherEnabled",
         "fsWatcherTimeoutS",
+        "hashers",
         "id",
         "ignoreDelete",
         "label",
+        "maxConflicts",
         "memory",
+        "order",
         "path",
         "paused",
+        "pullerDelayS",
+        "pullerMaxPendingKiB",
+        "pullerPauseS",
         "rescanIntervalS",
-        "type"
+        "scanProgressIntervalS",
+        "type",
+        "versioning"
       ],
       "required_keys": [],
       "response_kind": "object",
@@ -218,7 +231,9 @@
       "present_keys": [
         "lines"
       ],
-      "required_keys": [],
+      "required_keys": [
+        "lines"
+      ],
       "response_kind": "object",
       "status_code": 200
     },
@@ -255,17 +270,28 @@
     },
     "GET /rest/config/folders/:id": {
       "present_keys": [
+        "copiers",
+        "devices",
+        "filesystemType",
         "fsWatcherDelayS",
         "fsWatcherEnabled",
         "fsWatcherTimeoutS",
+        "hashers",
         "id",
         "ignoreDelete",
         "label",
+        "maxConflicts",
         "memory",
+        "order",
         "path",
         "paused",
+        "pullerDelayS",
+        "pullerMaxPendingKiB",
+        "pullerPauseS",
         "rescanIntervalS",
-        "type"
+        "scanProgressIntervalS",
+        "type",
+        "versioning"
       ],
       "required_keys": [],
       "response_kind": "object",
@@ -273,12 +299,21 @@
     },
     "GET /rest/config/gui": {
       "present_keys": [
+        "address",
+        "authMode",
         "debugging",
         "enabled",
         "insecureAdminAccess",
-        "theme"
+        "password",
+        "theme",
+        "useTLS",
+        "user"
       ],
-      "required_keys": [],
+      "required_keys": [
+        "address",
+        "theme",
+        "useTLS"
+      ],
       "response_kind": "object",
       "status_code": 200
     },
@@ -303,14 +338,25 @@
     },
     "GET /rest/config/options": {
       "present_keys": [
+        "crashReportingEnabled",
+        "deviceName",
         "globalAnnounceEnabled",
+        "globalAnnounceServers",
+        "listenAddresses",
         "localAnnounceEnabled",
         "maxRecvKbps",
         "maxSendKbps",
+        "progressUpdateIntervalS",
         "releasesURL",
-        "urAccepted"
+        "unackedNotificationIDs",
+        "urAccepted",
+        "urSeen"
       ],
-      "required_keys": [],
+      "required_keys": [
+        "listenAddresses",
+        "globalAnnounceServers",
+        "progressUpdateIntervalS"
+      ],
       "response_kind": "object",
       "status_code": 200
     },
@@ -485,21 +531,15 @@
       "status_code": 200
     },
     "GET /rest/events": {
-      "present_keys": [
-        "count",
-        "events"
-      ],
+      "present_keys": [],
       "required_keys": [],
-      "response_kind": "object",
+      "response_kind": "array",
       "status_code": 200
     },
     "GET /rest/events/disk": {
-      "present_keys": [
-        "count",
-        "events"
-      ],
+      "present_keys": [],
       "required_keys": [],
-      "response_kind": "object",
+      "response_kind": "array",
       "status_code": 200
     },
     "GET /rest/folder/errors": {
@@ -606,7 +646,8 @@
         "folders",
         "gui",
         "ldap",
-        "options"
+        "options",
+        "remoteIgnoredDevices"
       ],
       "required_keys": [],
       "response_kind": "object",
@@ -645,9 +686,7 @@
       "status_code": 200
     },
     "GET /rest/system/discovery": {
-      "present_keys": [
-        "devices"
-      ],
+      "present_keys": [],
       "required_keys": [],
       "response_kind": "object",
       "status_code": 200
@@ -709,20 +748,31 @@
     "GET /rest/system/status": {
       "present_keys": [
         "activePeers",
+        "connectionServiceStatus",
+        "deviceCount",
+        "discoveryStatus",
         "folderCount",
+        "guiAddressUsed",
+        "lastDialStatus",
         "listenAddress",
         "maxPeers",
         "memoryBudgetBytes",
         "memoryEstimatedBytes",
         "myID",
+        "pathSeparator",
         "startTime",
-        "uptimeS"
+        "uptimeS",
+        "urVersionMax"
       ],
       "required_keys": [
         "myID",
         "uptimeS",
         "memoryEstimatedBytes",
-        "memoryBudgetBytes"
+        "memoryBudgetBytes",
+        "guiAddressUsed",
+        "connectionServiceStatus",
+        "discoveryStatus",
+        "urVersionMax"
       ],
       "response_kind": "object",
       "status_code": 200

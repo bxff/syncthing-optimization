@@ -26,6 +26,7 @@
       "sendonly": true
     },
     "scan_attempts": 4,
+    "seed": 1,
     "state_ok": {
       "default": true,
       "recvenc": true,
@@ -38,7 +39,8 @@
       "recvenc": "recvenc",
       "recvonly": "recvonly",
       "sendonly": "sendonly"
-    }
+    },
+    "workload_digest": "f40e827616ba5cd4e2c2675a49425edc0cfc8e0e556a2c1214f16b3427c6818f"
   },
   "scenario": "external-folder-modes-replacement",
   "source": "rust",

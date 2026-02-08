@@ -16,7 +16,10 @@
     "post_restart_local_files": 2,
     "post_restart_need_files": 0,
     "pre_restart_global_files": 2,
-    "pre_restart_local_files": 2
+    "pre_restart_local_files": 2,
+    "seed": 1,
+    "status_poll_attempts": 2,
+    "workload_digest": "962afc2f6f043ed7a2d5a194666a0724802f56f0fe7acfa7d3206565b8072dc2"
   },
   "scenario": "external-durability-restart",
   "source": "rust",

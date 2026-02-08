@@ -404,6 +404,7 @@ fn parse_syncthing_config_bootstrap(raw: &str) -> SyncthingConfigBootstrap {
     let mut current_device_compression = "metadata".to_string();
     let mut current_device_introducer = false;
     let mut first_top_level_device_id: Option<String> = None;
+    let mut defaults_folder_device_id: Option<String> = None;
 
     let mut finish_device = |out: &mut SyncthingConfigBootstrap,
                              id: &mut Option<String>,
@@ -466,11 +467,14 @@ fn parse_syncthing_config_bootstrap(raw: &str) -> SyncthingConfigBootstrap {
             in_defaults_folder = false;
         }
 
-        if in_defaults_folder && out.local_device_id.is_none() && trimmed.starts_with("<device ") {
+        if in_defaults_folder
+            && defaults_folder_device_id.is_none()
+            && trimmed.starts_with("<device ")
+        {
             if let Some(device_id) = extract_xml_attr(trimmed, "id") {
                 let decoded = decode_xml_value(device_id.trim());
                 if !decoded.is_empty() {
-                    out.local_device_id = Some(decoded);
+                    defaults_folder_device_id = Some(decoded);
                 }
             }
         }
@@ -654,27 +658,23 @@ fn parse_syncthing_config_bootstrap(raw: &str) -> SyncthingConfigBootstrap {
         );
     }
 
-    if out.local_device_id.is_none() {
-        out.local_device_id = first_top_level_device_id
-            .clone()
-            .filter(|id| !id.trim().is_empty())
-            .or_else(|| {
-                out.device_configs
-                    .keys()
-                    .next()
-                    .map(ToOwned::to_owned)
-                    .filter(|id| !id.trim().is_empty())
-            });
-    } else if out
-        .local_device_id
-        .as_ref()
-        .map(|id| !out.device_configs.contains_key(id))
-        .unwrap_or(false)
-    {
-        out.local_device_id = first_top_level_device_id
-            .clone()
-            .or_else(|| out.device_configs.keys().next().map(ToOwned::to_owned));
-    }
+    // Prefer the first explicit top-level device entry from config.xml for local identity.
+    // Defaults/folder device IDs can be stale after migrations and should only be fallback.
+    out.local_device_id = first_top_level_device_id
+        .clone()
+        .filter(|id| !id.trim().is_empty())
+        .or_else(|| {
+            defaults_folder_device_id
+                .clone()
+                .filter(|id| !id.trim().is_empty())
+        })
+        .or_else(|| {
+            out.device_configs
+                .keys()
+                .next()
+                .map(ToOwned::to_owned)
+                .filter(|id| !id.trim().is_empty())
+        });
 
     out
 }
@@ -4978,6 +4978,47 @@ mod tests {
 
         let parsed = parse_syncthing_config_bootstrap(xml);
         assert_eq!(parsed.local_device_id.as_deref(), Some("ZZZ-REMOTE"));
+    }
+
+    #[test]
+    fn parse_syncthing_config_bootstrap_prefers_top_level_over_defaults_device() {
+        let xml = r#"
+<configuration version="51">
+    <folder id="main" label="Main" path="~/Sync" type="sendreceive">
+        <device id="LOCAL-TOP" introducedBy=""></device>
+        <device id="REMOTE-TOP" introducedBy=""></device>
+    </folder>
+    <device id="LOCAL-TOP" name="This Device"></device>
+    <device id="REMOTE-TOP" name="Remote Device"></device>
+    <defaults>
+        <folder id="" label="" path="" type="sendreceive">
+            <device id="STALE-DEFAULTS-ID" introducedBy=""></device>
+        </folder>
+    </defaults>
+</configuration>
+"#;
+
+        let parsed = parse_syncthing_config_bootstrap(xml);
+        assert_eq!(parsed.local_device_id.as_deref(), Some("LOCAL-TOP"));
+    }
+
+    #[test]
+    fn parse_syncthing_config_bootstrap_uses_defaults_when_top_level_missing() {
+        let xml = r#"
+<configuration version="51">
+    <folder id="main" label="Main" path="~/Sync" type="sendreceive">
+        <device id="ONLY-DEFAULTS" introducedBy=""></device>
+    </folder>
+    <defaults>
+        <folder id="" label="" path="" type="sendreceive">
+            <device id="ONLY-DEFAULTS" introducedBy=""></device>
+        </folder>
+    </defaults>
+</configuration>
+"#;
+
+        let parsed = parse_syncthing_config_bootstrap(xml);
+        assert_eq!(parsed.local_device_id.as_deref(), Some("ONLY-DEFAULTS"));
     }
 
     fn test_api_runtime(

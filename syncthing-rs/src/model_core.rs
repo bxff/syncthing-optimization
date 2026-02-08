@@ -315,14 +315,7 @@ impl Default for model {
 }
 
 fn model_with_runtime(db_root: PathBuf, db_memory_cap_mb: usize) -> model {
-    if let Err(err) = fs::create_dir_all(&db_root) {
-        panic!(
-            "failed to create runtime db root {}: {err}",
-            db_root.display()
-        );
-    }
-    let sdb = db::WalFreeDb::open_runtime(&db_root, db_memory_cap_mb)
-        .unwrap_or_else(|err| panic!("failed to open runtime db at {}: {err}", db_root.display()));
+    let (sdb, runtime_init_warning) = open_runtime_db_with_fallback(&db_root, db_memory_cap_mb);
     model {
         id: "local-device".to_string(),
         shortID: "local".to_string(),
@@ -356,8 +349,62 @@ fn model_with_runtime(db_root: PathBuf, db_memory_cap_mb: usize) -> model {
         mut_count: 0,
         sdb: Arc::new(RwLock::new(sdb)),
         evLogger: Vec::new(),
-        fatalChan: None,
+        fatalChan: runtime_init_warning,
     }
+}
+
+fn open_runtime_db_with_fallback(
+    db_root: &Path,
+    db_memory_cap_mb: usize,
+) -> (db::WalFreeDb, Option<String>) {
+    match open_runtime_db(db_root, db_memory_cap_mb) {
+        Ok(db) => return (db, None),
+        Err(primary_err) => {
+            let fallback_root = runtime_fallback_db_root();
+            match open_runtime_db(&fallback_root, db_memory_cap_mb) {
+                Ok(db) => {
+                    let msg = format!(
+                        "runtime db fallback engaged: primary={} error={} fallback={}",
+                        db_root.display(),
+                        primary_err,
+                        fallback_root.display(),
+                    );
+                    return (db, Some(msg));
+                }
+                Err(fallback_err) => {
+                    panic!(
+                        "failed to initialize runtime db (primary={} error={}; fallback={} error={})",
+                        db_root.display(),
+                        primary_err,
+                        fallback_root.display(),
+                        fallback_err,
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn open_runtime_db(db_root: &Path, db_memory_cap_mb: usize) -> Result<db::WalFreeDb, String> {
+    fs::create_dir_all(db_root).map_err(|err| {
+        format!(
+            "failed to create runtime db root {}: {err}",
+            db_root.display()
+        )
+    })?;
+    db::WalFreeDb::open_runtime(db_root, db_memory_cap_mb)
+        .map_err(|err| format!("failed to open runtime db at {}: {err}", db_root.display()))
+}
+
+fn runtime_fallback_db_root() -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let suffix = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut root = std::env::temp_dir();
+    root.push(format!(
+        "syncthing-rs-db-fallback-{}-{suffix}",
+        std::process::id()
+    ));
+    root
 }
 
 fn runtime_db_root() -> PathBuf {
@@ -1625,6 +1672,31 @@ mod tests {
 
         drop(db);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn new_model_with_runtime_falls_back_when_root_is_not_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "syncthing-rs-runtime-invalid-root-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&root);
+        fs::write(&root, b"not-a-directory").expect("create blocking file");
+
+        let m = NewModelWithRuntime(Some(root.clone()), Some(7));
+        let db = m.sdb.read().expect("lock db");
+        assert_ne!(db.runtime_root(), &root);
+        assert_eq!(db.memory_budget_bytes(), 7 * 1024 * 1024);
+        drop(db);
+
+        let warning = m
+            .fatalChan
+            .as_ref()
+            .expect("fallback warning should be recorded");
+        assert!(warning.contains("runtime db fallback engaged"));
+        assert!(warning.contains("failed to create runtime db root"));
+
+        let _ = fs::remove_file(root);
     }
 
     #[test]

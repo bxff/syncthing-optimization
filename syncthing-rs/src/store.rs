@@ -458,7 +458,7 @@ impl Store {
     pub(crate) fn files_in_folder_ordered_page(
         &self,
         folder: &str,
-        start_after_path: Option<&str>,
+        start_after: Option<&PageCursor>,
         limit: usize,
     ) -> FilePage {
         if limit == 0 {
@@ -469,17 +469,25 @@ impl Store {
         }
 
         let mut items = Vec::with_capacity(limit.saturating_add(1));
+        let start_key = start_after.and_then(|cursor| {
+            if cursor.folder == folder {
+                Some(composite_key(&cursor.folder, &cursor.device, &cursor.path))
+            } else {
+                None
+            }
+        });
         if let Some(device_store) = self.files.get(folder) {
             for (device, path_store) in device_store {
                 for (path_key, value) in path_store {
-                    let Some(file) = file_from_parts(folder, device, path_key, value) else {
-                        continue;
-                    };
-                    if let Some(start_path) = start_after_path {
-                        if compare_path_order(&file.path, start_path) != Ordering::Greater {
+                    let entry_key = composite_key_from_path_key(folder, device, path_key);
+                    if let Some(start) = &start_key {
+                        if entry_key <= *start {
                             continue;
                         }
                     }
+                    let Some(file) = file_from_parts(folder, device, path_key, value) else {
+                        continue;
+                    };
                     items.push(file);
                     if items.len() > limit {
                         break;
@@ -697,9 +705,24 @@ impl Store {
 
             loop {
                 let mut hdr = [0_u8; 8];
-                match reader.read_exact(&mut hdr) {
+                let first_read = reader.read(&mut hdr[..1]);
+                match first_read {
+                    Ok(0) => break,
+                    Ok(1) => {}
+                    Ok(_) => unreachable!("single-byte read should not exceed one byte"),
+                    Err(err) => return Err(err),
+                }
+                match reader.read_exact(&mut hdr[1..]) {
                     Ok(()) => {}
-                    Err(err) if err.kind() == ErrorKind::UnexpectedEof => break,
+                    Err(err) if err.kind() == ErrorKind::UnexpectedEof => {
+                        if is_active_segment {
+                            break;
+                        }
+                        return Err(io::Error::new(
+                            ErrorKind::InvalidData,
+                            format!("partial header in archived segment {}", path.display()),
+                        ));
+                    }
                     Err(err) => return Err(err),
                 }
 
@@ -956,7 +979,7 @@ fn load_or_init_manifest(root: &Path, manifest_path: &Path) -> io::Result<StoreM
                 format!("decode manifest {}: {err}", manifest_path.display()),
             )
         })?;
-        normalize_manifest(root, &mut manifest, false);
+        normalize_manifest(root, &mut manifest, false)?;
         persist_manifest(root, manifest_path, &manifest)?;
         return Ok(manifest);
     }
@@ -985,12 +1008,16 @@ fn load_or_init_manifest(root: &Path, manifest_path: &Path) -> io::Result<StoreM
             next_segment_id: max_segment_id.saturating_add(1),
         }
     };
-    normalize_manifest(root, &mut manifest, true);
+    normalize_manifest(root, &mut manifest, true)?;
     persist_manifest(root, manifest_path, &manifest)?;
     Ok(manifest)
 }
 
-fn normalize_manifest(root: &Path, manifest: &mut StoreManifest, include_discovered: bool) {
+fn normalize_manifest(
+    root: &Path,
+    manifest: &mut StoreManifest,
+    include_discovered: bool,
+) -> io::Result<()> {
     manifest.schema_version = MANIFEST_SCHEMA_VERSION;
 
     if manifest.segments.is_empty() {
@@ -1052,6 +1079,32 @@ fn normalize_manifest(root: &Path, manifest: &mut StoreManifest, include_discove
             }
         }
     }
+
+    for segment in &manifest.segments {
+        if !is_valid_manifest_segment_name(segment) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                format!("invalid manifest segment name: {segment}"),
+            ));
+        }
+    }
+    if !is_valid_manifest_segment_name(&manifest.active_segment) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "invalid manifest active segment name: {}",
+                manifest.active_segment
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn is_valid_manifest_segment_name(name: &str) -> bool {
+    if name == JOURNAL_FILE_NAME {
+        return true;
+    }
+    parse_segment_id(name).is_some()
 }
 
 fn discover_commit_segments(root: &Path) -> Vec<String> {
@@ -1923,6 +1976,25 @@ mod tests {
     }
 
     #[test]
+    fn open_rejects_manifest_with_invalid_segment_name() {
+        let root = temp_root("manifest-invalid-segment");
+        let manifest = serde_json::json!({
+            "schema_version": MANIFEST_SCHEMA_VERSION,
+            "segments": ["../escape.log"],
+            "active_segment": "../escape.log",
+            "next_segment_id": 1
+        });
+        fs::write(
+            root.join(MANIFEST_FILE_NAME),
+            serde_json::to_vec(&manifest).expect("encode manifest"),
+        )
+        .expect("write manifest");
+        let err = Store::open(StoreConfig::new(&root)).expect_err("must reject manifest");
+        assert!(err.to_string().contains("invalid manifest"));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn open_fails_when_manifest_segment_missing() {
         let root = temp_root("manifest-segment-missing");
         let cfg = StoreConfig::new(&root).with_memory_cap_mb(256);
@@ -2169,15 +2241,15 @@ mod tests {
                 .expect("upsert");
         }
 
-        let mut cursor_path: Option<String> = None;
+        let mut cursor: Option<PageCursor> = None;
         let mut out = Vec::new();
         loop {
-            let page = store.files_in_folder_ordered_page("alpha", cursor_path.as_deref(), 2);
+            let page = store.files_in_folder_ordered_page("alpha", cursor.as_ref(), 2);
             for item in &page.items {
                 out.push(item.path.clone());
             }
             match page.next_cursor {
-                Some(next) => cursor_path = Some(next.path),
+                Some(next) => cursor = Some(next),
                 None => break,
             }
         }
@@ -2195,6 +2267,43 @@ mod tests {
             ]
         );
 
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn folder_pagination_across_devices_keeps_duplicate_paths() {
+        let root = temp_root("folder-paging-dup-paths");
+        let cfg = StoreConfig::new(&root);
+        let mut store = Store::open(cfg).expect("open");
+        store
+            .upsert_file(FileMetadata {
+                device: "local".to_string(),
+                ..meta("alpha", "same.txt", 1)
+            })
+            .expect("upsert local");
+        store
+            .upsert_file(FileMetadata {
+                device: "peer-a".to_string(),
+                ..meta("alpha", "same.txt", 2)
+            })
+            .expect("upsert peer");
+
+        let mut cursor: Option<PageCursor> = None;
+        let mut seen = Vec::new();
+        loop {
+            let page = store.files_in_folder_ordered_page("alpha", cursor.as_ref(), 1);
+            for item in page.items {
+                seen.push(format!("{}:{}", item.device, item.path));
+            }
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+
+        assert_eq!(seen.len(), 2);
+        assert!(seen.contains(&"local:same.txt".to_string()));
+        assert!(seen.contains(&"peer-a:same.txt".to_string()));
         fs::remove_dir_all(root).expect("cleanup");
     }
 

@@ -77,7 +77,7 @@ pub(crate) fn walk_deterministic(
                     let meta = fs::symlink_metadata(&abs_path)?;
                     if meta.is_dir() {
                         push_items.push(WorkItem::Dir(rel_path));
-                    } else if meta.is_file() {
+                    } else if meta.is_file() || meta.file_type().is_symlink() {
                         push_items.push(WorkItem::File(path_to_slash_string(&rel_path)));
                     }
                 }
@@ -254,6 +254,29 @@ mod tests {
         assert_eq!(emitted, vec!["a/x.txt", "a/z.txt", "a.d/x.txt", "b.txt"]);
         assert!(stats.directories_seen >= 3);
         assert_eq!(stats.files_emitted, 4);
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(spill);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deterministic_walk_emits_symlink_without_descending() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root("symlink-walk");
+        fs::create_dir_all(root.join("dir")).expect("mkdir dir");
+        fs::write(root.join("dir").join("a.txt"), b"a").expect("write");
+        symlink(root.join("dir"), root.join("link_to_dir")).expect("symlink");
+
+        let spill = temp_root("symlink-walk-spill");
+        let cfg = WalkConfig::new(&spill).with_spill_threshold_entries(2);
+        let mut emitted = Vec::new();
+        walk_deterministic(&root, &cfg, |path| emitted.push(path)).expect("walk");
+
+        assert!(emitted.contains(&"dir/a.txt".to_string()));
+        assert!(emitted.contains(&"link_to_dir".to_string()));
+        assert!(!emitted.contains(&"link_to_dir/a.txt".to_string()));
 
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(spill);

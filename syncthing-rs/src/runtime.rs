@@ -265,7 +265,7 @@ pub(crate) fn run_daemon(config: DaemonConfig) -> Result<(), String> {
     let model = Arc::new(RwLock::new(NewModelWithRuntime(
         config.db_root.as_ref().map(PathBuf::from),
         config.memory_max_mb,
-    )));
+    )?));
     {
         let mut guard = model
             .write()
@@ -1087,6 +1087,7 @@ struct ApiRuntimeState {
     log_lines: Vec<String>,
     log_facilities: BTreeSet<String>,
     active_auth_users: BTreeSet<String>,
+    active_auth_tokens: BTreeMap<String, String>,
 }
 
 impl ApiRuntimeState {
@@ -1161,6 +1162,7 @@ impl ApiRuntimeState {
             log_lines: vec!["syncthing-rs runtime started".to_string()],
             log_facilities: BTreeSet::from(["main".to_string(), "model".to_string()]),
             active_auth_users: BTreeSet::new(),
+            active_auth_tokens: BTreeMap::new(),
         }
     }
 }
@@ -1217,6 +1219,14 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
 
     if !path.starts_with("/rest/") {
         return build_gui_response(method, path, runtime);
+    }
+
+    if !path.starts_with("/rest/noauth/") {
+        match is_authenticated_request(&params, runtime) {
+            Ok(true) => {}
+            Ok(false) => return make_api_error(401, "authentication required"),
+            Err(err) => return make_api_error(500, &err),
+        }
     }
 
     if let Some(folder_id) = path_param(path, "/rest/config/folders/") {
@@ -1400,14 +1410,6 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         );
     }
 
-    if path.starts_with("/rest/") && !path.starts_with("/rest/noauth/") {
-        match is_authenticated_request(&params, runtime) {
-            Ok(true) => {}
-            Ok(false) => return make_api_error(401, "authentication required"),
-            Err(err) => return make_api_error(500, &err),
-        }
-    }
-
     match path {
         "/rest/system/ping" => {
             if method != &Method::Get && method != &Method::Post {
@@ -1453,7 +1455,12 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 }
             }
             state.active_auth_users.insert(user.clone());
-            ApiReply::json(200, json!({"authenticated": true, "user": user}))
+            let token = mint_auth_token(&user);
+            state.active_auth_tokens.insert(token.clone(), user.clone());
+            ApiReply::json(
+                200,
+                json!({"authenticated": true, "user": user, "token": token}),
+            )
         }
         "/rest/noauth/auth/logout" => {
             if method != &Method::Post {
@@ -1467,7 +1474,24 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 Ok(guard) => guard,
                 Err(_) => return make_api_error(500, "api state lock poisoned"),
             };
-            state.active_auth_users.remove(&user);
+            if auth_required(&state) {
+                let Some(token) = params.get("token") else {
+                    return make_api_error(401, "authentication required");
+                };
+                let Some(bound_user) = state.active_auth_tokens.get(token) else {
+                    return make_api_error(401, "authentication required");
+                };
+                if bound_user != &user {
+                    return make_api_error(401, "authentication required");
+                }
+                state.active_auth_tokens.remove(token);
+            } else {
+                state.active_auth_tokens.retain(|_, u| u != &user);
+            }
+            let still_logged_in = state.active_auth_tokens.values().any(|u| u == &user);
+            if !still_logged_in {
+                state.active_auth_users.remove(&user);
+            }
             ApiReply::json(200, json!({"loggedOut": true, "user": user}))
         }
         "/rest/system/version" => {
@@ -2968,6 +2992,14 @@ fn auth_required(state: &ApiRuntimeState) -> bool {
     !user.is_empty() || !password.is_empty()
 }
 
+fn mint_auth_token(user: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{}-{}-{nanos}", user, std::process::id())
+}
+
 fn is_authenticated_request(
     params: &BTreeMap<String, String>,
     runtime: &DaemonApiRuntime,
@@ -2982,7 +3014,14 @@ fn is_authenticated_request(
     let Some(user) = params.get("user") else {
         return Ok(false);
     };
-    Ok(state.active_auth_users.contains(user))
+    let Some(token) = params.get("token") else {
+        return Ok(false);
+    };
+    Ok(state
+        .active_auth_tokens
+        .get(token)
+        .map(|bound_user| bound_user == user)
+        .unwrap_or(false))
 }
 
 fn path_param<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
@@ -4069,7 +4108,7 @@ pub(crate) fn run_parity_probe(with_peer_interop: bool) -> Result<(), String> {
         let model = Arc::new(RwLock::new(NewModelWithRuntime(
             Some(root.join("db")),
             Some(64),
-        )));
+        )?));
         {
             let mut guard = model
                 .write()
@@ -4159,7 +4198,7 @@ pub(crate) fn run_api_surface_probe() -> Result<ApiSurfaceProbeResult, String> {
         let model = Arc::new(RwLock::new(NewModelWithRuntime(
             Some(root.join("db")),
             Some(64),
-        )));
+        )?));
         {
             let mut guard = model
                 .write()
@@ -5540,10 +5579,9 @@ mod tests {
     #[test]
     fn api_db_status_returns_folder_metrics() {
         let root = temp_root("api-db-status");
-        let model = Arc::new(RwLock::new(NewModelWithRuntime(
-            Some(root.clone()),
-            Some(50),
-        )));
+        let model = Arc::new(RwLock::new(
+            NewModelWithRuntime(Some(root.clone()), Some(50)).expect("new model"),
+        ));
         {
             let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
@@ -5743,10 +5781,9 @@ mod tests {
     fn api_db_scan_and_jobs_endpoints_work() {
         let root = temp_root("api-db-scan-jobs");
         fs::write(root.join("a.txt"), b"hello").expect("write");
-        let model = Arc::new(RwLock::new(NewModelWithRuntime(
-            Some(root.clone()),
-            Some(50),
-        )));
+        let model = Arc::new(RwLock::new(
+            NewModelWithRuntime(Some(root.clone()), Some(50)).expect("new model"),
+        ));
         {
             let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
@@ -5785,10 +5822,9 @@ mod tests {
     #[test]
     fn api_db_pull_endpoint_applies_remote_file() {
         let root = temp_root("api-db-pull");
-        let model = Arc::new(RwLock::new(NewModelWithRuntime(
-            Some(root.clone()),
-            Some(50),
-        )));
+        let model = Arc::new(RwLock::new(
+            NewModelWithRuntime(Some(root.clone()), Some(50)).expect("new model"),
+        ));
         {
             let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
@@ -5819,10 +5855,9 @@ mod tests {
     #[test]
     fn api_db_browse_returns_ordered_pages() {
         let root = temp_root("api-db-browse");
-        let model = Arc::new(RwLock::new(NewModelWithRuntime(
-            Some(root.clone()),
-            Some(50),
-        )));
+        let model = Arc::new(RwLock::new(
+            NewModelWithRuntime(Some(root.clone()), Some(50)).expect("new model"),
+        ));
         {
             let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
@@ -5870,10 +5905,9 @@ mod tests {
     #[test]
     fn api_db_file_endpoint_returns_local_and_global_entries() {
         let root = temp_root("api-db-file");
-        let model = Arc::new(RwLock::new(NewModelWithRuntime(
-            Some(root.clone()),
-            Some(50),
-        )));
+        let model = Arc::new(RwLock::new(
+            NewModelWithRuntime(Some(root.clone()), Some(50)).expect("new model"),
+        ));
         {
             let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
@@ -5933,10 +5967,9 @@ mod tests {
     #[test]
     fn api_db_completion_localchanged_and_remoteneed_endpoints_work() {
         let root = temp_root("api-db-completion-localchanged-remoteneed");
-        let model = Arc::new(RwLock::new(NewModelWithRuntime(
-            Some(root.clone()),
-            Some(50),
-        )));
+        let model = Arc::new(RwLock::new(
+            NewModelWithRuntime(Some(root.clone()), Some(50)).expect("new model"),
+        ));
         {
             let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
@@ -6010,10 +6043,9 @@ mod tests {
     #[test]
     fn api_db_override_and_revert_endpoints_work() {
         let root = temp_root("api-db-override-revert");
-        let model = Arc::new(RwLock::new(NewModelWithRuntime(
-            Some(root.clone()),
-            Some(50),
-        )));
+        let model = Arc::new(RwLock::new(
+            NewModelWithRuntime(Some(root.clone()), Some(50)).expect("new model"),
+        ));
         {
             let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
@@ -6053,10 +6085,9 @@ mod tests {
     #[test]
     fn api_db_bringtofront_endpoint_works() {
         let root = temp_root("api-db-bringtofront");
-        let model = Arc::new(RwLock::new(NewModelWithRuntime(
-            Some(root.clone()),
-            Some(50),
-        )));
+        let model = Arc::new(RwLock::new(
+            NewModelWithRuntime(Some(root.clone()), Some(50)).expect("new model"),
+        ));
         {
             let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
@@ -6092,10 +6123,9 @@ mod tests {
     #[test]
     fn api_db_ignores_and_reset_endpoints_work() {
         let root = temp_root("api-db-ignores-reset");
-        let model = Arc::new(RwLock::new(NewModelWithRuntime(
-            Some(root.clone()),
-            Some(50),
-        )));
+        let model = Arc::new(RwLock::new(
+            NewModelWithRuntime(Some(root.clone()), Some(50)).expect("new model"),
+        ));
         {
             let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
@@ -6152,10 +6182,9 @@ mod tests {
     #[test]
     fn api_db_need_returns_needed_page() {
         let root = temp_root("api-db-need");
-        let model = Arc::new(RwLock::new(NewModelWithRuntime(
-            Some(root.clone()),
-            Some(50),
-        )));
+        let model = Arc::new(RwLock::new(
+            NewModelWithRuntime(Some(root.clone()), Some(50)).expect("new model"),
+        ));
         {
             let mut guard = model.write().expect("lock");
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
@@ -6340,10 +6369,68 @@ mod tests {
             &runtime,
         );
         assert_eq!(login.status_code, StatusCode(200));
+        let login_payload: Value = serde_json::from_slice(&login.body).expect("decode login");
+        let token = login_payload["token"].as_str().expect("login token");
 
-        let authorized =
-            build_api_response(&Method::Get, "/rest/system/status?user=alice", &runtime);
+        let authorized = build_api_response(
+            &Method::Get,
+            &format!("/rest/system/status?user=alice&token={token}"),
+            &runtime,
+        );
         assert_eq!(authorized.status_code, StatusCode(200));
+
+        let impersonated =
+            build_api_response(&Method::Get, "/rest/system/status?user=alice", &runtime);
+        assert_eq!(impersonated.status_code, StatusCode(401));
+    }
+
+    #[test]
+    fn api_requires_auth_for_config_item_and_debug_routes() {
+        let runtime = test_api_runtime(Arc::new(RwLock::new(NewModel())), Vec::new(), 0);
+        {
+            let mut state = runtime.state.write().expect("state lock");
+            state.gui["user"] = json!("alice");
+            state.gui["password"] = json!("secret");
+        }
+
+        let folder_get = build_api_response(&Method::Get, "/rest/config/folders/default", &runtime);
+        assert_eq!(folder_get.status_code, StatusCode(401));
+        let device_get = build_api_response(&Method::Get, "/rest/config/devices/peer-a", &runtime);
+        assert_eq!(device_get.status_code, StatusCode(401));
+        let debug_get = build_api_response(&Method::Get, "/rest/debug/httpmetrics", &runtime);
+        assert_eq!(debug_get.status_code, StatusCode(401));
+    }
+
+    #[test]
+    fn api_logout_requires_session_token_when_auth_required() {
+        let runtime = test_api_runtime(Arc::new(RwLock::new(NewModel())), Vec::new(), 0);
+        {
+            let mut state = runtime.state.write().expect("state lock");
+            state.gui["user"] = json!("alice");
+            state.gui["password"] = json!("secret");
+        }
+
+        let login = build_api_response(
+            &Method::Post,
+            "/rest/noauth/auth/password?user=alice&password=secret",
+            &runtime,
+        );
+        let payload: Value = serde_json::from_slice(&login.body).expect("decode login");
+        let token = payload["token"].as_str().expect("token");
+
+        let bad_logout = build_api_response(
+            &Method::Post,
+            "/rest/noauth/auth/logout?user=alice",
+            &runtime,
+        );
+        assert_eq!(bad_logout.status_code, StatusCode(401));
+
+        let still_auth = build_api_response(
+            &Method::Get,
+            &format!("/rest/system/status?user=alice&token={token}"),
+            &runtime,
+        );
+        assert_eq!(still_auth.status_code, StatusCode(200));
     }
 
     #[test]

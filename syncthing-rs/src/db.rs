@@ -652,8 +652,10 @@ impl WalFreeDb {
 
     fn get_device_file_light(&self, folder: &str, device: &str, file: &str) -> Option<FileInfo> {
         self.store
-            .get_file(folder, device, file)
-            .map(|meta| store_to_file_info_without_blocks(&meta))
+            .get_file_with_blocks(folder, device, file)
+            .ok()
+            .flatten()
+            .map(|meta| store_to_file_info(&meta))
     }
 }
 
@@ -724,10 +726,14 @@ impl Db for WalFreeDb {
             if device == LOCAL_DEVICE_ID {
                 continue;
             }
-            let Some(meta) = self.store.get_file(folder, &device, &normalized) else {
+            let Some(meta) = self
+                .store
+                .get_file_with_blocks(folder, &device, &normalized)
+                .map_err(|e| format!("get file with blocks: {e}"))?
+            else {
                 continue;
             };
-            let candidate = store_to_file_info_without_blocks(&meta);
+            let candidate = store_to_file_info(&meta);
             if !candidate.ignored
                 && candidate.local_flags & FLAG_LOCAL_INVALID == 0
                 && same_file_version_for_availability(&candidate, &global)
@@ -974,7 +980,7 @@ impl Db for WalFreeDb {
         hash: &[u8],
     ) -> Result<DbStream<'_, FileMetadata>, String> {
         self.ensure_open()?;
-        let target = String::from_utf8_lossy(hash).to_string();
+        let target = hash.to_vec();
         let folder = folder.to_string();
         let mut cursor: Option<String> = None;
         let mut page: Vec<StoreFileMetadata> = Vec::new();
@@ -993,7 +999,7 @@ impl Db for WalFreeDb {
                         )));
                     }
                 };
-                if hashes.iter().any(|h| h == &target) {
+                if hashes.iter().any(|h| h.as_bytes() == target.as_slice()) {
                     return Some(Ok(file_metadata_from_info(
                         store_to_file_info_without_blocks(&meta),
                     )));
@@ -1100,7 +1106,7 @@ impl Db for WalFreeDb {
         hash: &[u8],
     ) -> Result<DbStream<'_, BlockMapEntry>, String> {
         self.ensure_open()?;
-        let target = String::from_utf8_lossy(hash).to_string();
+        let target = hash.to_vec();
         let folder = folder.to_string();
         let mut cursor: Option<String> = None;
         let mut page: Vec<StoreFileMetadata> = Vec::new();
@@ -1130,7 +1136,7 @@ impl Db for WalFreeDb {
                     .iter()
                     .enumerate()
                     .filter_map(|(block_idx, block_hash)| {
-                        if block_hash != &target {
+                        if block_hash.as_bytes() != target.as_slice() {
                             return None;
                         }
                         const BLOCK_SIZE: i64 = 128 * 1024;
@@ -1141,7 +1147,7 @@ impl Db for WalFreeDb {
                             return None;
                         }
                         Some(BlockMapEntry {
-                            blocklist_hash: target.as_bytes().to_vec(),
+                            blocklist_hash: target.clone(),
                             offset,
                             block_index: block_idx as i32,
                             size: remaining.min(BLOCK_SIZE) as i32,
@@ -1327,7 +1333,7 @@ impl Db for WalFreeDb {
             device_id: device.to_string(),
             ..Counts::default()
         };
-        self.for_each_global_winner(folder, false, |global| {
+        self.for_each_global_winner(folder, true, |global| {
             let local = self.get_device_file_light(folder, device, &global.path);
             if requires_update(&global, local.as_ref()) {
                 add_file_to_counts(&mut counts, &global);
@@ -1343,12 +1349,27 @@ impl Db for WalFreeDb {
             device_id: LOCAL_DEVICE_ID.to_string(),
             ..Counts::default()
         };
-        self.for_each_global_winner(folder, false, |global| {
-            if global.local_flags & FLAG_LOCAL_RECEIVE_ONLY != 0 {
-                add_file_to_counts(&mut counts, &global);
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = self.all_local_files_ordered_page(
+                folder,
+                LOCAL_DEVICE_ID,
+                cursor.as_deref(),
+                2048,
+            )?;
+            if page.items.is_empty() {
+                break;
             }
-            Ok(true)
-        })?;
+            for file in page.items {
+                if file.local_flags & FLAG_LOCAL_RECEIVE_ONLY != 0 {
+                    add_file_to_counts(&mut counts, &file);
+                }
+            }
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
         Ok(counts)
     }
 
@@ -1664,10 +1685,20 @@ fn same_file_version(a: &FileInfo, b: &FileInfo) -> bool {
 }
 
 fn same_file_version_for_availability(a: &FileInfo, b: &FileInfo) -> bool {
-    a.deleted == b.deleted
+    let basic_match = a.deleted == b.deleted
         && a.file_type == b.file_type
         && a.modified_ns == b.modified_ns
-        && a.size == b.size
+        && a.size == b.size;
+    if !basic_match {
+        return false;
+    }
+    if a.deleted {
+        return true;
+    }
+    if a.file_type == FileInfoType::File {
+        return a.block_hashes == b.block_hashes;
+    }
+    true
 }
 
 fn prefer_global(candidate: &FileInfo, current: &FileInfo) -> bool {
@@ -2213,6 +2244,29 @@ mod tests {
     }
 
     #[test]
+    fn local_hash_queries_are_byte_exact() {
+        let mut db = WalFreeDb::default();
+        let mut local = file("local.txt", 1, 5);
+        local.block_hashes = vec!["\u{FFFD}".to_string()];
+        db.update("default", "local", vec![local])
+            .expect("local update");
+
+        let files = db
+            .all_local_files_with_blocks_hash("default", &[0xFF])
+            .and_then(collect_stream)
+            .expect("local files with hash");
+        assert!(files.is_empty());
+
+        let blocks = db
+            .all_local_blocks_with_hash("default", b"h2")
+            .and_then(collect_stream)
+            .expect("local blocks with hash");
+        for block in blocks {
+            assert_eq!(block.blocklist_hash, b"h2".to_vec());
+        }
+    }
+
+    #[test]
     fn count_local_excludes_ignored_files() {
         let mut db = WalFreeDb::default();
         let mut ignored = file("ignored.txt", 2, 99);
@@ -2349,6 +2403,49 @@ mod tests {
             .and_then(collect_stream)
             .expect("need query");
         assert!(need.is_empty());
+    }
+
+    #[test]
+    fn need_detects_same_size_same_mtime_but_different_hashes() {
+        let mut db = WalFreeDb::default();
+        let mut local = file("same.txt", 1, 10);
+        local.modified_ns = 100;
+        local.block_hashes = vec!["h-local".to_string()];
+        db.update("default", "local", vec![local])
+            .expect("local update");
+
+        let mut remote = file("same.txt", 5, 10);
+        remote.modified_ns = 100;
+        remote.block_hashes = vec!["h-remote".to_string()];
+        db.update("default", "peer-a", vec![remote])
+            .expect("remote update");
+
+        let need = db
+            .all_needed_global_files("default", "local", PullOrder::Alphabetic, 10, 0)
+            .and_then(collect_stream)
+            .expect("need query");
+        assert_eq!(need.len(), 1);
+        assert_eq!(need[0].path, "same.txt");
+    }
+
+    #[test]
+    fn count_receive_only_changed_uses_local_entries() {
+        let mut db = WalFreeDb::default();
+        let mut local = file("ro.txt", 1, 10);
+        local.local_flags = FLAG_LOCAL_RECEIVE_ONLY;
+        local.block_hashes = vec!["h-local".to_string()];
+        db.update("default", "local", vec![local])
+            .expect("local update");
+
+        let mut remote = file("ro.txt", 2, 10);
+        remote.block_hashes = vec!["h-remote".to_string()];
+        db.update("default", "peer-a", vec![remote])
+            .expect("remote update");
+
+        let counts = db
+            .count_receive_only_changed("default")
+            .expect("receive-only changed");
+        assert_eq!(counts.files, 1);
     }
 
     #[test]

@@ -1390,13 +1390,13 @@ fn resolve_scan_scopes(root: &Path, subdirs: &[String]) -> Result<Vec<ScanScope>
     let mut scopes = Vec::new();
     for sub in subdirs {
         let abs = safe_join_relative_path(root, sub)?;
-        match fs::metadata(&abs) {
+        match fs::symlink_metadata(&abs) {
             Ok(meta) if meta.is_dir() => scopes.push(ScanScope {
                 prefix: sub.clone(),
                 dir: Some(abs),
                 file: None,
             }),
-            Ok(meta) if meta.is_file() => scopes.push(ScanScope {
+            Ok(meta) if meta.is_file() || meta.file_type().is_symlink() => scopes.push(ScanScope {
                 prefix: sub.clone(),
                 dir: None,
                 file: Some(sub.clone()),
@@ -1537,21 +1537,31 @@ fn process_scanned_file(
     let abs = root.join(&relative_path);
     let metadata =
         fs::symlink_metadata(&abs).map_err(|e| format!("stat {}: {e}", abs.display()))?;
-    if !metadata.is_file() {
+    let is_symlink = metadata.file_type().is_symlink();
+    if !metadata.is_file() && !is_symlink {
         return Ok(());
     }
     stats.files_seen = stats.files_seen.saturating_add(1);
 
     let modified_ns =
         file_modified_ns(&metadata).map_err(|e| format!("mtime {}: {e}", abs.display()))?;
-    let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
+    let size = if is_symlink {
+        0
+    } else {
+        i64::try_from(metadata.len()).unwrap_or(i64::MAX)
+    };
+    let file_type = if is_symlink {
+        db::FileInfoType::Symlink
+    } else {
+        db::FileInfoType::File
+    };
 
     if let Some(existing) = current_local.clone() {
         if existing.path == relative_path
             && !existing.deleted
             && !existing.ignored
             && existing.local_flags & db::FLAG_LOCAL_MUST_RESCAN == 0
-            && existing.file_type == db::FileInfoType::File
+            && existing.file_type == file_type
             && existing.modified_ns == modified_ns
             && existing.size == size
         {
@@ -1560,7 +1570,11 @@ fn process_scanned_file(
         }
     }
 
-    let block_hashes = hash_file_blocks(&abs)?;
+    let block_hashes = if is_symlink {
+        Vec::new()
+    } else {
+        hash_file_blocks(&abs)?
+    };
     let new_path = relative_path.clone();
     let new_file = db::FileInfo {
         folder: folder_id.to_string(),
@@ -1571,7 +1585,7 @@ fn process_scanned_file(
         deleted: false,
         ignored: false,
         local_flags: 0,
-        file_type: db::FileInfoType::File,
+        file_type,
         block_hashes,
     };
     *next_sequence = next_sequence.saturating_add(1);
@@ -1691,7 +1705,8 @@ fn apply_remote_file_to_disk(root: &Path, file: &db::FileInfo) -> Result<(), Str
 
     match file.file_type {
         db::FileInfoType::Directory => ensure_directory_path(&abs),
-        db::FileInfoType::File | db::FileInfoType::Symlink => write_sparse_file(&abs, file.size),
+        db::FileInfoType::File => write_sparse_file(&abs, file.size),
+        db::FileInfoType::Symlink => Err("symlink pull entries are not supported".to_string()),
     }
 }
 
@@ -1709,7 +1724,24 @@ fn safe_join_relative_path(root: &Path, relative: &str) -> Result<PathBuf, Strin
             }
         }
     }
-
+    if clean.as_os_str().is_empty() {
+        return Err(format!("invalid relative path: {relative}"));
+    }
+    let mut current = root.to_path_buf();
+    for component in clean.components() {
+        let Component::Normal(seg) = component else {
+            continue;
+        };
+        current.push(seg);
+        match fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(format!("symlink path component is not allowed: {relative}"));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(format!("stat {}: {err}", current.display())),
+        }
+    }
     Ok(root.join(clean))
 }
 
@@ -2637,6 +2669,70 @@ mod tests {
             .expect_err("must fail with poisoned db");
         assert!(err.contains("db lock poisoned"));
         assert!(f.forcedRescanPaths.contains("a.txt"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_join_rejects_symlink_component_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root("safe-join-symlink-escape");
+        let outside = temp_root("safe-join-symlink-outside");
+        symlink(&outside, root.join("escape")).expect("symlink");
+
+        let err =
+            safe_join_relative_path(&root, "escape/pwn.txt").expect_err("must reject symlink path");
+        assert!(err.contains("symlink"));
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_records_symlink_entries() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root("scan-symlink-entry");
+        fs::write(root.join("target.txt"), b"ok").expect("write target");
+        symlink(root.join("target.txt"), root.join("link.txt")).expect("symlink");
+
+        let db = Arc::new(RwLock::new(db::WalFreeDb::default()));
+        let mut f = newFolder(scan_cfg(&root), db.clone());
+        f.Scan(&[]).expect("scan");
+
+        let link = db
+            .read()
+            .expect("db read")
+            .get_device_file("default", LOCAL_DEVICE_ID, "link.txt")
+            .expect("get file")
+            .expect("link entry exists");
+        assert_eq!(link.file_type, db::FileInfoType::Symlink);
+        assert!(!link.deleted);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apply_remote_file_rejects_symlink_entries() {
+        let root = temp_root("pull-symlink-reject");
+        let file = db::FileInfo {
+            folder: "default".to_string(),
+            path: "link.txt".to_string(),
+            sequence: 1,
+            modified_ns: 1,
+            size: 0,
+            deleted: false,
+            ignored: false,
+            local_flags: 0,
+            file_type: db::FileInfoType::Symlink,
+            block_hashes: Vec::new(),
+        };
+
+        let err = apply_remote_file_to_disk(&root, &file).expect_err("must reject symlink pull");
+        assert!(err.contains("symlink pull entries are not supported"));
 
         let _ = fs::remove_dir_all(root);
     }

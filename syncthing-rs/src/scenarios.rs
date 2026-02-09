@@ -123,15 +123,15 @@ fn scenario_index_sequence_behavior() -> Result<Value, String> {
         .into_iter()
         .map(|f| json!({"folder": f.folder, "path": f.path, "sequence": f.sequence}))
         .collect();
-    let mut cursor_path: Option<String> = None;
+    let mut cursor: Option<crate::store::PageCursor> = None;
     let mut paged_paths = Vec::new();
     loop {
-        let page = store.files_in_folder_ordered_page("default", cursor_path.as_deref(), 2);
+        let page = store.files_in_folder_ordered_page("default", cursor.as_ref(), 2);
         for f in &page.items {
             paged_paths.push(f.path.clone());
         }
         match page.next_cursor {
-            Some(next) => cursor_path = Some(next.path),
+            Some(next) => cursor = Some(next),
             None => break,
         }
     }
@@ -380,14 +380,14 @@ fn scenario_path_order_invariant() -> Result<Value, String> {
     }
 
     let mut db_paths = Vec::new();
-    let mut cursor: Option<String> = None;
+    let mut cursor: Option<crate::store::PageCursor> = None;
     loop {
-        let page = store.files_in_folder_ordered_page("default", cursor.as_deref(), 2);
+        let page = store.files_in_folder_ordered_page("default", cursor.as_ref(), 2);
         for file in page.items {
             db_paths.push(file.path);
         }
         match page.next_cursor {
-            Some(next) => cursor = Some(next.path),
+            Some(next) => cursor = Some(next),
             None => break,
         }
     }
@@ -462,7 +462,7 @@ fn scenario_memory_cap_diagnostics() -> Result<Value, String> {
     let folder_root = root.join("folder");
     fs::create_dir_all(&folder_root).map_err(err_to_string)?;
 
-    let mut model = NewModelWithRuntime(Some(root.join("runtime-db")), Some(128));
+    let mut model = NewModelWithRuntime(Some(root.join("runtime-db")), Some(128))?;
     let mut cfg = newFolderConfiguration("default", &folder_root.to_string_lossy());
     cfg.memory_policy = MemoryPolicy::Fail;
     cfg.memory_max_mb = 1;

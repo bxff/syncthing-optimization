@@ -319,12 +319,13 @@ pub(crate) struct BepExchangeResult {
 impl Default for model {
     fn default() -> Self {
         model_with_runtime(runtime_db_root(), runtime_db_memory_cap_mb())
+            .unwrap_or_else(|err| panic!("{err}"))
     }
 }
 
-fn model_with_runtime(db_root: PathBuf, db_memory_cap_mb: usize) -> model {
-    let sdb = open_runtime_db(&db_root, db_memory_cap_mb).unwrap_or_else(|err| panic!("{err}"));
-    model {
+fn model_with_runtime(db_root: PathBuf, db_memory_cap_mb: usize) -> Result<model, String> {
+    let sdb = open_runtime_db(&db_root, db_memory_cap_mb)?;
+    Ok(model {
         id: "local-device".to_string(),
         shortID: "local".to_string(),
         started: true,
@@ -359,7 +360,7 @@ fn model_with_runtime(db_root: PathBuf, db_memory_cap_mb: usize) -> model {
         sdb: Arc::new(RwLock::new(sdb)),
         evLogger: Vec::new(),
         fatalChan: None,
-    }
+    })
 }
 
 fn open_runtime_db(db_root: &Path, db_memory_cap_mb: usize) -> Result<db::WalFreeDb, String> {
@@ -1688,7 +1689,10 @@ pub(crate) fn NewModel() -> model {
     model::default()
 }
 
-pub(crate) fn NewModelWithRuntime(db_root: Option<PathBuf>, memory_cap_mb: Option<usize>) -> model {
+pub(crate) fn NewModelWithRuntime(
+    db_root: Option<PathBuf>,
+    memory_cap_mb: Option<usize>,
+) -> Result<model, String> {
     let root = db_root.unwrap_or_else(runtime_db_root);
     let cap_mb = memory_cap_mb.unwrap_or_else(runtime_db_memory_cap_mb);
     model_with_runtime(root, cap_mb)
@@ -1842,6 +1846,24 @@ fn safe_join_folder_relative(root: &Path, relative: &str) -> Result<PathBuf, Str
             Component::Normal(seg) => clean.push(seg),
             Component::CurDir => {}
             _ => return Err(format!("invalid relative path: {relative}")),
+        }
+    }
+    if clean.as_os_str().is_empty() {
+        return Err(format!("invalid relative path: {relative}"));
+    }
+    let mut current = root.to_path_buf();
+    for component in clean.components() {
+        let Component::Normal(seg) = component else {
+            continue;
+        };
+        current.push(seg);
+        match fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(format!("symlink path component is not allowed: {relative}"));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(format!("stat {}: {err}", current.display())),
         }
     }
     Ok(root.join(clean))
@@ -2002,7 +2024,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("mkdir");
 
-        let m = NewModelWithRuntime(Some(root.clone()), Some(7));
+        let m = NewModelWithRuntime(Some(root.clone()), Some(7)).expect("new model");
         let db = m.sdb.read().expect("lock db");
         assert_eq!(db.runtime_root(), &root);
         assert_eq!(db.memory_budget_bytes(), 7 * 1024 * 1024);
@@ -2025,10 +2047,12 @@ mod tests {
         let _ = fs::remove_file(&root);
         fs::write(&root, b"not-a-directory").expect("create blocking file");
 
-        let panic_result = std::panic::catch_unwind(|| {
-            let _ = NewModelWithRuntime(Some(root.clone()), Some(7));
-        });
-        assert!(panic_result.is_err(), "invalid runtime root must fail fast");
+        let err = NewModelWithRuntime(Some(root.clone()), Some(7))
+            .expect_err("invalid runtime root should return error");
+        assert!(
+            err.contains("failed to create runtime db root")
+                || err.contains("failed to open runtime db")
+        );
 
         let _ = fs::remove_file(root);
     }
@@ -2096,6 +2120,37 @@ mod tests {
         assert_eq!(got, b"world");
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn request_data_rejects_symlink_component_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "syncthing-rs-request-symlink-escape-{}",
+            std::process::id()
+        ));
+        let outside = std::env::temp_dir().join(format!(
+            "syncthing-rs-request-symlink-outside-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+        fs::create_dir_all(&root).expect("mkdir root");
+        fs::create_dir_all(&outside).expect("mkdir outside");
+        fs::write(outside.join("secret.txt"), b"secret").expect("write secret");
+        symlink(&outside, root.join("link")).expect("create symlink");
+
+        let mut m = NewModel();
+        m.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+        let err = m
+            .RequestData("default", "link/secret.txt", 0, 6)
+            .expect_err("must reject symlink component escape");
+        assert!(err.contains("symlink") || err.contains("invalid relative path"));
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
     }
 
     #[test]

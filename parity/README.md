@@ -95,11 +95,15 @@ go run ./script/parity_pair_review.go run \
   --out parity/diff-reports/function-pair-discrepancy-report-dryrun.json
 ```
 
-The function-pair reviewer writes:
+The function-pair reviewer writes by default:
 - `parity/diff-reports/function-pair-review-plan.json`: tiered review queue.
 - `parity/diff-reports/function-pair-discrepancy-report.json`: structured discrepancy summary.
-- `parity/diff-reports/function-pair-prompts/*.txt`: per-pair prompt artifacts.
-- `parity/diff-reports/function-pair-raw/*.txt`: raw agent responses for auditability.
+- `parity/diff-reports/function-pair-cache.json`: cache for unchanged symbol pairs.
+- `parity/diff-reports/function-pair-rollups/*.md|*.tsv`: grouped findings summaries.
+
+Optional (off by default) artifact outputs:
+- `parity/diff-reports/function-pair-prompts/*.txt` when `--write-prompts` is set.
+- `parity/diff-reports/function-pair-raw/*.txt` when `--write-raw` is set.
 
 ## Status values
 

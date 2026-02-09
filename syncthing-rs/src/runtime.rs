@@ -59,6 +59,9 @@ pub(crate) struct DaemonConfig {
 struct SyncthingConfigBootstrap {
     local_device_id: Option<String>,
     folder_labels: BTreeMap<String, String>,
+    folder_paths: BTreeMap<String, String>,
+    folder_types: BTreeMap<String, FolderType>,
+    folder_paused: BTreeMap<String, bool>,
     folder_devices: BTreeMap<String, Vec<String>>,
     device_configs: BTreeMap<String, Value>,
     listen_addresses: Vec<String>,
@@ -226,6 +229,10 @@ pub(crate) fn parse_daemon_args(args: &[String]) -> Result<DaemonConfig, String>
         }
     }
 
+    if folder_id_set && !folder_path_set && folders.is_empty() {
+        return Err("--folder-id requires --folder-path".to_string());
+    }
+
     let folders = if !folders.is_empty() {
         if folder_id_set || folder_path_set {
             return Err(
@@ -233,14 +240,13 @@ pub(crate) fn parse_daemon_args(args: &[String]) -> Result<DaemonConfig, String>
             );
         }
         folders
-    } else {
-        let path = folder_path.ok_or_else(|| {
-            "one folder is required: use --folder <id>:<path> or --folder-path <path>".to_string()
-        })?;
+    } else if let Some(path) = folder_path {
         vec![FolderSpec {
             id: folder_id,
             path,
         }]
+    } else {
+        Vec::new()
     };
 
     Ok(DaemonConfig {
@@ -271,13 +277,48 @@ pub(crate) fn run_daemon(config: DaemonConfig) -> Result<(), String> {
             .filter(|id| !id.is_empty())
         {
             guard.id = local_id.to_string();
-            guard.shortID = local_id.chars().take(7).collect::<String>();
         }
-        for folder in &config.folders {
+        guard.id = normalize_syncthing_device_id(&guard.id)
+            .unwrap_or_else(|| synthetic_syncthing_device_id(&guard.id));
+        guard.shortID = guard.id.chars().take(7).collect::<String>();
+
+        let mut folder_specs = config.folders.clone();
+        if folder_specs.is_empty() {
+            if let Some(bootstrap_cfg) = bootstrap.as_ref() {
+                folder_specs = bootstrap_cfg
+                    .folder_paths
+                    .iter()
+                    .filter_map(|(id, path)| {
+                        if id.trim().is_empty() || path.trim().is_empty() {
+                            None
+                        } else {
+                            Some(FolderSpec {
+                                id: id.clone(),
+                                path: path.clone(),
+                            })
+                        }
+                    })
+                    .collect();
+            }
+            folder_specs.sort_by(|a, b| a.id.cmp(&b.id));
+        }
+
+        for folder in &folder_specs {
             let mut cfg = newFolderConfiguration(&folder.id, &folder.path);
             if let Some(bootstrap_cfg) = bootstrap.as_ref() {
                 if let Some(label) = bootstrap_cfg.folder_labels.get(&folder.id) {
                     cfg.label = label.clone();
+                }
+                if let Some(path) = bootstrap_cfg.folder_paths.get(&folder.id) {
+                    if !path.trim().is_empty() {
+                        cfg.path = path.clone();
+                    }
+                }
+                if let Some(folder_type) = bootstrap_cfg.folder_types.get(&folder.id) {
+                    cfg.folder_type = *folder_type;
+                }
+                if let Some(paused) = bootstrap_cfg.folder_paused.get(&folder.id) {
+                    cfg.paused = *paused;
                 }
                 if let Some(device_ids) = bootstrap_cfg.folder_devices.get(&folder.id) {
                     cfg.devices = device_ids
@@ -490,9 +531,26 @@ fn parse_syncthing_config_bootstrap(raw: &str) -> SyncthingConfigBootstrap {
                 .map(|v| decode_xml_value(v.trim()))
                 .unwrap_or_default();
             if !current_folder_id.is_empty() {
+                let path = extract_xml_attr(trimmed, "path")
+                    .map(|v| decode_xml_value(v.trim()))
+                    .unwrap_or_default();
                 let label = extract_xml_attr(trimmed, "label")
                     .map(|v| decode_xml_value(v.trim()))
                     .unwrap_or_default();
+                if !path.is_empty() {
+                    out.folder_paths.insert(current_folder_id.clone(), path);
+                }
+                if let Some(folder_type) = extract_xml_attr(trimmed, "type")
+                    .as_deref()
+                    .and_then(parse_folder_type_attr)
+                {
+                    out.folder_types
+                        .insert(current_folder_id.clone(), folder_type);
+                }
+                if let Some(paused_attr) = extract_xml_attr(trimmed, "paused") {
+                    out.folder_paused
+                        .insert(current_folder_id.clone(), parse_xml_bool(&paused_attr));
+                }
                 out.folder_labels.insert(current_folder_id.clone(), label);
                 out.folder_devices
                     .entry(current_folder_id.clone())
@@ -884,6 +942,16 @@ fn parse_xml_bool(value: &str) -> bool {
         value.trim().to_ascii_lowercase().as_str(),
         "true" | "1" | "yes" | "on"
     )
+}
+
+fn parse_folder_type_attr(value: &str) -> Option<FolderType> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "sendreceive" => Some(FolderType::SendReceive),
+        "sendonly" => Some(FolderType::SendOnly),
+        "receiveonly" => Some(FolderType::ReceiveOnly),
+        "receiveencrypted" => Some(FolderType::ReceiveEncrypted),
+        _ => None,
+    }
 }
 
 fn extract_xml_attr(line: &str, key: &str) -> Option<String> {
@@ -4885,9 +4953,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_daemon_args_requires_folder_path() {
-        let err = parse_daemon_args(&[]).expect_err("must fail");
-        assert!(err.contains("one folder is required"));
+    fn parse_daemon_args_allows_empty_folder_list_for_bootstrap() {
+        let cfg = parse_daemon_args(&[]).expect("parse");
+        assert!(cfg.folders.is_empty());
+    }
+
+    #[test]
+    fn parse_daemon_args_rejects_folder_id_without_path() {
+        let args = vec!["--folder-id".to_string(), "photos".to_string()];
+        let err = parse_daemon_args(&args).expect_err("must fail");
+        assert!(err.contains("--folder-id requires --folder-path"));
     }
 
     #[test]
@@ -5041,6 +5116,14 @@ mod tests {
         assert_eq!(
             parsed.folder_labels.get("main").map(String::as_str),
             Some("Main")
+        );
+        assert_eq!(
+            parsed.folder_paths.get("main").map(String::as_str),
+            Some("~/Sync")
+        );
+        assert_eq!(
+            parsed.folder_types.get("main"),
+            Some(&FolderType::SendReceive)
         );
         assert_eq!(
             parsed

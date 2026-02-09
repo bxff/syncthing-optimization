@@ -1052,7 +1052,12 @@ impl Db for WalFreeDb {
 
     fn list_devices_for_folder(&self, folder: &str) -> Result<Vec<DeviceId>, String> {
         self.ensure_open()?;
-        Ok(self.store.devices_in_folder(folder))
+        Ok(self
+            .store
+            .devices_in_folder(folder)
+            .into_iter()
+            .filter(|device| device != LOCAL_DEVICE_ID)
+            .collect())
     }
 
     fn remote_sequences(&self, folder: &str) -> Result<BTreeMap<DeviceId, i64>, String> {
@@ -1612,6 +1617,26 @@ mod tests {
             .get_global_availability("default", "same.txt")
             .expect("availability");
         assert_eq!(avail, vec!["remote-new".to_string()]);
+    }
+
+    #[test]
+    fn list_devices_for_folder_excludes_local_device() {
+        let mut db = WalFreeDb::default();
+        db.update("default", "local", vec![file("local.txt", 1, 1)])
+            .expect("local update");
+        db.update("default", "dev-a", vec![file("a.txt", 1, 1)])
+            .expect("dev-a update");
+        db.update("default", "dev-b", vec![file("b.txt", 1, 1)])
+            .expect("dev-b update");
+
+        let devices = db
+            .list_devices_for_folder("default")
+            .expect("list devices");
+        assert_eq!(
+            devices,
+            vec!["dev-a".to_string(), "dev-b".to_string()],
+            "local device must not appear in remote device listing"
+        );
     }
 
     #[test]

@@ -5,7 +5,6 @@
 use crate::config::{FolderConfiguration, MemoryPolicy};
 use crate::db::{self, Db};
 use crate::folder_modes::{mode_actions, FolderMode};
-use crate::planner::{compute_need, VersionedFile};
 use crate::store::compare_path_order;
 use crate::walker::{walk_deterministic, WalkConfig};
 use crc32fast::Hasher;
@@ -277,9 +276,16 @@ impl scanBatch {
     }
 
     pub(crate) fn Flush(&mut self) -> Result<(Vec<db::FileInfo>, Vec<String>), String> {
-        let mut updates = Vec::new();
-        std::mem::swap(&mut updates, &mut self.updateBatch);
         let removes = self.flushToRemove()?;
+        if !self.updateBatch.is_empty() {
+            if let Some(db) = &self.db {
+                let mut guard = db.write().map_err(|_| "db lock poisoned".to_string())?;
+                guard
+                    .update(&self.f, LOCAL_DEVICE_ID, self.updateBatch.clone())
+                    .map_err(|err| format!("scan batch update failed: {err}"))?;
+            }
+        }
+        let updates = std::mem::take(&mut self.updateBatch);
         Ok((updates, removes))
     }
 
@@ -373,6 +379,7 @@ pub(crate) struct folder {
     pub(crate) watchErr: Option<String>,
     pub(crate) watchRunning: bool,
     pub(crate) localFlags: u32,
+    pub(crate) initialScanCompleted: bool,
     pub(crate) pullStats: PullStats,
     pub(crate) memoryThrottleEvents: u64,
     pub(crate) memoryHardBlockEvents: u64,
@@ -502,17 +509,20 @@ impl folder {
     }
 
     pub(crate) fn Override(&mut self) {
-        self.pullScheduled = true;
+        // Base folder has no override behavior. Concrete folder types may override.
     }
 
     pub(crate) fn Revert(&mut self) {
-        self.scanScheduled = true;
-        self.pullScheduled = true;
+        // Base folder has no revert behavior. Concrete folder types may override.
     }
 
     pub(crate) fn Reschedule(&mut self) {
-        self.ScheduleScan();
-        self.SchedulePull();
+        if self.config.rescan_interval_s <= 0 {
+            return;
+        }
+        self.scanScheduled = true;
+        self.scanDelayUntil = Instant::now()
+            .checked_add(Duration::from_secs(self.config.rescan_interval_s as u64));
     }
 
     pub(crate) fn Scan(&mut self, subdirs: &[String]) -> Result<(), String> {
@@ -547,11 +557,12 @@ impl folder {
         self.startWatch();
         if self.scanScheduled {
             if let Some(next_scan_at) = self.scanDelayUntil {
-                if Instant::now() < next_scan_at {
-                    return;
+                if Instant::now() >= next_scan_at {
+                    if let Err(err) = self.scanTimerFired() {
+                        self.newScanError(&self.config.path.clone(), &err);
+                    }
                 }
-            }
-            if let Err(err) = self.scanTimerFired() {
+            } else if let Err(err) = self.scanTimerFired() {
                 self.newScanError(&self.config.path.clone(), &err);
             }
         }
@@ -575,8 +586,15 @@ impl folder {
             && !self.scanScheduled
     }
 
-    pub(crate) fn emitDiskChangeEvents(&self, paths: &[String]) -> Vec<String> {
-        paths.iter().map(|p| format!("disk_change:{p}")).collect()
+    pub(crate) fn emitDiskChangeEvents(
+        &self,
+        paths: &[String],
+        event_type: &str,
+    ) -> Vec<String> {
+        paths
+            .iter()
+            .map(|p| format!("{event_type}:{p}"))
+            .collect()
     }
 
     pub(crate) fn findRename(&self, old_name: &str, new_name: &str) -> Option<(String, String)> {
@@ -1111,12 +1129,16 @@ impl folder {
 
     pub(crate) fn scanTimerFired(&mut self) -> Result<(), String> {
         self.scanDelayUntil = None;
-        if self.forcedRescanPaths.is_empty() {
-            self.Scan(&[])?;
-            return Ok(());
+        let result = if self.forcedRescanPaths.is_empty() {
+            self.Scan(&[])
+        } else {
+            self.handleForcedRescans()
+        };
+        if !self.initialScanCompleted {
+            self.initialScanCompleted = true;
         }
-        self.handleForcedRescans()?;
-        Ok(())
+        self.Reschedule();
+        result
     }
 
     pub(crate) fn scheduleWatchRestart(&mut self) {
@@ -1144,26 +1166,44 @@ impl folder {
         self.watchRunning = false;
     }
 
-    pub(crate) fn updateLocals(
-        &mut self,
-        local: &[VersionedFile],
-        remote: &[VersionedFile],
-    ) -> Vec<String> {
-        let need = compute_need(local, remote);
-        for p in &need.need_paths {
-            self.forcedRescanPaths.remove(p);
+    pub(crate) fn updateLocals(&mut self, files: &[db::FileInfo]) -> Result<(), String> {
+        if files.is_empty() {
+            return Ok(());
         }
-        need.need_paths
+        self.db
+            .write()
+            .map_err(|_| "db lock poisoned".to_string())?
+            .update(&self.config.id, LOCAL_DEVICE_ID, files.to_vec())
+            .map_err(|e| format!("update locals: {e}"))?;
+        for file in files {
+            self.forcedRescanPaths.remove(&file.path);
+        }
+        Ok(())
     }
 
-    pub(crate) fn updateLocalsFromPulling(&mut self, pulled: &[String]) {
-        for p in pulled {
-            self.forcedRescanPaths.remove(p);
-        }
-        let _ = self.emitDiskChangeEvents(pulled);
+    pub(crate) fn updateLocalsFromPulling(&mut self, pulled: &[db::FileInfo]) -> Result<(), String> {
+        self.updateLocals(pulled)?;
+        let paths = pulled
+            .iter()
+            .filter(|fi| fi.local_flags & db::FLAG_LOCAL_INVALID == 0)
+            .map(|fi| fi.path.clone())
+            .collect::<Vec<_>>();
+        let _ = self.emitDiskChangeEvents(&paths, "remote_change");
+        Ok(())
     }
 
-    pub(crate) fn updateLocalsFromScanning(&mut self, scanned: &[String]) {
+    pub(crate) fn updateLocalsFromScanning(&mut self, scanned: &[db::FileInfo]) -> Result<(), String> {
+        self.updateLocals(scanned)?;
+        let paths = scanned
+            .iter()
+            .filter(|fi| fi.local_flags & db::FLAG_LOCAL_INVALID == 0)
+            .map(|fi| fi.path.clone())
+            .collect::<Vec<_>>();
+        let _ = self.emitDiskChangeEvents(&paths, "local_change");
+        Ok(())
+    }
+
+    pub(crate) fn updateLocalsFromScanningPaths(&mut self, scanned: &[String]) {
         let mut updates = Vec::new();
         let mut next_sequence = self
             .db
@@ -1192,22 +1232,11 @@ impl folder {
         }
 
         if !updates.is_empty() {
-            let folder_id = self.config.id.clone();
-            let persist = self
-                .db
-                .write()
-                .map_err(|_| "db lock poisoned".to_string())
-                .and_then(|mut db| db.update(&folder_id, LOCAL_DEVICE_ID, updates));
-            if let Err(err) = persist {
+            if let Err(err) = self.updateLocalsFromScanning(&updates) {
                 let scan_path = self.config.path.clone();
-                self.newScanError(&scan_path, &format!("update locals from scanning: {err}"));
+                self.newScanError(&scan_path, &err);
             }
         }
-
-        for p in scanned {
-            self.forcedRescanPaths.remove(p);
-        }
-        let _ = self.emitDiskChangeEvents(scanned);
     }
 
     fn build_local_file_snapshot(
@@ -2293,7 +2322,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     fn temp_root(name: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
@@ -2337,6 +2366,95 @@ mod tests {
         sb.Remove("a");
         let (_, removes) = sb.Flush().expect("flush");
         assert_eq!(removes, vec!["a"]);
+    }
+
+    #[test]
+    fn scan_batch_flush_applies_removes_before_updates() {
+        let root = temp_root("scan-batch-order");
+        let db = Arc::new(RwLock::new(db::WalFreeDb::default()));
+        db.write()
+            .expect("db lock")
+            .update("default", "local", vec![file("same.txt", 1, &["h0"])])
+            .expect("seed local");
+
+        let mut sb = scanBatch {
+            f: "default".to_string(),
+            db: Some(db.clone()),
+            ..Default::default()
+        };
+        sb.Remove("same.txt");
+        sb.Update(file("same.txt", 2, &["h1"]));
+        let (updates, removes) = sb.Flush().expect("flush");
+        assert_eq!(removes, vec!["same.txt".to_string()]);
+        assert_eq!(updates.len(), 1);
+
+        let current = db
+            .read()
+            .expect("db lock")
+            .get_device_file("default", "local", "same.txt")
+            .expect("lookup")
+            .expect("file must exist after remove+update");
+        assert_eq!(current.sequence, 2);
+        assert_eq!(current.block_hashes, vec!["h1".to_string()]);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn base_folder_override_and_revert_are_noops() {
+        let root = temp_root("folder-noop-actions");
+        let db = Arc::new(RwLock::new(db::WalFreeDb::default()));
+        let mut f = newFolder(scan_cfg(&root), db);
+        f.scanScheduled = false;
+        f.pullScheduled = false;
+        f.forcedRescanPaths.insert("a/b.txt".to_string());
+
+        f.Override();
+        f.Revert();
+
+        assert!(!f.scanScheduled);
+        assert!(!f.pullScheduled);
+        assert!(f.forcedRescanPaths.contains("a/b.txt"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn serve_does_not_block_pull_when_scan_is_delayed() {
+        let root = temp_root("serve-delay-does-not-block-pull");
+        let db = Arc::new(RwLock::new(db::WalFreeDb::default()));
+        let mut f = newFolder(scan_cfg(&root), db);
+        f.scanScheduled = true;
+        f.scanDelayUntil = Instant::now().checked_add(Duration::from_secs(60));
+        f.pullScheduled = true;
+
+        f.Serve();
+
+        assert!(
+            !f.pullScheduled,
+            "pull should still run when a scan is delayed into the future"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scan_timer_fired_marks_initial_scan_and_reschedules() {
+        let root = temp_root("scan-timer-reschedule");
+        let db = Arc::new(RwLock::new(db::WalFreeDb::default()));
+        let mut f = newFolder(scan_cfg(&root), db);
+        f.scanScheduled = true;
+        f.pullScheduled = false;
+        f.initialScanCompleted = false;
+
+        f.scanTimerFired().expect("scan timer");
+
+        assert!(f.initialScanCompleted, "first scan should mark initial scan done");
+        assert!(f.scanScheduled, "scan should be rescheduled for next interval");
+        assert!(f.scanDelayUntil.is_some(), "next scan delay must be set");
+        assert!(
+            !f.pullScheduled,
+            "rescheduling the scan must not force a pull by default"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2806,7 +2924,7 @@ mod tests {
             db::WalFreeDb::open_runtime(&db_root, 50).expect("open runtime db"),
         ));
         let mut f = newFolder(scan_cfg(&root), db.clone());
-        f.Scan(&[]);
+        f.Scan(&[]).expect("initial scan");
 
         let ordered = db
             .read()
@@ -2835,10 +2953,10 @@ mod tests {
         let mut cfg = scan_cfg(&root);
         cfg.ignore_delete = true;
         let mut f = newFolder(cfg, db.clone());
-        f.Scan(&[]);
+        f.Scan(&[]).expect("initial scan");
 
         fs::remove_file(root.join("foo").join("a.txt")).expect("remove foo/a");
-        f.Scan(&[String::from("foo")]);
+        f.Scan(&[String::from("foo")]).expect("scoped scan");
 
         let fi = db
             .read()
@@ -2865,10 +2983,10 @@ mod tests {
             db::WalFreeDb::open_runtime(&db_root, 50).expect("open runtime db"),
         ));
         let mut f = newFolder(scan_cfg(&root), db.clone());
-        f.Scan(&[]);
+        f.Scan(&[]).expect("initial scan");
 
         fs::remove_file(root.join("foo").join("a.txt")).expect("remove foo/a");
-        f.Scan(&[String::from("foo")]);
+        f.Scan(&[String::from("foo")]).expect("scoped scan");
 
         let guard = db.read().expect("db lock");
         let foo = guard
@@ -2900,7 +3018,7 @@ mod tests {
             db::WalFreeDb::open_runtime(&db_root, 50).expect("open runtime db"),
         ));
         let mut f = newFolder(scan_cfg(&root), db.clone());
-        f.Scan(&[]);
+        f.Scan(&[]).expect("initial scan");
 
         let (foo_seq_before, bar_seq_before) = {
             let guard = db.read().expect("db lock before");
@@ -2916,7 +3034,8 @@ mod tests {
         };
 
         fs::write(root.join("bar").join("b.txt"), b"b-v2").expect("rewrite bar/b");
-        f.Scan(&[String::from("bar/b.txt")]);
+        f.Scan(&[String::from("bar/b.txt")])
+            .expect("single file scope scan");
 
         let guard = db.read().expect("db lock after");
         let foo = guard

@@ -2058,14 +2058,22 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 let Some(folder) = params.get("folder") else {
                     return make_api_error(400, "missing folder query parameter");
                 };
+                let device = params
+                    .get("device")
+                    .map(|v| v.as_str())
+                    .filter(|v| !v.trim().is_empty())
+                    .unwrap_or("pending-device");
                 let mut guard = match runtime.model.write() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "model lock poisoned"),
                 };
-                if let Err(err) = guard.DismissPendingFolder("", folder) {
+                if let Err(err) = guard.DismissPendingFolder(device, folder) {
                     return make_api_error(400, err);
                 }
-                ApiReply::json(200, json!({"dismissed": true, "folder": folder}))
+                ApiReply::json(
+                    200,
+                    json!({"dismissed": true, "folder": folder, "device": device}),
+                )
             }
             _ => make_api_error(405, "method not allowed"),
         },

@@ -1101,13 +1101,25 @@ impl model {
 
     pub(crate) fn DismissPendingFolder(
         &mut self,
-        _device: &str,
+        device: &str,
         folder: &str,
     ) -> Result<(), String> {
+        if device.trim().is_empty() {
+            return Err("device id is required".to_string());
+        }
         if folder.trim().is_empty() {
             return Err("folder id is required".to_string());
         }
+        if self
+            .foldersRunning
+            .get(folder)
+            .copied()
+            .unwrap_or(false)
+        {
+            return Err("cannot dismiss running folder".to_string());
+        }
         self.foldersRunning.remove(folder);
+        self.folderCfgs.remove(folder);
         Ok(())
     }
 
@@ -1765,6 +1777,27 @@ mod tests {
         assert!(stats.contains_key("memoryRuntimeBudgetBytes"));
         m.removeFolder("default");
         assert_eq!(m.State("default"), "idle");
+    }
+
+    #[test]
+    fn dismiss_pending_folder_rejects_running_and_removes_pending() {
+        let mut m = NewModel();
+        let cfg = newFolderConfiguration("running", "/tmp/running");
+        m.newFolder(cfg);
+
+        let err = m
+            .DismissPendingFolder("peer-a", "running")
+            .expect_err("running folder must not be dismissed as pending");
+        assert!(err.contains("cannot dismiss running folder"));
+        assert!(m.foldersRunning.contains_key("running"));
+
+        m.foldersRunning.insert("pending".to_string(), false);
+        m.folderCfgs
+            .insert("pending".to_string(), newFolderConfiguration("pending", "/tmp/pending"));
+        m.DismissPendingFolder("peer-a", "pending")
+            .expect("dismiss pending folder");
+        assert!(!m.foldersRunning.contains_key("pending"));
+        assert!(!m.folderCfgs.contains_key("pending"));
     }
 
     #[test]

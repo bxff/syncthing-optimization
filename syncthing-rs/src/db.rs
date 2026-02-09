@@ -14,6 +14,7 @@ pub(crate) type LocalFlags = u32;
 pub(crate) const FLAG_LOCAL_RECEIVE_ONLY: LocalFlags = 1 << 0;
 pub(crate) const FLAG_LOCAL_INVALID: LocalFlags = 1 << 1;
 pub(crate) const FLAG_LOCAL_CONFLICT: LocalFlags = 1 << 2;
+pub(crate) const FLAG_LOCAL_MUST_RESCAN: LocalFlags = 1 << 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PullOrder {
@@ -82,8 +83,12 @@ impl FileMetadata {
 pub(crate) struct Counts {
     pub(crate) files: usize,
     pub(crate) directories: usize,
+    pub(crate) symlinks: usize,
     pub(crate) deleted: usize,
     pub(crate) bytes: i64,
+    pub(crate) sequence: i64,
+    pub(crate) device_id: DeviceId,
+    pub(crate) local_flags: LocalFlags,
     pub(crate) receive_only_changed: usize,
 }
 
@@ -116,10 +121,13 @@ pub(crate) struct NeededFilePage {
 
 const RUNTIME_META_FILE: &str = "runtime-meta.json";
 const META_KEY_SEP: char = '\u{001f}';
+const LOCAL_DEVICE_ID: &str = "local";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct RuntimeMetadata {
     index_ids: BTreeMap<String, IndexId>,
+    #[serde(default)]
+    index_sequences: BTreeMap<String, i64>,
     mtimes: BTreeMap<String, [i64; 2]>,
     kv: BTreeMap<String, Vec<u8>>,
 }
@@ -250,6 +258,7 @@ pub(crate) struct WalFreeDb {
     store: Store,
     runtime_root: PathBuf,
     index_ids: BTreeMap<(String, DeviceId), IndexId>,
+    index_sequences: BTreeMap<(String, DeviceId), i64>,
     mtimes: BTreeMap<(String, String), (i64, i64)>,
     kv: BTreeMap<String, Vec<u8>>,
     closed: bool,
@@ -323,6 +332,7 @@ impl WalFreeDb {
             store,
             runtime_root: root,
             index_ids: runtime_meta_index_ids(&runtime_meta),
+            index_sequences: runtime_meta_index_sequences(&runtime_meta),
             mtimes: runtime_meta_mtimes(&runtime_meta),
             kv: runtime_meta.kv,
             closed: false,
@@ -449,6 +459,11 @@ impl WalFreeDb {
                 .index_ids
                 .iter()
                 .map(|((folder, device), id)| (join_meta_key(folder, device), *id))
+                .collect(),
+            index_sequences: self
+                .index_sequences
+                .iter()
+                .map(|((folder, device), seq)| (join_meta_key(folder, device), *seq))
                 .collect(),
             mtimes: self
                 .mtimes
@@ -635,12 +650,18 @@ impl WalFreeDb {
 impl Db for WalFreeDb {
     fn update(&mut self, folder: &str, device: &str, files: Vec<FileInfo>) -> Result<(), String> {
         self.ensure_open()?;
+        let mut last_sequence: Option<i64> = None;
         for mut file in files {
             file.folder = folder.to_string();
+            last_sequence = Some(file.sequence.max(0));
             let encoded = file_info_to_store(folder, device, &file);
             self.store
                 .upsert_file(encoded)
                 .map_err(|e| format!("persist update: {e}"))?;
+        }
+        if let Some(seq) = last_sequence {
+            self.index_sequences
+                .insert((folder.to_string(), device.to_string()), seq);
         }
         Ok(())
     }
@@ -662,21 +683,33 @@ impl Db for WalFreeDb {
         file: &str,
     ) -> Result<Option<FileInfo>, String> {
         self.ensure_open()?;
+        let normalized = normalize_lookup_path(file);
         Ok(self
             .store
-            .get_file_with_blocks(folder, device, file)
+            .get_file_with_blocks(folder, device, &normalized)
             .map_err(|e| format!("get file with blocks: {e}"))?
             .map(|meta| store_to_file_info(&meta)))
     }
 
     fn get_global_availability(&self, folder: &str, file: &str) -> Result<Vec<DeviceId>, String> {
         self.ensure_open()?;
+        let normalized = normalize_lookup_path(file);
+        let Some(global) = self.global_winner_for_path(folder, &normalized, true)? else {
+            return Ok(Vec::new());
+        };
         let mut out = Vec::new();
         for device in self.store.devices_in_folder(folder) {
-            let Some(meta) = self.store.get_file(folder, &device, file) else {
+            if device == LOCAL_DEVICE_ID {
+                continue;
+            }
+            let Some(meta) = self.store.get_file(folder, &device, &normalized) else {
                 continue;
             };
-            if !meta.deleted {
+            let candidate = store_to_file_info_without_blocks(&meta);
+            if candidate.sequence == global.sequence
+                && candidate.deleted == global.deleted
+                && !candidate.ignored
+            {
                 out.push(device);
             }
         }
@@ -687,7 +720,8 @@ impl Db for WalFreeDb {
 
     fn get_global_file(&self, folder: &str, file: &str) -> Result<Option<FileInfo>, String> {
         self.ensure_open()?;
-        self.global_winner_for_path(folder, file, true)
+        let normalized = normalize_lookup_path(file);
+        self.global_winner_for_path(folder, &normalized, true)
     }
 
     fn all_global_files(&self, folder: &str) -> Result<Vec<FileMetadata>, String> {
@@ -964,6 +998,7 @@ impl Db for WalFreeDb {
             self.drop_all_files(&folder, device)?;
         }
         self.index_ids.retain(|(_, d), _| d != device);
+        self.index_sequences.retain(|(_, d), _| d != device);
         self.persist_runtime_metadata()?;
         Ok(())
     }
@@ -991,6 +1026,7 @@ impl Db for WalFreeDb {
             self.drop_all_files(folder, &device)?;
         }
         self.index_ids.retain(|(f, _), _| f != folder);
+        self.index_sequences.retain(|(f, _), _| f != folder);
         self.mtimes.retain(|(f, _), _| f != folder);
         self.persist_runtime_metadata()?;
         Ok(())
@@ -998,13 +1034,10 @@ impl Db for WalFreeDb {
 
     fn get_device_sequence(&self, folder: &str, device: &str) -> Result<i64, String> {
         self.ensure_open()?;
-        let mut max_seq = 0_i64;
-        self.store
-            .for_each_file_in_folder_device(folder, device, |meta| {
-                max_seq = max_seq.max(u64_to_i64(meta.sequence));
-                true
-            });
-        Ok(max_seq)
+        Ok(*self
+            .index_sequences
+            .get(&(folder.to_string(), device.to_string()))
+            .unwrap_or(&0))
     }
 
     fn list_folders(&self) -> Result<Vec<String>, String> {
@@ -1025,17 +1058,21 @@ impl Db for WalFreeDb {
     fn remote_sequences(&self, folder: &str) -> Result<BTreeMap<DeviceId, i64>, String> {
         self.ensure_open()?;
         let mut out = BTreeMap::new();
-        self.store.for_each_file_in_folder(folder, |meta| {
-            let entry = out.entry(meta.device.clone()).or_insert(0);
-            *entry = (*entry).max(u64_to_i64(meta.sequence));
-            true
-        });
+        for ((f, device), seq) in &self.index_sequences {
+            if f != folder || device == LOCAL_DEVICE_ID {
+                continue;
+            }
+            out.insert(device.clone(), (*seq).max(0));
+        }
         Ok(out)
     }
 
     fn count_global(&self, folder: &str) -> Result<Counts, String> {
         self.ensure_open()?;
-        let mut counts = Counts::default();
+        let mut counts = Counts {
+            device_id: LOCAL_DEVICE_ID.to_string(),
+            ..Counts::default()
+        };
         self.for_each_global_winner(folder, false, |global| {
             add_file_to_counts(&mut counts, &global);
             Ok(true)
@@ -1045,7 +1082,10 @@ impl Db for WalFreeDb {
 
     fn count_local(&self, folder: &str, device: &str) -> Result<Counts, String> {
         self.ensure_open()?;
-        let mut counts = Counts::default();
+        let mut counts = Counts {
+            device_id: device.to_string(),
+            ..Counts::default()
+        };
         let mut cursor: Option<String> = None;
         loop {
             let page =
@@ -1064,7 +1104,10 @@ impl Db for WalFreeDb {
 
     fn count_need(&self, folder: &str, device: &str) -> Result<Counts, String> {
         self.ensure_open()?;
-        let mut counts = Counts::default();
+        let mut counts = Counts {
+            device_id: device.to_string(),
+            ..Counts::default()
+        };
         self.for_each_global_winner(folder, false, |global| {
             let local = self.get_device_file_light(folder, device, &global.path);
             if requires_update(&global, local.as_ref()) {
@@ -1077,7 +1120,10 @@ impl Db for WalFreeDb {
 
     fn count_receive_only_changed(&self, folder: &str) -> Result<Counts, String> {
         self.ensure_open()?;
-        let mut counts = Counts::default();
+        let mut counts = Counts {
+            device_id: LOCAL_DEVICE_ID.to_string(),
+            ..Counts::default()
+        };
         self.for_each_global_winner(folder, false, |global| {
             if global.local_flags & FLAG_LOCAL_RECEIVE_ONLY != 0 {
                 add_file_to_counts(&mut counts, &global);
@@ -1089,8 +1135,15 @@ impl Db for WalFreeDb {
 
     fn drop_all_index_ids(&mut self) -> Result<(), String> {
         self.ensure_open()?;
+        let prev = self.index_ids.clone();
+        let prev_sequences = self.index_sequences.clone();
         self.index_ids.clear();
-        self.persist_runtime_metadata()?;
+        self.index_sequences.clear();
+        if let Err(err) = self.persist_runtime_metadata() {
+            self.index_ids = prev;
+            self.index_sequences = prev_sequences;
+            return Err(err);
+        }
         Ok(())
     }
 
@@ -1106,6 +1159,8 @@ impl Db for WalFreeDb {
         self.ensure_open()?;
         self.index_ids
             .insert((folder.to_string(), device.to_string()), id);
+        self.index_sequences
+            .insert((folder.to_string(), device.to_string()), 0);
         self.persist_runtime_metadata()?;
         Ok(())
     }
@@ -1257,6 +1312,17 @@ fn u64_to_i64(v: u64) -> i64 {
     v.min(i64::MAX as u64) as i64
 }
 
+fn normalize_lookup_path(path: &str) -> String {
+    #[cfg(windows)]
+    {
+        path.replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_string()
+    }
+}
+
 fn runtime_metadata_path(root: &PathBuf) -> PathBuf {
     root.join(RUNTIME_META_FILE)
 }
@@ -1286,6 +1352,23 @@ fn runtime_meta_index_ids(meta: &RuntimeMetadata) -> BTreeMap<(String, DeviceId)
     for (k, id) in &meta.index_ids {
         if let Some((folder, device)) = split_meta_key(k) {
             out.insert((folder, device), *id);
+        }
+    }
+    out
+}
+
+fn runtime_meta_index_sequences(meta: &RuntimeMetadata) -> BTreeMap<(String, DeviceId), i64> {
+    let mut out = BTreeMap::new();
+    for (k, seq) in &meta.index_sequences {
+        if let Some((folder, device)) = split_meta_key(k) {
+            out.insert((folder, device), (*seq).max(0));
+        }
+    }
+    if out.is_empty() {
+        for (k, id) in &meta.index_ids {
+            if let Some((folder, device)) = split_meta_key(k) {
+                out.insert((folder, device), u64_to_i64(*id));
+            }
         }
     }
     out
@@ -1341,11 +1424,33 @@ fn best_global_candidate(
 fn requires_update(global: &FileInfo, local: Option<&FileInfo>) -> bool {
     match local {
         Some(current) => {
-            global.sequence > current.sequence
-                || (global.deleted != current.deleted && global.sequence >= current.sequence)
+            if same_file_version(global, current) {
+                return false;
+            }
+            if global.deleted {
+                return !current.deleted;
+            }
+            if current.deleted {
+                return true;
+            }
+            if global.sequence > current.sequence {
+                return true;
+            }
+            global.modified_ns != current.modified_ns
+                || global.size != current.size
+                || global.file_type != current.file_type
+                || global.local_flags != current.local_flags
         }
-        None => true,
+        None => !global.deleted,
     }
+}
+
+fn same_file_version(a: &FileInfo, b: &FileInfo) -> bool {
+    a.deleted == b.deleted
+        && a.file_type == b.file_type
+        && a.modified_ns == b.modified_ns
+        && a.size == b.size
+        && a.local_flags == b.local_flags
 }
 
 fn prefer_global(candidate: &FileInfo, current: &FileInfo) -> bool {
@@ -1396,23 +1501,32 @@ fn count_files(iter: impl Iterator<Item = FileInfo>) -> Counts {
 fn add_file_to_counts(counts: &mut Counts, file: &FileInfo) {
     if file.deleted {
         counts.deleted += 1;
-    }
-    if file.file_type == FileInfoType::Directory {
-        counts.directories += 1;
     } else {
-        counts.files += 1;
+        match file.file_type {
+            FileInfoType::File => counts.files += 1,
+            FileInfoType::Directory => counts.directories += 1,
+            FileInfoType::Symlink => counts.symlinks += 1,
+        }
+        counts.bytes += file.size;
     }
-    counts.bytes += file.size;
+    counts.local_flags |= file.local_flags;
     if file.local_flags & FLAG_LOCAL_RECEIVE_ONLY != 0 {
         counts.receive_only_changed += 1;
     }
+    counts.sequence = counts.sequence.max(file.sequence);
 }
 
 fn accumulate_counts(target: &mut Counts, delta: Counts) {
     target.files += delta.files;
     target.directories += delta.directories;
+    target.symlinks += delta.symlinks;
     target.deleted += delta.deleted;
     target.bytes += delta.bytes;
+    target.sequence = target.sequence.max(delta.sequence);
+    target.local_flags |= delta.local_flags;
+    if target.device_id.is_empty() {
+        target.device_id = delta.device_id;
+    }
     target.receive_only_changed += delta.receive_only_changed;
 }
 
@@ -1478,10 +1592,26 @@ mod tests {
         let avail = db
             .get_global_availability("default", "a.txt")
             .expect("availability");
-        assert_eq!(avail, vec!["dev-a".to_string(), "dev-b".to_string()]);
+        assert_eq!(avail, vec!["dev-b".to_string()]);
 
         let global_files = db.all_global_files("default").expect("all global");
         assert_eq!(global_files.len(), 3);
+    }
+
+    #[test]
+    fn global_availability_excludes_local_and_matches_global_version() {
+        let mut db = WalFreeDb::default();
+        db.update("default", "local", vec![file("same.txt", 3, 10)])
+            .expect("local update");
+        db.update("default", "remote-old", vec![file("same.txt", 2, 10)])
+            .expect("remote old update");
+        db.update("default", "remote-new", vec![file("same.txt", 3, 10)])
+            .expect("remote new update");
+
+        let avail = db
+            .get_global_availability("default", "same.txt")
+            .expect("availability");
+        assert_eq!(avail, vec!["remote-new".to_string()]);
     }
 
     #[test]
@@ -1508,6 +1638,59 @@ mod tests {
 
         let count_need = db.count_need("default", "dev-a").expect("need counts");
         assert_eq!(count_need.files, 2);
+    }
+
+    #[test]
+    fn count_local_handles_deleted_and_symlink_like_go_semantics() {
+        let mut db = WalFreeDb::default();
+        let mut dir = file("dir", 2, 0);
+        dir.file_type = FileInfoType::Directory;
+
+        let mut link = file("link", 3, 7);
+        link.file_type = FileInfoType::Symlink;
+
+        let mut deleted = file("gone.txt", 4, 100);
+        deleted.deleted = true;
+
+        db.update(
+            "default",
+            "dev-a",
+            vec![file("a.txt", 1, 10), dir, link, deleted],
+        )
+        .expect("update");
+
+        let counts = db.count_local("default", "dev-a").expect("count local");
+        assert_eq!(counts.files, 1);
+        assert_eq!(counts.directories, 1);
+        assert_eq!(counts.symlinks, 1);
+        assert_eq!(counts.deleted, 1);
+        assert_eq!(counts.bytes, 17);
+        assert_eq!(counts.sequence, 4);
+        assert_eq!(counts.device_id, "dev-a");
+    }
+
+    #[test]
+    fn requires_update_deleted_and_version_semantics() {
+        let global_live = file("same.txt", 2, 10);
+        let mut global_deleted = file("same.txt", 3, 10);
+        global_deleted.deleted = true;
+
+        assert!(!requires_update(&global_deleted, None));
+
+        let local_live = file("same.txt", 1, 10);
+        assert!(requires_update(&global_deleted, Some(&local_live)));
+
+        let mut local_same_version = file("same.txt", 1, 10);
+        local_same_version.modified_ns = global_live.modified_ns;
+        local_same_version.local_flags = global_live.local_flags;
+        assert!(!requires_update(&global_live, Some(&local_same_version)));
+
+        let mut local_different_version = local_same_version.clone();
+        local_different_version.modified_ns += 1;
+        assert!(requires_update(
+            &global_live,
+            Some(&local_different_version)
+        ));
     }
 
     #[test]
@@ -1627,6 +1810,61 @@ mod tests {
         assert_eq!(kv.len(), 1);
         assert_eq!(kv[0].value, b"value");
         <WalFreeDb as Kv>::delete_kv(&mut db, "alpha/key").expect("delete kv");
+    }
+
+    #[test]
+    fn remote_sequences_follow_update_sequences_and_skip_local() {
+        let mut db = WalFreeDb::default();
+        db.set_index_id("default", "local", 99)
+            .expect("set local index");
+        db.set_index_id("default", "dev-a", 7)
+            .expect("set remote index");
+        db.set_index_id("other", "dev-b", 11)
+            .expect("set other folder index");
+
+        db.update("default", "dev-a", vec![file("f.txt", 100, 1)])
+            .expect("update dev-a");
+        db.update("default", "dev-c", vec![file("f.txt", 250, 1)])
+            .expect("update dev-c");
+
+        let seqs = db.remote_sequences("default").expect("remote sequences");
+        assert_eq!(seqs.len(), 2);
+        assert_eq!(seqs.get("dev-a").copied(), Some(100));
+        assert_eq!(seqs.get("dev-c").copied(), Some(250));
+        assert!(!seqs.contains_key("local"));
+        assert!(!seqs.contains_key("dev-b"));
+    }
+
+    #[test]
+    fn set_index_id_resets_device_sequence_until_next_update() {
+        let mut db = WalFreeDb::default();
+        db.update("default", "dev-a", vec![file("f.txt", 42, 1)])
+            .expect("update dev-a");
+        assert_eq!(
+            db.get_device_sequence("default", "dev-a")
+                .expect("device sequence"),
+            42
+        );
+
+        db.set_index_id("default", "dev-a", 555)
+            .expect("set index id");
+        assert_eq!(
+            db.get_index_id("default", "dev-a").expect("get index id"),
+            555
+        );
+        assert_eq!(
+            db.get_device_sequence("default", "dev-a")
+                .expect("device sequence after set index"),
+            0
+        );
+
+        db.update("default", "dev-a", vec![file("g.txt", 43, 1)])
+            .expect("update dev-a again");
+        assert_eq!(
+            db.get_device_sequence("default", "dev-a")
+                .expect("device sequence after update"),
+            43
+        );
     }
 
     #[test]

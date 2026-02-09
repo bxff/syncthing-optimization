@@ -1,0 +1,1634 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-02-08T22:53:37Z",
+  "plan_path": "parity/diff-reports/function-pair-review-plan.json",
+  "model": "google/antigravity-claude-opus-4-6-thinking",
+  "total_items": 40,
+  "completed": 40,
+  "no_findings": 5,
+  "with_findings": 35,
+  "errors": 0,
+  "tier_counts": {
+    "T1": 40,
+    "T2": 0,
+    "T3": 0
+  },
+  "severity_count": {
+    "P0": 66,
+    "P1": 48,
+    "P2": 25,
+    "P3": 2
+  },
+  "findings": [
+    {
+      "id": "feat-062ab02e5300",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing duration parameter",
+      "location": "syncthing-rs/src/folder_core.rs:476",
+      "message": "The Go method accepts a `next time.Duration` parameter that is sent on the `scanDelay` channel to communicate a specific delay to the scan scheduling loop. The Rust method takes no parameter, so callers cannot specify a delay duration, and any call site that needs to pass a non-default delay will silently lose that value."
+    },
+    {
+      "id": "feat-062ab02e5300",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Wrong side-effect semantics",
+      "location": "syncthing-rs/src/folder_core.rs:477",
+      "message": "The Go method sends the duration on channel `f.scanDelay`, which is consumed by the folder's scan loop to reschedule the next scan after the given delay. The Rust method instead sets `self.scanScheduled = false`, which merely clears a boolean flag. These are not equivalent: Go delays the scan by a caller-specified duration while Rust cancels any pending scheduled scan outright, producing different scan timing behavior under every invocation."
+    },
+    {
+      "id": "feat-0f3a6c6fe0ce",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing error return type",
+      "location": "syncthing-rs/src/folder_core.rs:1817",
+      "message": "The Go method signature is `func (f *receiveEncryptedFolder) revert(ctx context.Context) error` returning an error from DB iteration failures (line 57), batch flush-if-full (line 59-61), and final flush (line 90-92). The Rust method returns `()`, meaning all error paths from database enumeration and batch flushing are either silently swallowed or structurally impossible to propagate to callers."
+    },
+    {
+      "id": "feat-0f3a6c6fe0ce",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Stub delegation replaces full revert logic",
+      "location": "syncthing-rs/src/folder_core.rs:1817-1819",
+      "message": "The Rust `revert` is a 3-line stub that delegates to `self.sendReceiveFolder.folder.Revert()`, whereas the Go implementation (lib/model/folder_recvenc.go:43-98) contains ~55 lines of receive-encrypted-folder-specific logic: iterating all local files, skipping non-receive-only-changed or deleted entries, collecting directories for separate handling via `revertHandleDirs`, removing unexpected non-directory files from the filesystem, marking them deleted with `SetDeleted(shortID)`, explicitly zeroing the version vector to force re-pull of valid global versions, preserving `FlagLocalReceiveOnly`, batch-flushing updates via `updateLocalsFromScanning`, and scheduling a pull afterward. None of this specialized behavior is present in the Rust delegation; the generic `Revert()` target cannot replicate the receive-encrypted-folder-specific semantics."
+    },
+    {
+      "id": "feat-2dd2a53f1fef",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing error propagation",
+      "location": "syncthing-rs/src/folder_core.rs:278",
+      "message": "Go Flush returns error from both flushToRemove and updateBatch.Flush, propagating database-write failures to the caller for retry or abort. Rust Flush is infallible, returning (Vec, Vec) with no Result wrapper, so any persistence failure that the Go path would surface is silently lost. This breaks crash-recovery semantics: a caller cannot know the flush failed and therefore cannot avoid acknowledging files as scanned when they were never persisted."
+    },
+    {
+      "id": "feat-2dd2a53f1fef",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Side-effect contract replaced with data return",
+      "location": "syncthing-rs/src/folder_core.rs:278-282",
+      "message": "Go Flush is effectful: flushToRemove deletes entries from the database and updateBatch.Flush writes updates to the database transactionally within this call. Rust Flush performs no persistence; it merely drains the in-memory vectors and returns them to the caller, deferring all database I/O. If the caller does not subsequently persist these vectors in an equivalent transactional manner, data can be lost or partially applied, violating the atomicity guarantee the Go code provides."
+    },
+    {
+      "id": "feat-37b270e49fa4",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing encrypted-parent directory cleanup",
+      "location": "syncthing-rs/src/folder_core.rs:270-272",
+      "message": "The Go method (lib/model/folder.go:633-638) checks whether the folder is ReceiveEncrypted, the FileInfo is a directory, and the path is an encrypted parent; if so it removes the empty directory from the filesystem and returns false. The Rust implementation has no such branch, so encrypted parent directories will never be cleaned up and the file will be unconditionally appended to the batch."
+    },
+    {
+      "id": "feat-37b270e49fa4",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing receive-only equivalence merge",
+      "location": "syncthing-rs/src/folder_core.rs:270-272",
+      "message": "The Go method (lib/model/folder.go:653-664) compares the local file against the global file using IsEquivalentOptional with six comparison flags (ModTimeWindow, IgnorePerms, IgnoreBlocks, IgnoreFlags, IgnoreOwnership, IgnoreXattrs) for ReceiveOnly and ReceiveEncrypted folders, and substitutes the global file when equivalent. The Rust implementation omits this logic, meaning locally-changed items that are identical to the global state will never be merged back, leaving permanent receive-only-changed markers."
+    },
+    {
+      "id": "feat-37b270e49fa4",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing receive-only-changed deletion path",
+      "location": "syncthing-rs/src/folder_core.rs:270-272",
+      "message": "The Go method (lib/model/folder.go:645-652) handles the case where the global file is receive-only-changed and the local file is deleted by calling b.Remove(fi.Name) and returning true without appending. The Rust implementation lacks this branch entirely, so deleted receive-only-changed files will be appended as updates instead of being removed, corrupting local state."
+    },
+    {
+      "id": "feat-37b270e49fa4",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing return type and error path",
+      "location": "syncthing-rs/src/folder_core.rs:270",
+      "message": "The Go method returns (bool, error) to signal whether the file will be updated and to propagate database errors. The Rust function returns unit, making it impossible for callers to distinguish accepted updates from skipped ones or to handle errors from the database lookup at line 641-643 of the Go source."
+    },
+    {
+      "id": "feat-38cb9371bc29",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Revert body substitutes stub for real revert logic",
+      "location": "syncthing-rs/src/folder_core.rs:497-498",
+      "message": "The Go `Revert` delegates to `f.doInSync(f.revert)`, which executes the full `revert` method inside a synchronized lifecycle wrapper. The `revert` method (defined elsewhere in folder_recvonly.go) performs the substantive work: iterating the local need list, reverting locally-changed files to their global state, updating the database, and emitting events. The Rust implementation replaces all of that with two unrelated housekeeping statements (`forcedRescanPaths.clear()` and `scanScheduled = true`), which are not part of the revert logic at all. This means calling `Revert` in Rust never actually reverts any file, producing completely different observable side effects and database state compared to Go."
+    },
+    {
+      "id": "feat-46796fca8dbb",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing DB lookup and MustRescan mutation",
+      "location": "syncthing-rs/src/folder_core.rs:588-592",
+      "message": "The Go method iterates over drained paths, calls `f.db.GetDeviceFile` to retrieve each file's metadata (line 1417), skips missing files (line 1421-1423), calls `fi.SetMustRescan()` to mark the file for rescan (line 1424), and appends to a `FileInfoBatch` that is flushed to the database via `f.db.Update` (lines 1408-1410, 1428-1430). The Rust implementation performs none of these database operations, meaning files are never actually marked for rescan in the persistent store."
+    },
+    {
+      "id": "feat-46796fca8dbb",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing scanSubdirs invocation",
+      "location": "syncthing-rs/src/folder_core.rs:592",
+      "message": "The Go method's final action is `f.scanSubdirs(ctx, paths)` (line 1432), which triggers the actual filesystem rescan of the affected subdirectories. The Rust implementation has no equivalent call, so even if paths are accumulated, no rescan is ever initiated."
+    },
+    {
+      "id": "feat-46796fca8dbb",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Rust function is enqueue not process",
+      "location": "syncthing-rs/src/folder_core.rs:588-592",
+      "message": "The Rust `handleForcedRescans` only inserts paths into `self.forcedRescanPaths`, which is the enqueue/accumulate operation performed by callers *before* the Go method runs. The Go method (lib/model/folder.go:1396-1433) does the opposite: it drains `forcedRescanPaths` into a local slice and resets the map to empty (lines 1397-1403), then processes each path. The Rust implementation is not a port of this method; it is a port of the caller-side path insertion, leaving the actual `handleForcedRescans` logic entirely unimplemented."
+    },
+    {
+      "id": "feat-48b281996811",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Completely wrong behavior",
+      "location": "syncthing-rs/src/folder_core.rs:1047-1051",
+      "message": "The Rust implementation performs an entirely different operation from the Go source. Go calls `f.updateLocals(fs)` to persist scanned file metadata to the local database, then emits disk change events. Rust instead inserts path strings into `self.forcedRescanPaths`, which is a forced-rescan scheduling mechanism with no semantic relationship to updating local file records. The entire body of the function is incorrect."
+    },
+    {
+      "id": "feat-48b281996811",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing error propagation",
+      "location": "syncthing-rs/src/folder_core.rs:1047",
+      "message": "Go returns `error` and short-circuits on `updateLocals` failure (lines 1321-1323). Rust returns unit `()` with no `Result` type and no error path, so callers cannot detect or handle database write failures."
+    },
+    {
+      "id": "feat-48b281996811",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing event emission",
+      "location": "syncthing-rs/src/folder_core.rs:1047-1051",
+      "message": "Go calls `f.emitDiskChangeEvents(fs, events.LocalChangeDetected)` (line 1324) after a successful database update, which notifies subscribers of local filesystem changes. Rust has no equivalent call, so the event bus is never notified of locally scanned changes, breaking any listener that depends on `LocalChangeDetected` events."
+    },
+    {
+      "id": "feat-48b281996811",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing updateLocals call",
+      "location": "syncthing-rs/src/folder_core.rs:1047-1051",
+      "message": "Go delegates to `f.updateLocals(fs)` (line 1321) which writes the scanned file records into the local database, a critical persistence step for syncthing's state machine. The Rust implementation has no equivalent call, so scanned file state is never persisted."
+    },
+    {
+      "id": "feat-48b281996811",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Wrong input type",
+      "location": "syncthing-rs/src/folder_core.rs:1047",
+      "message": "Go accepts `[]protocol.FileInfo`, a slice of rich file-metadata structs containing fields like Name, Size, ModifiedS, Blocks, Version, etc. Rust accepts `\u0026[String]`, bare path strings, which means all file metadata is lost at the call boundary and no downstream operation can reconstruct the information needed by `updateLocals` or `emitDiskChangeEvents`."
+    },
+    {
+      "id": "feat-54fc8c4ae0a5",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing doInSync wrapper",
+      "location": "syncthing-rs/src/folder_core.rs:496-499",
+      "message": "The Go method delegates to `doInSync(f.revert)` which acquires synchronization, manages folder state transitions (e.g. setting folder state to syncing/idle), and provides structured error handling around the inner `f.revert` call. The Rust implementation has no equivalent synchronization or state-management wrapper and executes its body directly, meaning concurrent callers are not serialized and folder state is never updated to reflect an in-progress revert operation."
+    },
+    {
+      "id": "feat-54fc8c4ae0a5",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Revert body is a stub not equivalent to f.revert",
+      "location": "syncthing-rs/src/folder_core.rs:497-498",
+      "message": "The Go `f.revert` method (inherited from `sendReceiveFolder`) performs the actual revert logic: iterating over locally-changed files, comparing them against the global state, and replacing or deleting local entries to restore them to the global version. The Rust implementation instead only clears `forcedRescanPaths` and sets `scanScheduled = true`, which are scan-scheduling housekeeping actions and do not perform any file-level revert work. This means calling `Revert` in Rust is effectively a no-op with respect to the intended revert behavior."
+    },
+    {
+      "id": "feat-5c6a2b2afe5d",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing IO limiter acquisition",
+      "location": "syncthing-rs/src/folder_core.rs:882-885",
+      "message": "Go acquires a semaphore token from `ioLimiter.TakeWithContext` (line 475) and releases it on defer (line 478), throttling concurrent IO. Rust has no limiter, allowing unbounded concurrent scans which can cause resource exhaustion and differs in observable concurrency behavior."
+    },
+    {
+      "id": "feat-5c6a2b2afe5d",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing ScanCompleted call",
+      "location": "syncthing-rs/src/folder_core.rs:885",
+      "message": "Go calls `f.ScanCompleted()` (line 570) after both phases and flushes succeed. Rust never signals scan completion, so any downstream logic dependent on this notification (sequence bumps, completion events) will not fire."
+    },
+    {
+      "id": "feat-5c6a2b2afe5d",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing batch creation, flushing, and phase interleaving",
+      "location": "syncthing-rs/src/folder_core.rs:882-885",
+      "message": "Go creates a `scanBatch` (line 513), flushes it between phase 1 and phase 2 (line 540), and again after phase 2 (line 565). Rust does not create or flush any batch, so database updates from the scan phases are either unbatched or never committed, causing data loss on crash and breaking `scenario/crash-recovery`."
+    },
+    {
+      "id": "feat-5c6a2b2afe5d",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing error return type and all error paths",
+      "location": "syncthing-rs/src/folder_core.rs:882",
+      "message": "Go `scanSubdirs` returns `error` and has five distinct early-return error paths (health/ignore load at Go line 456, IO limiter acquire at 475, phase-1 scan at 535, phase-1 flush at 540, phase-2 scan at 560, phase-2 flush at 565). Rust returns unit `()` and propagates no errors, silently swallowing every failure that the Go code surfaces to callers."
+    },
+    {
+      "id": "feat-5c6a2b2afe5d",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing folder state transitions",
+      "location": "syncthing-rs/src/folder_core.rs:882-885",
+      "message": "Go transitions through three states: `FolderScanWaiting` (line 472), `FolderScanning` (line 510), and deferred `FolderIdle` (line 473). Rust performs no state management, so external observers (UI, other components) will never see the folder enter scanning states, breaking `scenario/folder-type-behavior` parity."
+    },
+    {
+      "id": "feat-5c6a2b2afe5d",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing health check and ignore loading",
+      "location": "syncthing-rs/src/folder_core.rs:882-885",
+      "message": "Go calls `getHealthErrorAndLoadIgnores()` (line 455) before any scan work, aborting on error and then clearing the folder error via `setError(ctx, nil)` (line 459). Rust skips this entirely, so scans can proceed on an unhealthy folder or with stale/unloaded ignore patterns, breaking ignore semantics required by `scenario/conflict-and-ignore-semantics`."
+    },
+    {
+      "id": "feat-5c6a2b2afe5d",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing ignore-hash-change detection and deferred pull",
+      "location": "syncthing-rs/src/folder_core.rs:882-885",
+      "message": "Go captures `ignores.Hash()` before scanning (line 453) and in a deferred closure (lines 464-470) checks whether ignore patterns changed during the scan, calling `ignoresUpdated()` and `SchedulePull()` if so. Rust has no equivalent, meaning ignore pattern changes during a scan will not trigger re-evaluation or pulls, violating `scenario/conflict-and-ignore-semantics`."
+    },
+    {
+      "id": "feat-5c6a2b2afe5d",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing subdir normalization and empty-string-to-full-scan logic",
+      "location": "syncthing-rs/src/folder_core.rs:882-885",
+      "message": "Go converts each subdir via `osutil.NativeFilename` and treats a blank entry as meaning \"scan entire folder\" by setting `subDirs = nil` (lines 489-500). It also calls `unifySubs` to deduplicate and trim redundant prefixes (lines 505-508). Rust passes `subdirs` through unmodified, so platform path separators won't be normalized, duplicate/overlapping prefixes won't be pruned, and an empty-string entry won't trigger a full scan."
+    },
+    {
+      "id": "feat-65a5818ecae0",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Deleted-file marking and conflict version reset missing",
+      "location": "syncthing-rs/src/folder_core.rs:893-899",
+      "message": "The Go code marks files not found in the FS walk as deleted via nf.SetDeleted(f.shortID), sets nf.LocalFlags = f.localFlags, and resets the version to an empty Vector when fi.ShouldConflict() is true to avoid overriding the global version (lib/model/folder.go:873-887). The Rust port performs none of these operations, so deleted files will never be recorded and conflict resolution will not function."
+    },
+    {
+      "id": "feat-65a5818ecae0",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Ignore matching uses hardcoded extensions instead of dynamic patterns",
+      "location": "syncthing-rs/src/folder_core.rs:895",
+      "message": "The Rust code calls classify_paths with hardcoded extensions [\".tmp\", \".DS_Store\"]. The Go code uses the runtime ignore pattern matcher f.ignores.Match(fi.Name).IsIgnored() (lib/model/folder.go:839), which evaluates .stignore rules. This means user-defined ignore patterns are completely disregarded in the Rust port, causing files that should be ignored to be treated as active and vice versa."
+    },
+    {
+      "id": "feat-65a5818ecae0",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing parameters destroy call-site contract",
+      "location": "syncthing-rs/src/folder_core.rs:893",
+      "message": "The Go signature accepts ctx context.Context, batch *scanBatch, cfiler *streamingCFiler, and alreadyUsedOrExisting map[string]struct{} (lib/model/folder.go:776). The Rust signature only accepts subdirs: \u0026[String]. Without the batch, cfiler, context, and already-used-set parameters, no deleted-file iteration, batch persistence, cancellation, or rename-detection deduplication can occur."
+    },
+    {
+      "id": "feat-65a5818ecae0",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing return value and error propagation",
+      "location": "syncthing-rs/src/folder_core.rs:893",
+      "message": "The Go function returns (int, error) representing the number of database changes and any error encountered during batch updates or DB lookups (lib/model/folder.go:776). The Rust function returns unit (void), making it impossible for callers to detect changes or handle errors, breaking the contract expected by scan orchestration."
+    },
+    {
+      "id": "feat-65a5818ecae0",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Receive-only folder type handling entirely absent",
+      "location": "syncthing-rs/src/folder_core.rs:893-899",
+      "message": "The Go code (lib/model/folder.go:888-920) has a dedicated branch for fi.IsDeleted() \u0026\u0026 fi.IsReceiveOnlyChanged() that queries the global file via f.db.GetGlobalFile, conditionally removes items from the database (batch.Remove), or clears the FlagLocalReceiveOnly flag depending on folder type (ReceiveOnly, ReceiveEncrypted, or default). This entire branch is missing from the Rust port, breaking receive-only and receive-encrypted folder semantics."
+    },
+    {
+      "id": "feat-65a5818ecae0",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Stub implementation missing all core logic",
+      "location": "syncthing-rs/src/folder_core.rs:893-899",
+      "message": "The Rust function is a 7-line stub that only classifies paths by hardcoded extensions (.tmp, .DS_Store) and removes them from forcedRescanPaths. The Go implementation (lib/model/folder.go:776-949) is ~170 lines that drains deleted files from a streaming iterator (cfiler.Finish()), filters by subdirectory prefix, checks context cancellation, matches against dynamic ignore patterns (f.ignores.Match()), marks files as ignored or deleted via batch.Update(), handles the ignored-parent directory delay optimization, processes receive-only-changed items with folder-type-specific logic, handles conflict versioning (ShouldConflict → empty Vector), and returns a change count with error propagation. None of this behavior exists in the Rust port."
+    },
+    {
+      "id": "feat-6f3cfcdb177d",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing updateBatch flush callback",
+      "location": "syncthing-rs/src/folder_core.rs:609-612",
+      "message": "The Go implementation at folder.go:587-594 initializes updateBatch with a NewFileInfoBatch callback that (a) checks folder health via getHealthErrorWithoutIgnores and returns the error to abort the scan, and (b) calls updateLocalsFromScanning to persist scanned file metadata. The Rust implementation uses Default::default() for all fields other than f, which means no flush callback is registered. When the batch is flushed during scanning, scanned files will neither be persisted nor will folder-health checks gate the scan, breaking core scan semantics."
+    },
+    {
+      "id": "feat-822fb8c43302",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing disk-change event emission",
+      "location": "syncthing-rs/src/folder_core.rs:1041",
+      "message": "The Go method calls f.emitDiskChangeEvents(fs, events.RemoteChangeDetected) at lib/model/folder.go:1332 after a successful local update, emitting per-file RemoteChangeDetected events; the Rust version omits this entirely, so downstream subscribers (UI, hooks, audit logs) never learn about remotely-pulled changes, violating scenario/conflict-and-ignore-semantics and scenario/global-need-decision parity."
+    },
+    {
+      "id": "feat-822fb8c43302",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing updateLocals call",
+      "location": "syncthing-rs/src/folder_core.rs:1041",
+      "message": "The Go method delegates to f.updateLocals(fs) at lib/model/folder.go:1329 which persists the pulled FileInfo slice into the local database index; the Rust implementation contains no equivalent call, so pulled file metadata is never written to the local store, breaking pull completion semantics required by scenario/crash-recovery and scenario/folder-type-behavior."
+    },
+    {
+      "id": "feat-85702cc39ca0",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing DropFilesNamed database side-effect",
+      "location": "syncthing-rs/src/folder_core.rs:295-299",
+      "message": "The Go method calls `b.f.db.DropFilesNamed(b.f.folderID, protocol.LocalDeviceID, b.toRemove)` to delete file entries from the database before clearing the slice. The Rust method performs no database operation at all; it merely clones the list and clears it, returning the names to the caller. If no caller in the Rust codebase subsequently invokes the equivalent of `DropFilesNamed` with the returned vec, those file records are never removed, breaking scan-batch flush semantics and causing stale entries to persist in the database."
+    },
+    {
+      "id": "feat-8afbee3d8366",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Return type not equivalent",
+      "location": "syncthing-rs/src/bep_compat.rs:27",
+      "message": "Go Descriptor() returns protoreflect.EnumDescriptor, a rich interface exposing FullName(), Values(), Options(), and other reflection methods used by protobuf runtime and serialization infrastructure; Rust returns \u0026'static str, a plain string with none of those capabilities, so any consumer relying on descriptor introspection (e.g. protobuf JSON marshalling, reflection-based routing, or the required parity tests that exercise protocol-state-transition and index-sequence-behavior) will receive an incompatible type and either fail to compile against the expected trait bounds or silently lose descriptor metadata."
+    },
+    {
+      "id": "feat-9a12e967504b",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing subDirs parameter",
+      "location": "syncthing-rs/src/folder_core.rs:549",
+      "message": "The Go method accepts `subDirs []string` and uses it to selectively clear only those scan errors whose path matches or is a parent of a requested subdirectory. The Rust method takes no parameters at all, making selective clearing impossible and forcing every call to behave as an unconditional bulk operation, which breaks callers that pass a non-empty subdirectory list."
+    },
+    {
+      "id": "feat-9a12e967504b",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Wrong filtering predicate",
+      "location": "syncthing-rs/src/folder_core.rs:550",
+      "message": "Go removes entries where `fe.Path == sub || fs.IsParent(fe.Path, sub)` — a filesystem-path-based match against the requested subdirectories. Rust instead removes entries where `e.Err.contains(\"scan\")` — a substring match on the error message text. These are entirely unrelated predicates; the Rust version will incorrectly drop errors unrelated to requested paths and retain errors that should be cleared, producing wrong state after every selective clear."
+    },
+    {
+      "id": "feat-9a12e967504b",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "errorsMut used as collection instead of mutex",
+      "location": "syncthing-rs/src/folder_core.rs:550",
+      "message": "In Go, `errorsMut` is a `sync.Mutex` that guards the separate `scanErrors []FileError` slice. In Rust, `errorsMut` is treated as the error collection itself (`.retain()` is called on it). This conflates the lock with the data it protects, meaning either the field was mistyped or a separate `scan_errors` collection is missing entirely, resulting in incorrect data-model structure and lost mutual-exclusion semantics if other code accesses scan errors through a different field."
+    },
+    {
+      "id": "feat-b294ef04747a",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing LocalIndexUpdated event emission",
+      "location": "syncthing-rs/src/folder_core.rs:1029-1039",
+      "message": "Go logs an events.LocalIndexUpdated event (lines 1354-1360) containing folder ID, item count, filenames, sequence, and a legacy version field. The Rust implementation emits no event at all, breaking any downstream subscriber that relies on this event for UI updates, API responses, or protocol synchronization triggers."
+    },
+    {
+      "id": "feat-b294ef04747a",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing database update call",
+      "location": "syncthing-rs/src/folder_core.rs:1029-1039",
+      "message": "Go calls f.db.Update(f.folderID, protocol.LocalDeviceID, fs) at line 1337 to persist the updated local file metadata to the database. The Rust implementation has no equivalent persistence call, so local index changes are never written to storage, breaking index consistency and crash recovery."
+    },
+    {
+      "id": "feat-b294ef04747a",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Signature mismatch – different parameters and semantics",
+      "location": "syncthing-rs/src/folder_core.rs:1029-1033",
+      "message": "Go updateLocals accepts a single slice of protocol.FileInfo representing files whose local index entries should be updated, whereas the Rust version accepts two slices (local and remote) of VersionedFile and computes a need set via compute_need. The function is performing an entirely different operation; no caller can supply the same logical input and get equivalent behavior."
+    },
+    {
+      "id": "feat-b294ef04747a",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "forcedRescanPaths direction reversed (insert vs delete)",
+      "location": "syncthing-rs/src/folder_core.rs:1036",
+      "message": "Go deletes each updated filename from forcedRescanPaths (line 1346: delete(f.forcedRescanPaths, file.Name)) because a file that was just written no longer needs a forced rescan. Rust does the opposite, inserting paths into forcedRescanPaths. This inverts the invariant: files that should be cleared from the rescan set are instead added to it, causing spurious rescans and never clearing completed ones."
+    },
+    {
+      "id": "feat-bf09de3ea298",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Unconditional scan replaces conditional watch-restart",
+      "location": "syncthing-rs/src/folder_core.rs:599",
+      "message": "The Go implementation guards its side-effect with `if f.FSWatcherEnabled` (lib/model/folder.go:282) and only then calls `scheduleWatchRestart()`. The Rust port removes this guard entirely and unconditionally sets `self.scanScheduled = true`, meaning the method fires even when filesystem watching is disabled. This changes behavior for every folder configuration where FSWatcherEnabled is false: Go does nothing, Rust schedules a scan."
+    },
+    {
+      "id": "feat-bf09de3ea298",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Wrong side-effect: scanScheduled instead of scheduleWatchRestart",
+      "location": "syncthing-rs/src/folder_core.rs:599",
+      "message": "The Go method calls `f.scheduleWatchRestart()` (lib/model/folder.go:283), which restarts the filesystem watcher so that updated ignore patterns are respected by the watcher. The Rust port instead sets `self.scanScheduled = true`, which schedules a full folder scan—a fundamentally different and more expensive operation that does not achieve the same goal of reloading watcher filters. This substitutes watch-restart semantics with scan semantics, breaking behavioral equivalence and likely causing unnecessary I/O under ignore-pattern changes."
+    },
+    {
+      "id": "feat-c0d3eebdc2a6",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Full-scan replaced with forced-paths-only scan",
+      "location": "syncthing-rs/src/folder_core.rs:1000-1001",
+      "message": "Go calls `scanSubdirs(ctx, nil)` where `nil` subdirs means a full folder scan, but Rust collects `forcedRescanPaths` and passes them to `Scan`, meaning it only rescans previously-forced paths instead of performing a complete scan. When `forcedRescanPaths` is empty the Rust version scans nothing, whereas Go always performs a full scan. This fundamentally changes the periodic scan-timer semantics."
+    },
+    {
+      "id": "feat-c0d3eebdc2a6",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing Reschedule call",
+      "location": "syncthing-rs/src/folder_core.rs:999-1002",
+      "message": "Go unconditionally calls `f.Reschedule()` at line 1029 after the scan completes, which rearms the scan timer for the next periodic interval. The Rust implementation omits this call entirely, so periodic scanning will not repeat after the first timer firing."
+    },
+    {
+      "id": "feat-c0d3eebdc2a6",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing initialScanFinished signaling",
+      "location": "syncthing-rs/src/folder_core.rs:999-1002",
+      "message": "Go uses a `select` on the `initialScanFinished` channel (lines 1018-1027) to detect whether this is the first scan: if the channel is not yet closed it logs success or failure and then closes the channel, signaling to all waiters that the initial scan is complete. The Rust implementation has no equivalent logic, so components waiting on initial scan completion (e.g., folder readiness, API status) will never be notified, breaking startup sequencing and the crash-recovery and folder-type-behavior parity scenarios."
+    },
+    {
+      "id": "feat-c3f747177a78",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Partial remove-only flush path missing",
+      "location": "syncthing-rs/src/folder_core.rs:290",
+      "message": "Go's first branch calls `flushToRemove()` which drains only `b.toRemove` while leaving `b.updateBatch` intact, then continues to evaluate the update batch separately. Rust calls `self.Flush()` which drains both `updateBatch` and `toRemove` together. When only `toRemove` exceeds its limit but the update batch is small, Go keeps accumulating updates across the remove-flush boundary; Rust prematurely emits a partial update batch, producing different batching of database writes and potentially different ordering of file-info application versus removal, which affects crash-recovery and conflict-and-ignore-semantics scenarios."
+    },
+    {
+      "id": "feat-c3f747177a78",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Two-stage flush collapsed into single combined check",
+      "location": "syncthing-rs/src/folder_core.rs:289",
+      "message": "Go checks `toRemove` against `maxToRemove` first and, if full, flushes only the remove list via `flushToRemove()`, then unconditionally delegates to `updateBatch.FlushIfFull()` which applies its own independent threshold to the update batch. Rust merges both collections into one sum (`updateBatch.len() + toRemove.len() \u003e= threshold`) and either flushes everything or nothing. This changes flush granularity: Go can partially flush (removes only, updates only, or both independently), whereas Rust always flushes both or neither, altering memory-pressure behavior and violating the memory-cap-50mb parity test requirement."
+    },
+    {
+      "id": "feat-db09c179f2ef",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing reverse-lexicographic sort",
+      "location": "syncthing-rs/src/folder_core.rs:1841",
+      "message": "Go sorts dirs in descending lexicographic order (strings.Compare(b, a) at folder_recvenc.go:109-111) so that deeper child paths are deleted before their parents. The Rust implementation iterates dirs in caller-supplied order with no sort, which will cause parent directories to be deleted before children, resulting in deletion failures or silently skipped subdirectories."
+    },
+    {
+      "id": "feat-dc449c5559c2",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Return type breaks reflection contract",
+      "location": "syncthing-rs/src/bep_compat.rs:34",
+      "message": "Go returns `protoreflect.Message`, a rich interface supporting descriptor-based field access, mutation (Set/Mutable/NewField), range iteration over populated fields, and WhichOneof queries. The Rust implementation returns a plain `Value` (serialized snapshot) which provides none of these capabilities. Any consumer that calls ProtoReflect to introspect field descriptors, check field presence, or mutate fields via reflection will silently get incorrect behavior or fail to compile. This affects the required parity tests protocol-state-transition and index-sequence-behavior if they rely on reflection-driven dispatch."
+    },
+    {
+      "id": "feat-f3bf48fa5bd9",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing batch update and flush-if-full logic",
+      "location": "syncthing-rs/src/folder_core.rs:887-891",
+      "message": "Go iterates scan results, calls batch.FlushIfFull() to bound memory (lib/model/folder.go:727-734), and calls batch.Update(res.File) to record changed files (lib/model/folder.go:737-741). On FlushIfFull error it drains the channel and cancels the scan context to prevent races. None of this exists in Rust, so change detection and bounded-memory batch processing are absent."
+    },
+    {
+      "id": "feat-f3bf48fa5bd9",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing filesystem walk and scanner configuration",
+      "location": "syncthing-rs/src/folder_core.rs:887-891",
+      "message": "Go constructs a scanner.Config with 16 fields (folder ID, subdirs, ignore matcher, temp lifetime, current filer, filesystem, permissions, normalization, hashers, short ID, progress interval, local flags, mod-time window, event logger, ownership, xattrs) and dispatches either scanner.Walk or scanner.WalkWithoutHashing depending on folder type (lib/model/folder.go:688-714). Rust performs none of this; no scanner is invoked, no files are enumerated, and no hashing occurs."
+    },
+    {
+      "id": "feat-f3bf48fa5bd9",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing rename detection branch",
+      "location": "syncthing-rs/src/folder_core.rs:887-891",
+      "message": "Go performs rename detection via f.findRename for all folder types except ReceiveOnly and ReceiveEncrypted (lib/model/folder.go:744-756), updating the batch with the renamed file entry. Rust has no folder-type branching and no rename detection, so renames will not be detected and two separate add+delete operations will occur instead of a single rename."
+    },
+    {
+      "id": "feat-f3bf48fa5bd9",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Return type mismatch drops all outputs",
+      "location": "syncthing-rs/src/folder_core.rs:887",
+      "message": "Go returns a 4-tuple (int, *streamingCFiler, map[string]struct{}, error) carrying the change count, the streaming iterator for Phase 2 delete detection, the already-used-or-existing set for rename dedup, and an error. Rust returns nothing (unit). Callers cannot obtain change counts, the cfiler for Phase 2, or any error signal, breaking the scan pipeline contract."
+    },
+    {
+      "id": "feat-f3bf48fa5bd9",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Rust is a stub, missing entire scan logic",
+      "location": "syncthing-rs/src/folder_core.rs:887-891",
+      "message": "The Go implementation (lib/model/folder.go:670-774) performs filesystem walking via scanner.Walk/WalkWithoutHashing, streaming DB iteration, batch updates, rename detection, error propagation, and returns (changes int, cfiler, alreadyUsedOrExisting map, error). The Rust implementation only inserts subdirectory names into a forcedRescanPaths set and returns unit, omitting all scanning, hashing, batch processing, and change-tracking behavior entirely. This is not a port; it is a placeholder stub."
+    },
+    {
+      "id": "feat-f65e95d33f27",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Entirely wrong function body",
+      "location": "syncthing-rs/src/folder_core.rs:1053-1065",
+      "message": "The Rust implementation has no behavioral relationship to the Go source. The Go method manages a state machine (FolderCleanWaiting → FolderCleaning → FolderIdle), acquires and releases an IO limiter with context-based cancellation, invokes `versioner.Clean(ctx)` with error logging, and resets `versionCleanupTimer`. The Rust body instead truncates `forcedRescanPaths` to `maxToRemove` and returns a count, which is logic belonging to a completely different function. Every line of Go logic is missing."
+    },
+    {
+      "id": "feat-f65e95d33f27",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing IO limiter acquire/release",
+      "location": "syncthing-rs/src/folder_core.rs:1053",
+      "message": "Go acquires the IO limiter via `f.ioLimiter.TakeWithContext(ctx, 1)` (line 1038) and defers `f.ioLimiter.Give(1)` (line 1041), providing backpressure and context-cancellation-based early return. The Rust function has no limiter interaction and no cancellation path."
+    },
+    {
+      "id": "feat-f65e95d33f27",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing state transitions",
+      "location": "syncthing-rs/src/folder_core.rs:1053",
+      "message": "Go sets state to FolderCleanWaiting on entry (line 1035), FolderCleaning after limiter acquisition (line 1043), and defers FolderIdle on exit (line 1036). The Rust function performs no state transitions at all, breaking folder state machine invariants observable by status subscribers."
+    },
+    {
+      "id": "feat-f65e95d33f27",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing timer reset",
+      "location": "syncthing-rs/src/folder_core.rs:1053",
+      "message": "Go resets the cleanup timer at line 1049 via `f.versionCleanupTimer.Reset(f.versionCleanupInterval)` to schedule the next cleanup cycle. The Rust function does not reset any timer, so periodic cleanup scheduling is broken."
+    },
+    {
+      "id": "feat-f65e95d33f27",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Missing versioner.Clean call",
+      "location": "syncthing-rs/src/folder_core.rs:1053",
+      "message": "The core purpose of the Go function is to call `f.versioner.Clean(ctx)` (line 1045) to purge old file versions, with a warning log on failure (line 1046). The Rust function never invokes any versioner logic, so old versions are never cleaned."
+    },
+    {
+      "id": "feat-062ab02e5300",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Missing done/shutdown guard",
+      "location": "syncthing-rs/src/folder_core.rs:476-478",
+      "message": "The Go method uses a `select` with `case \u003c-f.done` so that the operation returns immediately without blocking if the folder has been stopped. The Rust method has no corresponding check against a shutdown or cancellation signal, meaning it will unconditionally mutate state even after the folder should be considered closed, risking state corruption during teardown."
+    },
+    {
+      "id": "feat-0f3a6c6fe0ce",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Missing SchedulePull after revert",
+      "location": "syncthing-rs/src/folder_core.rs:1817-1819",
+      "message": "After reverting files the Go method calls `f.SchedulePull()` (line 95) to re-pull items whose local changes were on valid global files. The Rust stub does not schedule a pull, so reverted valid files will not be re-downloaded until the next periodic sync cycle."
+    },
+    {
+      "id": "feat-0f3a6c6fe0ce",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Missing context parameter",
+      "location": "syncthing-rs/src/folder_core.rs:1817",
+      "message": "The Go method accepts `ctx context.Context` used for structured logging (line 44) and passed to `revertHandleDirs` (line 88) for cancellation propagation. The Rust method takes only `\u0026mut self`, so context-based cancellation and contextual logging cannot occur."
+    },
+    {
+      "id": "feat-0f3a6c6fe0ce",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Missing state transitions",
+      "location": "syncthing-rs/src/folder_core.rs:1817-1819",
+      "message": "The Go method explicitly sets state to `FolderScanning` on entry and defers reset to `FolderIdle` (lines 46-47), ensuring UI and other subsystems observe the correct folder state during the revert operation. The Rust stub performs no state transition, so concurrent observers will not see the folder enter scanning state during revert."
+    },
+    {
+      "id": "feat-1727d1eb48da",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Output format mismatch: prototext vs JSON",
+      "location": "syncthing-rs/src/bep_compat.rs:42-44",
+      "message": "Go Index.String() at internal/gen/bep/bep.pb.go:829 calls protoimpl.X.MessageStringOf(x) which produces the canonical protobuf text format (prototext), e.g. folder:\"default\" files:{name:\"foo\"} last_sequence:42. The Rust port calls as_json_string(self) which emits serde_json JSON, e.g. {\"Folder\":\"default\",\"Files\":[...],\"LastSequence\":42}. These are entirely different serialization formats with different syntax, different field-name casing (proto snake_case vs Rust PascalCase), and different zero-value elision semantics (proto3 text format omits zero-value fields; serde_json includes them by default). Any code path that logs, compares, or round-trips through String() output will observe incompatible strings, breaking the scenario/protocol-state-transition and scenario/index-sequence-behavior parity tests that depend on consistent stringification."
+    },
+    {
+      "id": "feat-2dd2a53f1fef",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Operation ordering reversed",
+      "location": "syncthing-rs/src/folder_core.rs:280-281",
+      "message": "Go executes removes before updates (flushToRemove at line 613, then updateBatch.Flush at line 616). Rust drains updateBatch first via mem::swap (line 280), then calls flushToRemove (line 281). If flushToRemove inspects or mutates updateBatch state (e.g., to resolve conflicts between a file being both updated and removed in the same batch), the reversed ordering will produce different results. This also affects the Go semantics where an error in flushToRemove prevents updateBatch.Flush from executing at all — in Rust the updateBatch is already drained regardless."
+    },
+    {
+      "id": "feat-2dd2a53f1fef",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Return type incompatible with Go contract",
+      "location": "syncthing-rs/src/folder_core.rs:278",
+      "message": "Go returns a single error value; Rust returns (Vec\u003cdb::FileInfo\u003e, Vec\u003cString\u003e). Any upstream caller ported from Go that pattern-matches on an error result (e.g., logging, retry logic, or aborting the scan) will have no equivalent signal in the Rust API, requiring all call-sites to be rewritten with a different control-flow strategy."
+    },
+    {
+      "id": "feat-351203b7d474",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Rust Revert adds side-effects absent in Go no-op",
+      "location": "syncthing-rs/src/folder_core.rs:497-498",
+      "message": "The Go method `folder.Revert` at lib/model/folder.go:264 is an intentional no-op (empty body), meaning calling it produces zero state changes. The Rust implementation at syncthing-rs/src/folder_core.rs:496-499 clears `forcedRescanPaths` and sets `scanScheduled = true`, introducing two side effects that have no counterpart in the Go source. This means any caller of `Revert` in the Rust port will mutate folder state (triggering a rescan and discarding forced-rescan paths) where the Go original deliberately does nothing, breaking semantic equivalence and potentially causing spurious rescans or data loss in the `scenario/folder-type-behavior` and `scenario/crash-recovery` parity tests."
+    },
+    {
+      "id": "feat-37b270e49fa4",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Missing global file database lookup",
+      "location": "syncthing-rs/src/folder_core.rs:270-272",
+      "message": "The Go method calls b.f.db.GetGlobalFile (lib/model/folder.go:641) to retrieve the global file entry before any receive-only logic. The Rust implementation performs no database interaction at all, which means all four downstream decision branches dependent on that lookup are absent."
+    },
+    {
+      "id": "feat-38cb9371bc29",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Missing doInSync synchronization wrapper",
+      "location": "syncthing-rs/src/folder_core.rs:496",
+      "message": "The Go `Revert` is executed inside `doInSync`, which serializes the operation against the folder's run loop, acquires necessary locks, and coordinates lifecycle state (e.g., preventing concurrent pulls during revert). The Rust `Revert` takes only `\u0026mut self` with no synchronization wrapper, so there is no equivalent concurrency guard. In a multi-threaded context this could allow a revert to race with a pull or scan, violating the mutual-exclusion invariant the Go code enforces."
+    },
+    {
+      "id": "feat-398f420187ec",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Missing context.Context cancellation channel",
+      "location": "syncthing-rs/src/folder_core.rs:253",
+      "message": "Go's pull accepts a context.Context as its first parameter, enabling cooperative cancellation, deadline propagation, and value passing (e.g. tracing IDs). The Rust signature omits any cancellation token or CancellationToken equivalent, so long-running pulls cannot be cancelled by the caller, breaking behavioral parity in shutdown, folder-pause, and timeout scenarios exercised by the crash-recovery and folder-type-behavior test suites."
+    },
+    {
+      "id": "feat-398f420187ec",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Return type bool→usize breaks retry semantic",
+      "location": "syncthing-rs/src/folder_core.rs:253",
+      "message": "Go returns (bool, error) where the bool communicates \"true when successful and should not be retried\"; Rust returns Result\u003cusize, String\u003e whose Ok variant is usize, not bool. Callers in Go branch on a boolean to decide whether to retry the pull; Rust callers receive a count with no defined mapping to the retry/no-retry decision, so every call-site that inspects the return value will mis-interpret the success signal unless an ad-hoc convention (e.g. 0 vs non-zero) is layered on top, which is undocumented and fragile."
+    },
+    {
+      "id": "feat-4204b85a170d",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Mapping references wrong Go struct",
+      "location": "internal/gen/bep/bep.pb.go:852",
+      "message": "The Go source window (lines 852-857) contains `Index.GetFolder`, not the declared target symbol `IndexUpdate.GetFolder`. The actual `IndexUpdate.GetFolder` is at line 914. This mis-mapping means automated parity checks against this mapping ID would validate the wrong Go method, potentially masking regressions in the real `IndexUpdate.GetFolder`."
+    },
+    {
+      "id": "feat-4204b85a170d",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Mapping references wrong Rust impl block",
+      "location": "syncthing-rs/src/bep_compat.rs:302",
+      "message": "The Rust source reference (lines 302-304) points to `DownloadProgress.GetFolder`, not `IndexUpdate.GetFolder`. The actual `IndexUpdate.GetFolder` is at line 730 within `impl IndexUpdate`. Any automated verification trusting this mapping would compare two unrelated structs (`Index` in Go vs `DownloadProgress` in Rust) instead of the intended `IndexUpdate` on both sides."
+    },
+    {
+      "id": "feat-46796fca8dbb",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Missing context cancellation support",
+      "location": "syncthing-rs/src/folder_core.rs:588",
+      "message": "The Go method accepts `ctx context.Context` (line 1396) which is threaded to `scanSubdirs` for cooperative cancellation. The Rust signature has no cancellation token, `CancellationToken`, or async context equivalent, so long-running rescans cannot be cancelled."
+    },
+    {
+      "id": "feat-46796fca8dbb",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Missing error propagation and return type",
+      "location": "syncthing-rs/src/folder_core.rs:588",
+      "message": "The Go method returns `error` and has five distinct error-return sites: `FlushIfFull` (line 1413), `GetDeviceFile` (line 1418), `Flush` (line 1428), and `scanSubdirs` (line 1432). The Rust function returns unit `()`, providing no mechanism for callers to detect or handle failures in batch processing, DB access, or scanning."
+    },
+    {
+      "id": "feat-5c6a2b2afe5d",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Missing changes tracking and conditional SchedulePull",
+      "location": "syncthing-rs/src/folder_core.rs:882-885",
+      "message": "Go accumulates a `changes` counter from both phases (lines 517, 534, 559) and only calls `SchedulePull()` in the deferred closure if `changes \u003e 0` (lines 525-527). Rust has no change counting or conditional pull, so either pulls are never scheduled after scans or are scheduled unconditionally elsewhere, deviating from the Go behavior that avoids unnecessary pull cycles."
+    },
+    {
+      "id": "feat-5c6a2b2afe5d",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Missing subdirs fallback to empty prefix between phases",
+      "location": "syncthing-rs/src/folder_core.rs:884",
+      "message": "Go checks `len(subDirs) == 0` after phase 1 and replaces it with `[]string{\"\"}` (lines 545-549) so that phase 2 traverses the entire folder. Rust passes the original `subdirs` slice to phase 2 unchanged, so when the pre-phase normalization would have set subdirs to nil/empty, phase 2 may scan nothing instead of the full folder."
+    },
+    {
+      "id": "feat-63788b4d3010",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Receiver type mismatch Index vs IndexUpdate",
+      "location": "internal/gen/bep/bep.pb.go:859",
+      "message": "The mapping specifies Go symbol `IndexUpdate.GetFiles` but the provided Go source at line 859 defines the method on `*Index`, not `*IndexUpdate`. If the Rust implementation attaches `GetFiles` to an `IndexUpdate` struct rather than an `Index` struct, callers invoking it on the wrong type will silently return unrelated data or fail to compile against correct call sites. Verify which struct the Rust method is implemented on and ensure it matches the intended Go receiver."
+    },
+    {
+      "id": "feat-637e54e9156c",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Override adds spurious pullScheduled side-effect",
+      "location": "syncthing-rs/src/folder_core.rs:493",
+      "message": "Go's `folder.Override()` (lib/model/folder.go:262) is an intentional no-op on the base `folder` type, serving as a default that concrete folder types (e.g. `sendReceiveFolder`) may override with real logic. The Rust port at folder_core.rs:493 unconditionally sets `self.pullScheduled = true`, introducing a pull-scheduling side-effect that does not exist in the Go base implementation. Any caller invoking `Override()` on a folder that should be a no-op will now erroneously schedule a pull, which can affect folder-type-behavior and global-need-decision parity tests."
+    },
+    {
+      "id": "feat-65a5818ecae0",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Ignored-parent directory delay optimization missing",
+      "location": "syncthing-rs/src/folder_core.rs:893-899",
+      "message": "The Go code (lib/model/folder.go:821-837, 846-854) implements a deferred-ignore mechanism for directories: when a directory is newly ignored, its children are accumulated in toIgnore and only committed when iteration moves past the parent (via fs.IsParent check). This prevents incorrectly ignoring a parent directory whose child is unignored. The Rust port has no equivalent, risking incorrect ignore state for directory hierarchies."
+    },
+    {
+      "id": "feat-6a8bc7b0b6c5",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Err field prefixed with \"scan: \" not present in Go",
+      "location": "syncthing-rs/src/folder_core.rs:618",
+      "message": "Go stores the error string verbatim via `err.Error()` (lib/model/folder.go:1269), but Rust wraps it with `format!(\"scan: {err}\")`, prepending the literal `\"scan: \"` prefix. This changes every persisted `FileError.Err` value, breaking wire/schema compatibility and any downstream consumer that pattern-matches or compares error strings."
+    },
+    {
+      "id": "feat-6f3cfcdb177d",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Field f stores folder ID string instead of folder reference",
+      "location": "syncthing-rs/src/folder_core.rs:610",
+      "message": "Go stores a *folder pointer in scanBatch.f (folder.go:584), giving the batch access to all folder methods (getHealthErrorWithoutIgnores, updateLocalsFromScanning, sl logger). Rust stores only self.config.id.clone(), a plain folder-ID string. Even if the missing callback were added later, the scanBatch struct lacks the handle needed to invoke health checks, update locals, or emit debug logs, making the callback unimplementable without a structural change."
+    },
+    {
+      "id": "feat-822fb8c43302",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Missing error return and propagation",
+      "location": "syncthing-rs/src/folder_core.rs:1041",
+      "message": "The Go method returns error and short-circuits on updateLocals failure at lib/model/folder.go:1329-1330; the Rust method returns unit with no Result type, so callers have no way to detect or react to persistence failures."
+    },
+    {
+      "id": "feat-822fb8c43302",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Wrong input type loses FileInfo data",
+      "location": "syncthing-rs/src/folder_core.rs:1041",
+      "message": "The Go signature accepts []protocol.FileInfo carrying full metadata (name, size, version vector, blocks, etc.); the Rust signature accepts \u0026[String] which carries only path strings, discarding all metadata required by updateLocals and emitDiskChangeEvents even if those calls were later added."
+    },
+    {
+      "id": "feat-85702cc39ca0",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Return type changes error semantics to infallible",
+      "location": "syncthing-rs/src/folder_core.rs:295",
+      "message": "The Go method returns `error` and propagates any database failure from `DropFilesNamed`, allowing callers to react to partial-flush failures. The Rust method returns `Vec\u003cString\u003e` and is infallible. This eliminates the error path entirely, meaning callers cannot detect or handle a flush failure, violating the contract expected by crash-recovery and retry logic."
+    },
+    {
+      "id": "feat-85702cc39ca0",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Unconditional clear loses retry-on-failure guarantee",
+      "location": "syncthing-rs/src/folder_core.rs:297",
+      "message": "In Go, `b.toRemove` is only reset to `[:0]` after `DropFilesNamed` succeeds; if the database call fails, the items remain in the slice so a subsequent flush attempt can retry them. The Rust version unconditionally calls `self.toRemove.clear()` regardless of whether the downstream consumer successfully processes the returned names, so items are irrecoverably lost on failure, breaking crash-recovery parity."
+    },
+    {
+      "id": "feat-8afbee3d8366",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Symbol-kind mismatch in macro",
+      "location": "syncthing-rs/src/bep_compat.rs:28",
+      "message": "The review target maps IndexUpdate.Descriptor (a message-level descriptor returning protoreflect.MessageDescriptor) but the Go snippet provided is MessageType.Descriptor (an enum-level descriptor returning protoreflect.EnumDescriptor via file_bep_bep_proto_enumTypes[0]); the Rust macro uses a single descriptor($name) path for both, collapsing the distinction between EnumDescriptor and MessageDescriptor into one \u0026'static str, which means the message variant and enum variant are not differentiated on the Rust side even though they carry structurally different protobuf reflection data in Go."
+    },
+    {
+      "id": "feat-9a12e967504b",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Missing empty-subDirs fast path",
+      "location": "syncthing-rs/src/folder_core.rs:549-551",
+      "message": "Go has an explicit branch: when `subDirs` is empty, it sets `f.scanErrors = nil`, unconditionally clearing all errors and returning early. The Rust implementation has no equivalent branch. Even if the parameter were added, the current code would iterate and filter rather than bulk-clear, diverging from Go behavior where an empty-subDirs call is the \"clear everything\" signal used after full scans."
+    },
+    {
+      "id": "feat-9aa10703f102",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Error return type dropped",
+      "location": "syncthing-rs/src/folder_core.rs:506",
+      "message": "Go Scan returns error (line 302), propagating failures from scanSubdirs back to the caller so it can log, retry, or notify. The Rust signature returns unit; the Err branch at line 517 stores the error internally via newScanError but never surfaces it to the caller, silently swallowing failures that Go callers are expected to handle."
+    },
+    {
+      "id": "feat-9aa10703f102",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Missing doInSync serialization",
+      "location": "syncthing-rs/src/folder_core.rs:506",
+      "message": "Go wraps the entire scan body in doInSync (line 304), which serializes folder operations so that only one sync-related action runs at a time. The Rust implementation has no equivalent mutual-exclusion wrapper, meaning concurrent Scan calls or interleaved folder operations can race on shared mutable state such as pullScheduled and scanScheduled."
+    },
+    {
+      "id": "feat-9aa10703f102",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Missing initialScanFinished gate",
+      "location": "syncthing-rs/src/folder_core.rs:506",
+      "message": "Go blocks on the initialScanFinished channel at line 303 before proceeding, ensuring no user-triggered scan runs until the initial scan completes. The Rust Scan method has no equivalent await or blocking mechanism, allowing scans to execute before initialization finishes, which can cause data races against the initial scan or operate on incomplete state."
+    },
+    {
+      "id": "feat-a7316cfae9c9",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Model-level bypasses folder ScheduleForceRescan",
+      "location": "syncthing-rs/src/model_core.rs:1365",
+      "message": "In Go, model.recheckFile calls runner.ScheduleForceRescan(name) (model.go:2151) which invokes the folder method that records the path in forcedRescanPaths and non-blocking-signals the forcedRescanRequested channel. In Rust, model_core::ScheduleForceRescan (model_core.rs:1360-1366) delegates to self.Scan() which calls ScanFolderSubdirs (model_core.rs:1353-1358) and then folder.Scan(subs) (model_core.rs:907), completely bypassing folder_core::ScheduleForceRescan. The path is never inserted into forcedRescanPaths via this call path, so the file is not marked for forced rehash on the next scan, losing the core behavioral intent of the method."
+    },
+    {
+      "id": "feat-a7316cfae9c9",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Signature changes single path to slice",
+      "location": "syncthing-rs/src/folder_core.rs:522",
+      "message": "Go ScheduleForceRescan accepts a single path string and unconditionally inserts exactly one entry into forcedRescanPaths (folder.go:1309-1311). The Rust port changes the signature to accept \u0026[String], allowing zero or many paths. This enables callers like scanOnWatchErr (folder_core.rs:878) to invoke ScheduleForceRescan(\u0026[]) which inserts nothing into forcedRescanPaths yet still sets scanScheduled=true, a call pattern impossible in Go where the equivalent scanOnWatchErr (folder.go:1216) calls the distinct method DelayScan(0) instead."
+    },
+    {
+      "id": "feat-afa225e00658",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Vec-vs-Set duplicates silently dropped",
+      "location": "syncthing-rs/src/folder_core.rs:275",
+      "message": "Go appends to a slice (`append(b.toRemove, item)`), which preserves duplicate entries; Rust calls `insert` on what is a `HashSet`/`BTreeSet`, which silently deduplicates. If `Remove` is called twice with the same path, Go's `toRemove` contains two entries while Rust's contains one. Any downstream logic that counts entries, iterates with per-element side effects, or checks `len()` for capacity/batching decisions will diverge. To match Go semantics the backing collection must be a `Vec` with `push`."
+    },
+    {
+      "id": "feat-b294ef04747a",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Missing sequence retrieval",
+      "location": "syncthing-rs/src/folder_core.rs:1029-1039",
+      "message": "Go retrieves the current device sequence via f.db.GetDeviceSequence (line 1350) after the database update and includes it in the emitted event. The Rust implementation neither retrieves a sequence number nor tracks one, which means even if event emission were added, the sequence/version payload would be absent, breaking wire compatibility with peers and clients expecting those fields."
+    },
+    {
+      "id": "feat-b294ef04747a",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Return type mismatch – error vs Vec of paths",
+      "location": "syncthing-rs/src/folder_core.rs:1033",
+      "message": "Go returns an error (or nil on success), propagating database failures to the caller. Rust returns Vec\u003cString\u003e containing need paths, which is a fundamentally different return contract. Callers cannot detect or handle persistence failures, and the returned need-path list has no analog in the Go function, suggesting the Rust function was mapped to the wrong Go symbol or conflated with a different method."
+    },
+    {
+      "id": "feat-c0d3eebdc2a6",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Error return dropped",
+      "location": "syncthing-rs/src/folder_core.rs:999",
+      "message": "Go returns the `error` from `scanSubdirs` to the caller (line 1031), allowing upstream logic to react to scan failures. The Rust function returns unit `()`, discarding any scan error. This prevents callers from distinguishing successful scans from failed ones, which affects error-logging paths and the crash-recovery parity test."
+    },
+    {
+      "id": "feat-c3f747177a78",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Error propagation replaced with Option return",
+      "location": "syncthing-rs/src/folder_core.rs:288",
+      "message": "Go returns `error`, propagating failures from both `flushToRemove()` and `updateBatch.FlushIfFull()` so callers can abort the scan on I/O or DB errors. Rust returns `Option\u003c(Vec\u003cdb::FileInfo\u003e, Vec\u003cString\u003e)\u003e` with no error variant, making it impossible to signal flush failures to the caller. Any downstream flush error (e.g., DB write failure) is either silently lost or must panic, breaking the crash-recovery parity test which depends on error-aware control flow."
+    },
+    {
+      "id": "feat-db09c179f2ef",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Clone of sendReceiveFolder breaks mutation visibility",
+      "location": "syncthing-rs/src/folder_core.rs:1838",
+      "message": "Rust clones self.sendReceiveFolder into an Arc\u003cMutex\u003c\u003e\u003e for the deleteQueue, meaning any state mutations during directory deletion (e.g., updated file metadata, error counts) are applied to the clone and not propagated back to self. Go operates directly on the receiver f, so all side effects are immediately visible on the live folder object."
+    },
+    {
+      "id": "feat-db09c179f2ef",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Missing per-dir error recording via newScanError",
+      "location": "syncthing-rs/src/folder_core.rs:1842",
+      "message": "Go calls f.newScanError(dir, fmt.Errorf(\"deleting unexpected dir: %w\", err)) when deleteDirOnDisk fails (folder_recvenc.go:113-115), recording a structured scan error with the specific wrapper message. The Rust code calls q.handle(d) with no visible error-recording path, so deletion failures are silently swallowed or handled differently, breaking error-reporting parity."
+    },
+    {
+      "id": "feat-db09c179f2ef",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Missing pullScannerRoutine and scan-channel semantics",
+      "location": "syncthing-rs/src/folder_core.rs:1836-1845",
+      "message": "Go spawns a pullScannerRoutine goroutine on a dedicated channel (folder_recvenc.go:105-106) and unconditionally sends every processed dir to scanChan after the delete attempt (line 116), ensuring each directory is re-scanned regardless of deletion outcome. The Rust version delegates to deleteQueue.handle/flush with no visible scan-trigger mechanism, so post-delete rescans may be lost."
+    },
+    {
+      "id": "feat-dc449c5559c2",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Nil receiver path missing",
+      "location": "syncthing-rs/src/bep_compat.rs:34",
+      "message": "Go lines 462-469 branch on `x != nil`: when the receiver is nil it falls through to `mi.MessageOf(x)` which returns a valid zero-value reflection object, allowing safe reflection on nil messages. The Rust method takes `\u0026self`, making a None receiver unrepresentable at the call site. If the owning struct is ever held behind an `Option`, callers must add their own None guard, and no equivalent zero-value reflection object is produced for the None case, diverging from Go's guaranteed non-nil return."
+    },
+    {
+      "id": "feat-f3bf48fa5bd9",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Missing error paths and context cancellation",
+      "location": "syncthing-rs/src/folder_core.rs:887-891",
+      "message": "Go creates a cancellable child context (lib/model/folder.go:675-676), defers its cancellation, checks for scan result errors via f.newScanError (line 723), checks the streaming iterator error via cfiler.Error() (line 760), and propagates errors from batch operations. Rust has no Result return, no cancellation token, and no error reporting, so all error conditions are silently ignored."
+    },
+    {
+      "id": "feat-f3bf48fa5bd9",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Missing streaming DB iterator for delete detection",
+      "location": "syncthing-rs/src/folder_core.rs:887-891",
+      "message": "Go creates a streamingCFiler backed by f.db.AllLocalFilesOrdered (lib/model/folder.go:683-684) and returns it so that Phase 2 can identify deleted files by examining DB entries not seen during the walk. Rust does not create or return any iterator, so the Phase 2 delete-detection pipeline has no data source."
+    },
+    {
+      "id": "feat-f65e95d33f27",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Signature mismatch — missing context parameter",
+      "location": "syncthing-rs/src/folder_core.rs:1053",
+      "message": "Go accepts a `context.Context` for cancellation propagation to the IO limiter and versioner. The Rust function takes only `\u0026mut self`, eliminating the ability to propagate cancellation or deadlines."
+    },
+    {
+      "id": "feat-f65e95d33f27",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Signature mismatch — return type",
+      "location": "syncthing-rs/src/folder_core.rs:1053",
+      "message": "Go returns nothing (`func ... versionCleanupTimerFired(ctx context.Context)`); the Rust function returns `usize`. This changes the call-site contract and indicates the body was pasted from an unrelated function."
+    },
+    {
+      "id": "feat-fd55a30a59d2",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Wrong scan API called",
+      "location": "syncthing-rs/src/folder_core.rs:878",
+      "message": "The Go code calls `DelayScan(0)` which schedules the next periodic scan to fire immediately (zero delay) through the normal scan-scheduling path, whereas the Rust code calls `ScheduleForceRescan(\u0026[])` which is a forced-rescan entry point. These are semantically different operations: `DelayScan(0)` adjusts the scan timer to expire now without bypassing throttling or deduplication logic, while `ScheduleForceRescan` may bypass scheduling guards, carry different priority, or interact differently with in-progress scans. The Rust port should call the equivalent of `DelayScan` with a zero duration rather than a force-rescan to preserve the Go behavior."
+    },
+    {
+      "id": "feat-1727d1eb48da",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Wrong Go snippet in mapping metadata",
+      "location": "internal/gen/bep/bep.pb.go:66-68",
+      "message": "The mapping header declares the Go symbol as Index.String and cites source lines 66-68, but those lines contain MessageType.String() (an enum helper using EnumStringOf), not Index.String(). The actual Index.String() is at line 829-831 and calls MessageStringOf, a fundamentally different protobuf API. This metadata error could cause reviewers or automated tooling to validate against the wrong Go implementation."
+    },
+    {
+      "id": "feat-37b270e49fa4",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Missing debug logging",
+      "location": "syncthing-rs/src/folder_core.rs:270-272",
+      "message": "The Go method emits two distinct debug log messages (lib/model/folder.go:650 and 663) for the receive-only deletion and merge paths respectively. The Rust implementation has no logging, reducing observability for conflict and ignore semantics debugging required by the parity tests."
+    },
+    {
+      "id": "feat-398f420187ec",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Error type loses structured error identity",
+      "location": "syncthing-rs/src/folder_core.rs:253",
+      "message": "Go returns the error interface, which supports errors.Is/errors.As for typed matching (e.g. distinguishing ErrFolderPaused from network errors). Rust uses plain String, discarding error identity. Downstream code that needs to branch on specific error kinds (as the Go model layer does for conflict-and-ignore-semantics and global-need-decision scenarios) cannot do so without string-matching, which is brittle and locale-sensitive."
+    },
+    {
+      "id": "feat-398f420187ec",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Extra folder_id parameter widens interface contract",
+      "location": "syncthing-rs/src/folder_core.rs:253",
+      "message": "Go's puller.pull takes only a context; the puller implementation already knows its folder identity via struct state. The Rust signature adds a folder_id: \u0026str parameter, meaning the caller must supply a folder identifier that does not exist in the Go contract. This shifts responsibility to the caller, risks mismatched folder IDs being passed at call-sites, and makes the trait non-equivalent to the Go interface for any generic dispatch code."
+    },
+    {
+      "id": "feat-46796fca8dbb",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Missing batch flush-if-full logic",
+      "location": "syncthing-rs/src/folder_core.rs:588-592",
+      "message": "The Go method uses a `FileInfoBatch` with `FlushIfFull` (line 1413) to cap memory usage during large rescan sets, flushing to the DB in bounded increments. The Rust implementation has no batching mechanism, which will become a correctness and memory issue once the DB-update logic is added, particularly relevant to the required `memory-cap-50mb` parity test."
+    },
+    {
+      "id": "feat-5c6a2b2afe5d",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Missing memory tracking for 50 MB cap enforcement",
+      "location": "syncthing-rs/src/folder_core.rs:882-885",
+      "message": "Go reads `runtime.MemStats.HeapInuse` before and after scanning (lines 486-487, 520) and logs the delta (line 524), which is used for the memory cap monitoring required by `scenario/memory-cap-50mb`. Rust has no heap measurement, so the memory cap test scenario cannot observe scan memory impact."
+    },
+    {
+      "id": "feat-5c6a2b2afe5d",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Missing metrics instrumentation",
+      "location": "syncthing-rs/src/folder_core.rs:882-885",
+      "message": "Go increments `metricFolderScans` (line 480), tracks elapsed scan seconds via a goroutine (line 483), and logs heap delta and phase durations (lines 521-524, 533, 558, 568). Rust has no metrics or duration logging, reducing observability and breaking any dashboards or alerting that depends on these counters."
+    },
+    {
+      "id": "feat-63788b4d3010",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Clone semantics diverge from shared-slice return",
+      "location": "syncthing-rs/src/bep_compat.rs:708-709",
+      "message": "The Go method returns the internal `x.Files` slice directly, meaning the caller holds a reference into the receiver's owned data and mutations to elements (e.g., `ret[0].Name = \"x\"`) propagate back to the struct. The Rust method returns `self.Files.clone()`, producing a fully independent `Vec\u003cFileInfo\u003e`. Any downstream code path that relies on mutating the returned collection and observing the effect through the original struct (or vice versa) will behave differently. This matters for crash-recovery and index-sequence-behavior scenarios where in-place patching of file entries may occur."
+    },
+    {
+      "id": "feat-63788b4d3010",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Pointer-element vs value-element type fidelity",
+      "location": "syncthing-rs/src/bep_compat.rs:708",
+      "message": "Go returns `[]*FileInfo` (slice of pointers), preserving identity: two slices can share the same `*FileInfo` and observe each other's mutations. Rust returns `Vec\u003cFileInfo\u003e` (owned values), so element identity is lost after the clone. If any protocol-state-transition or index-sequence-behavior test compares element identity or relies on pointer aliasing between the struct's field and the returned slice elements, it will not replicate correctly."
+    },
+    {
+      "id": "feat-6a8bc7b0b6c5",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Warning log omitted in Rust",
+      "location": "syncthing-rs/src/folder_core.rs:615",
+      "message": "Go emits a structured warning log `f.sl.Warn(\"Failed to scan\", ...)` (lib/model/folder.go:1267) before appending the error. The Rust port has no logging call at all, so operators lose scan-failure observability, and any test or integration that asserts on log output will not see the expected entry."
+    },
+    {
+      "id": "feat-6a8bc7b0b6c5",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "scanErrors field merged into errorsMut",
+      "location": "syncthing-rs/src/folder_core.rs:616",
+      "message": "Go uses two distinct fields: `errorsMut` (a `sync.Mutex` providing concurrency protection) and `scanErrors` (the `[]FileError` slice that stores errors). Rust collapses both into a single `errorsMut` field used as a `Vec\u003cFileError\u003e`, losing the original field name `scanErrors`. Any cross-component code, serialization, or test that references the `scanErrors` field by name will fail to resolve in the Rust port."
+    },
+    {
+      "id": "feat-6f3cfcdb177d",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "toRemove not pre-allocated to maxToRemove capacity",
+      "location": "syncthing-rs/src/folder_core.rs:611",
+      "message": "Go explicitly pre-allocates toRemove with make([]string, 0, maxToRemove) at folder.go:585, bounding initial allocation and signaling the expected upper bound. Rust relies on Default::default() which produces a zero-capacity Vec. While functionally equivalent for correctness, this loses the capacity hint and will cause repeated re-allocations during scans with many deletions, and may also indicate that the maxToRemove constant is not ported or enforced in the Rust side."
+    },
+    {
+      "id": "feat-822fb8c43302",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Body implements unrelated logic",
+      "location": "syncthing-rs/src/folder_core.rs:1042-1044",
+      "message": "The Rust body iterates pulled paths and removes them from self.forcedRescanPaths, which has no counterpart anywhere in the Go updateLocalsFromPulling method; this appears to be logic belonging to a different function spliced in by mistake, and it will incorrectly clear forced-rescan state on every pull regardless of whether the local update succeeded."
+    },
+    {
+      "id": "feat-85702cc39ca0",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Empty-input guard omitted",
+      "location": "syncthing-rs/src/folder_core.rs:295-299",
+      "message": "The Go method guards with `if len(b.toRemove) \u003e 0` to skip the database call entirely when there is nothing to remove. The Rust method always allocates a new `Vec`, clones zero elements, and clears, which is functionally harmless but removes the explicit no-op short-circuit. If a `DropFilesNamed` equivalent is later added to the Rust path without re-adding this guard, it will issue unnecessary empty-batch database calls."
+    },
+    {
+      "id": "feat-8afbee3d8366",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Visibility narrower than Go",
+      "location": "syncthing-rs/src/bep_compat.rs:27",
+      "message": "Go Descriptor() is an exported public method (uppercase initial) satisfying the protoreflect.Enum interface and callable by any external package; Rust declares the method pub(crate), restricting it to crate-internal use, which will prevent external consumers or integration-test crates (including the required scenario/crash-recovery and scenario/protocol-state-transition parity tests if they live outside the crate) from invoking it."
+    },
+    {
+      "id": "feat-9aa10703f102",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Divergent method body with inlined extra logic",
+      "location": "syncthing-rs/src/folder_core.rs:507-519",
+      "message": "Go Scan delegates entirely to scanSubdirs (line 305) and does nothing else. The Rust Scan calls scanSubdirs at line 508 and then performs additional operations: clearScanErrors (line 507, executed before scanSubdirs), normalize_scan_subdirs (line 509), scan_filesystem_deterministic (line 511), conditional pullScheduled assignment (line 514), and scanScheduled reset (line 519). This either duplicates work already inside scanSubdirs or introduces behavior not present in the Go Scan path, changing observable side effects and execution order."
+    },
+    {
+      "id": "feat-9aa10703f102",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Missing context-based cancellation",
+      "location": "syncthing-rs/src/folder_core.rs:508",
+      "message": "Go passes a context.Context obtained from doInSync into scanSubdirs (line 305), enabling cooperative cancellation when the folder is stopped or the service shuts down. The Rust scanSubdirs call at line 508 accepts no cancellation token or equivalent, so long-running scans cannot be interrupted, risking hangs during shutdown."
+    },
+    {
+      "id": "feat-a7316cfae9c9",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Forced-rescan signal conflated with regular scan flag",
+      "location": "syncthing-rs/src/folder_core.rs:594-596",
+      "message": "Go uses a dedicated forcedRescanRequested channel (folder.go:80,1314-1316) with non-blocking send semantics, giving the folder serve loop a distinct case to differentiate forced-rescan triggers from regular scan scheduling. The Rust port replaces this with forcedRescanRequested() simply setting self.scanScheduled = true (folder_core.rs:595), the same boolean flag used by ScheduleScan (folder_core.rs:532). This merges the two signal paths, preventing any downstream logic from distinguishing a forced-rescan request from a regular scan request."
+    },
+    {
+      "id": "feat-afa225e00658",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Insertion-order not preserved",
+      "location": "syncthing-rs/src/folder_core.rs:275",
+      "message": "Go's slice guarantees stable insertion order when the batch is later drained. A `HashSet` provides no ordering guarantee and a `BTreeSet` provides lexicographic order, neither of which matches Go's insertion-order semantics. If any consumer of `toRemove` is order-sensitive (e.g., conflict resolution picking the first entry, or deterministic logging/testing), the Rust port will produce a different sequence. Switching to `Vec::push` restores both duplicate and ordering parity."
+    },
+    {
+      "id": "feat-c0d3eebdc2a6",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Missing context propagation",
+      "location": "syncthing-rs/src/folder_core.rs:999",
+      "message": "Go accepts a `context.Context` parameter used for cancellation and structured logging (lines 1015-1016, 1022, 1024). The Rust signature takes only `\u0026mut self` with no cancellation token or tracing span, so cooperative cancellation during long scans and contextual log correlation are both absent."
+    },
+    {
+      "id": "feat-c3f747177a78",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Hardcoded constant replaced with caller-supplied parameter",
+      "location": "syncthing-rs/src/folder_core.rs:287",
+      "message": "Go uses the package-level constant `maxToRemove` to gate the remove-list flush, ensuring a single canonical threshold across all call sites. Rust accepts `threshold` as a `usize` parameter, shifting responsibility to every caller to supply the correct value. If any call site passes a different value, flush frequency diverges from Go behavior, and there is no compile-time guarantee that the Go constant is consistently applied."
+    },
+    {
+      "id": "feat-db09c179f2ef",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Return type mismatch (void vs usize)",
+      "location": "syncthing-rs/src/folder_core.rs:1836",
+      "message": "Go's revertHandleDirs returns nothing (folder_recvenc.go:100). The Rust version returns usize from q.flush(), changing the method contract. Callers that depend on a void signature will see a different API, and the returned count has no Go-side equivalent to validate against."
+    },
+    {
+      "id": "feat-dc449c5559c2",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Lazy message-info initialization absent",
+      "location": "syncthing-rs/src/bep_compat.rs:35",
+      "message": "Go lines 463-466 perform a compare-and-swap lazy init of the message's `MessageInfo` metadata on first reflection access, ensuring the type is registered in the global protobuf registry. The Rust path performs no equivalent registration. Code paths that later query the global type registry (e.g., `protoregistry.GlobalTypes`) to resolve this message type by full name will not find it, which can break dynamic message resolution in crash-recovery or protocol-state-transition scenarios."
+    },
+    {
+      "id": "feat-ff835975a163",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Nil-receiver vs no-None divergence on empty value",
+      "location": "syncthing-rs/src/bep_compat.rs:16-17",
+      "message": "Go IndexUpdate.String() accepts a *IndexUpdate (pointer receiver); calling it on a nil pointer yields an empty string via MessageStringOf. The Rust port takes \u0026self which cannot be None; calling String() on a Default-constructed IndexUpdate produces a non-empty JSON object with all default field values serialized (e.g. {\"folder\":\"\",\"files\":[]}). This changes observable behavior for the empty/zero-value edge case, which may affect crash-recovery test scenarios that check log output after partial state initialization."
+    },
+    {
+      "id": "feat-ff835975a163",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "String output format mismatch: proto text vs JSON",
+      "location": "syncthing-rs/src/bep_compat.rs:42-44",
+      "message": "Go IndexUpdate.String() at bep.pb.go:891 delegates to protoimpl.X.MessageStringOf(x) which emits protobuf text format (field:value pairs without quotes on keys, nested braces for sub-messages), whereas the Rust impl_proto_common macro at bep_compat.rs:42 delegates to as_json_string (bep_compat.rs:16-17) which calls serde_json::to_string, producing JSON with quoted keys, arrays, and a fundamentally different grammar. Any downstream code that pattern-matches, parses, or compares the String() output—including log-grepping in crash-recovery or protocol-state-transition test scenarios—will observe divergent results."
+    },
+    {
+      "id": "feat-63788b4d3010",
+      "tier": "T1",
+      "priority": "P3",
+      "title": "Nil-receiver path has no Rust equivalent",
+      "location": "internal/gen/bep/bep.pb.go:860-863",
+      "message": "Go's nil-receiver guard (lines 860-863) returns a nil slice when the receiver pointer is nil. Rust's `\u0026self` is guaranteed non-null, so this path is structurally absent. While Rust's type system prevents the nil-receiver case in safe code, any FFI or unsafe caller that could produce an analogous null state would trigger undefined behavior instead of the graceful nil-return the Go code provides."
+    },
+    {
+      "id": "feat-6a8bc7b0b6c5",
+      "tier": "T1",
+      "priority": "P3",
+      "title": "err parameter type narrows from error interface to \u0026str",
+      "location": "syncthing-rs/src/folder_core.rs:615",
+      "message": "Go accepts `err error` (an interface), calling `err.Error()` to obtain the string. Rust accepts `err: \u0026str` directly, meaning callers must pre-convert the error to a string before calling `newScanError`. If a caller passes a rich error type in Go whose `.Error()` output differs from the string a Rust caller constructs manually, the stored value will diverge silently."
+    }
+  ],
+  "results": [
+    {
+      "id": "feat-062ab02e5300",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "folder.DelayScan",
+      "rust_symbol": "DelayScan",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-062ab02e5300.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-062ab02e5300.txt",
+      "duration_ms": 19503,
+      "finding_count": 3
+    },
+    {
+      "id": "feat-0f3a6c6fe0ce",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "receiveEncryptedFolder.revert",
+      "rust_symbol": "revert",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-0f3a6c6fe0ce.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-0f3a6c6fe0ce.txt",
+      "duration_ms": 28139,
+      "finding_count": 5
+    },
+    {
+      "id": "feat-1727d1eb48da",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "Index.String",
+      "rust_symbol": "String",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-1727d1eb48da.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-1727d1eb48da.txt",
+      "duration_ms": 64803,
+      "finding_count": 2
+    },
+    {
+      "id": "feat-2dd2a53f1fef",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "scanBatch.Flush",
+      "rust_symbol": "Flush",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-2dd2a53f1fef.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-2dd2a53f1fef.txt",
+      "duration_ms": 29076,
+      "finding_count": 4
+    },
+    {
+      "id": "feat-320339296c3b",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "IndexUpdate.GetPrevSequence",
+      "rust_symbol": "GetPrevSequence",
+      "status": "no-findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-320339296c3b.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-320339296c3b.txt",
+      "duration_ms": 29598,
+      "finding_count": 0
+    },
+    {
+      "id": "feat-351203b7d474",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "folder.Revert",
+      "rust_symbol": "Revert",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-351203b7d474.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-351203b7d474.txt",
+      "duration_ms": 13390,
+      "finding_count": 1
+    },
+    {
+      "id": "feat-37b270e49fa4",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "scanBatch.Update",
+      "rust_symbol": "Update",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-37b270e49fa4.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-37b270e49fa4.txt",
+      "duration_ms": 25871,
+      "finding_count": 6
+    },
+    {
+      "id": "feat-38cb9371bc29",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "receiveOnlyFolder.Revert",
+      "rust_symbol": "Revert",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-38cb9371bc29.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-38cb9371bc29.txt",
+      "duration_ms": 25645,
+      "finding_count": 2
+    },
+    {
+      "id": "feat-398f420187ec",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "puller.pull",
+      "rust_symbol": "pull",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-398f420187ec.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-398f420187ec.txt",
+      "duration_ms": 30645,
+      "finding_count": 4
+    },
+    {
+      "id": "feat-4204b85a170d",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "IndexUpdate.GetFolder",
+      "rust_symbol": "GetFolder",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-4204b85a170d.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-4204b85a170d.txt",
+      "duration_ms": 73371,
+      "finding_count": 2
+    },
+    {
+      "id": "feat-46796fca8dbb",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "folder.handleForcedRescans",
+      "rust_symbol": "handleForcedRescans",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-46796fca8dbb.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-46796fca8dbb.txt",
+      "duration_ms": 32340,
+      "finding_count": 6
+    },
+    {
+      "id": "feat-48b281996811",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "folder.updateLocalsFromScanning",
+      "rust_symbol": "updateLocalsFromScanning",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-48b281996811.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-48b281996811.txt",
+      "duration_ms": 22193,
+      "finding_count": 5
+    },
+    {
+      "id": "feat-537bb8d63624",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "IndexUpdate.GetLastSequence",
+      "rust_symbol": "GetLastSequence",
+      "status": "no-findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-537bb8d63624.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-537bb8d63624.txt",
+      "duration_ms": 59037,
+      "finding_count": 0
+    },
+    {
+      "id": "feat-54fc8c4ae0a5",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "receiveEncryptedFolder.Revert",
+      "rust_symbol": "Revert",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-54fc8c4ae0a5.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-54fc8c4ae0a5.txt",
+      "duration_ms": 23227,
+      "finding_count": 2
+    },
+    {
+      "id": "feat-5c6a2b2afe5d",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "folder.scanSubdirs",
+      "rust_symbol": "scanSubdirs",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-5c6a2b2afe5d.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-5c6a2b2afe5d.txt",
+      "duration_ms": 60018,
+      "finding_count": 12
+    },
+    {
+      "id": "feat-63788b4d3010",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "IndexUpdate.GetFiles",
+      "rust_symbol": "GetFiles",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-63788b4d3010.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-63788b4d3010.txt",
+      "duration_ms": 51676,
+      "finding_count": 4
+    },
+    {
+      "id": "feat-637e54e9156c",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "folder.Override",
+      "rust_symbol": "Override",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-637e54e9156c.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-637e54e9156c.txt",
+      "duration_ms": 22789,
+      "finding_count": 1
+    },
+    {
+      "id": "feat-65a5818ecae0",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "folder.scanSubdirsDeletedAndIgnored",
+      "rust_symbol": "scanSubdirsDeletedAndIgnored",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-65a5818ecae0.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-65a5818ecae0.txt",
+      "duration_ms": 38809,
+      "finding_count": 7
+    },
+    {
+      "id": "feat-6a8bc7b0b6c5",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "folder.newScanError",
+      "rust_symbol": "newScanError",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-6a8bc7b0b6c5.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-6a8bc7b0b6c5.txt",
+      "duration_ms": 30052,
+      "finding_count": 4
+    },
+    {
+      "id": "feat-6f3cfcdb177d",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "folder.newScanBatch",
+      "rust_symbol": "newScanBatch",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-6f3cfcdb177d.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-6f3cfcdb177d.txt",
+      "duration_ms": 24375,
+      "finding_count": 3
+    },
+    {
+      "id": "feat-822fb8c43302",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "folder.updateLocalsFromPulling",
+      "rust_symbol": "updateLocalsFromPulling",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-822fb8c43302.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-822fb8c43302.txt",
+      "duration_ms": 24764,
+      "finding_count": 5
+    },
+    {
+      "id": "feat-85702cc39ca0",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "scanBatch.flushToRemove",
+      "rust_symbol": "flushToRemove",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-85702cc39ca0.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-85702cc39ca0.txt",
+      "duration_ms": 26422,
+      "finding_count": 4
+    },
+    {
+      "id": "feat-8afbee3d8366",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "IndexUpdate.Descriptor",
+      "rust_symbol": "Descriptor",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-8afbee3d8366.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-8afbee3d8366.txt",
+      "duration_ms": 35908,
+      "finding_count": 3
+    },
+    {
+      "id": "feat-93732eac9788",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "IndexUpdate.ProtoMessage",
+      "rust_symbol": "ProtoMessage",
+      "status": "no-findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-93732eac9788.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-93732eac9788.txt",
+      "duration_ms": 24117,
+      "finding_count": 0
+    },
+    {
+      "id": "feat-9a12e967504b",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "folder.clearScanErrors",
+      "rust_symbol": "clearScanErrors",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-9a12e967504b.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-9a12e967504b.txt",
+      "duration_ms": 30100,
+      "finding_count": 4
+    },
+    {
+      "id": "feat-9aa10703f102",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "folder.Scan",
+      "rust_symbol": "Scan",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-9aa10703f102.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-9aa10703f102.txt",
+      "duration_ms": 37233,
+      "finding_count": 5
+    },
+    {
+      "id": "feat-a7316cfae9c9",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "folder.ScheduleForceRescan",
+      "rust_symbol": "ScheduleForceRescan",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-a7316cfae9c9.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-a7316cfae9c9.txt",
+      "duration_ms": 235319,
+      "finding_count": 3
+    },
+    {
+      "id": "feat-a968694daf58",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "folder.ScheduleScan",
+      "rust_symbol": "ScheduleScan",
+      "status": "no-findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-a968694daf58.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-a968694daf58.txt",
+      "duration_ms": 40011,
+      "finding_count": 0
+    },
+    {
+      "id": "feat-afa225e00658",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "scanBatch.Remove",
+      "rust_symbol": "Remove",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-afa225e00658.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-afa225e00658.txt",
+      "duration_ms": 24028,
+      "finding_count": 2
+    },
+    {
+      "id": "feat-b294ef04747a",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "folder.updateLocals",
+      "rust_symbol": "updateLocals",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-b294ef04747a.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-b294ef04747a.txt",
+      "duration_ms": 27881,
+      "finding_count": 6
+    },
+    {
+      "id": "feat-bf09de3ea298",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "folder.ignoresUpdated",
+      "rust_symbol": "ignoresUpdated",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-bf09de3ea298.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-bf09de3ea298.txt",
+      "duration_ms": 14740,
+      "finding_count": 2
+    },
+    {
+      "id": "feat-bf68f2c43cf1",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "IndexUpdate.Reset",
+      "rust_symbol": "Reset",
+      "status": "no-findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-bf68f2c43cf1.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-bf68f2c43cf1.txt",
+      "duration_ms": 73033,
+      "finding_count": 0
+    },
+    {
+      "id": "feat-c0d3eebdc2a6",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "folder.scanTimerFired",
+      "rust_symbol": "scanTimerFired",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-c0d3eebdc2a6.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-c0d3eebdc2a6.txt",
+      "duration_ms": 25417,
+      "finding_count": 5
+    },
+    {
+      "id": "feat-c3f747177a78",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "scanBatch.FlushIfFull",
+      "rust_symbol": "FlushIfFull",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-c3f747177a78.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-c3f747177a78.txt",
+      "duration_ms": 32772,
+      "finding_count": 4
+    },
+    {
+      "id": "feat-db09c179f2ef",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "receiveEncryptedFolder.revertHandleDirs",
+      "rust_symbol": "revertHandleDirs",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-db09c179f2ef.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-db09c179f2ef.txt",
+      "duration_ms": 32327,
+      "finding_count": 5
+    },
+    {
+      "id": "feat-dc449c5559c2",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "IndexUpdate.ProtoReflect",
+      "rust_symbol": "ProtoReflect",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-dc449c5559c2.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-dc449c5559c2.txt",
+      "duration_ms": 34439,
+      "finding_count": 3
+    },
+    {
+      "id": "feat-f3bf48fa5bd9",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "folder.scanSubdirsChangedAndNew",
+      "rust_symbol": "scanSubdirsChangedAndNew",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-f3bf48fa5bd9.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-f3bf48fa5bd9.txt",
+      "duration_ms": 34649,
+      "finding_count": 7
+    },
+    {
+      "id": "feat-f65e95d33f27",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "folder.versionCleanupTimerFired",
+      "rust_symbol": "versionCleanupTimerFired",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-f65e95d33f27.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-f65e95d33f27.txt",
+      "duration_ms": 23708,
+      "finding_count": 7
+    },
+    {
+      "id": "feat-fd55a30a59d2",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "folder.scanOnWatchErr",
+      "rust_symbol": "scanOnWatchErr",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-fd55a30a59d2.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-fd55a30a59d2.txt",
+      "duration_ms": 25286,
+      "finding_count": 1
+    },
+    {
+      "id": "feat-ff835975a163",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "IndexUpdate.String",
+      "rust_symbol": "String",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-ff835975a163.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-ff835975a163.txt",
+      "duration_ms": 111373,
+      "finding_count": 2
+    }
+  ]
+}

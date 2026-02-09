@@ -195,9 +195,33 @@ func TestCompareSnapshotsEndpointSurfaceEnforcesRequiredReplacementEndpoints(t *
 		"endpoint-surface",
 		map[string]any{
 			"covered_endpoints": []string{"GET /rest/system/version"},
+			"endpoint_assertions": map[string]any{
+				"GET /rest/system/version": map[string]any{
+					"status_code":   200,
+					"response_kind": "object",
+					"required_keys": []string{"version"},
+				},
+				"GET /rest/system/status": map[string]any{
+					"status_code":   200,
+					"response_kind": "object",
+					"required_keys": []string{"myID"},
+				},
+			},
 		},
 		map[string]any{
 			"covered_endpoints": []string{"GET /rest/system/version", "GET /rest/system/status"},
+			"endpoint_assertions": map[string]any{
+				"GET /rest/system/version": map[string]any{
+					"status_code":   200,
+					"response_kind": "object",
+					"required_keys": []string{"version"},
+				},
+				"GET /rest/system/status": map[string]any{
+					"status_code":   200,
+					"response_kind": "object",
+					"required_keys": []string{"myID"},
+				},
+			},
 		},
 	)
 	if !ok {
@@ -209,9 +233,33 @@ func TestCompareSnapshotsEndpointSurfaceEnforcesRequiredReplacementEndpoints(t *
 		"endpoint-surface",
 		map[string]any{
 			"covered_endpoints": []string{"GET /rest/system/version", "GET /rest/system/status"},
+			"endpoint_assertions": map[string]any{
+				"GET /rest/system/version": map[string]any{
+					"status_code":   200,
+					"response_kind": "object",
+					"required_keys": []string{"version"},
+				},
+				"GET /rest/system/status": map[string]any{
+					"status_code":   200,
+					"response_kind": "object",
+					"required_keys": []string{"myID"},
+				},
+			},
 		},
 		map[string]any{
 			"covered_endpoints": []string{"GET /rest/system/version", "GET /rest/system/status"},
+			"endpoint_assertions": map[string]any{
+				"GET /rest/system/version": map[string]any{
+					"status_code":   200,
+					"response_kind": "object",
+					"required_keys": []string{"version"},
+				},
+				"GET /rest/system/status": map[string]any{
+					"status_code":   200,
+					"response_kind": "object",
+					"required_keys": []string{"myID"},
+				},
+			},
 		},
 	)
 	if !ok {
@@ -246,11 +294,25 @@ func TestCompareSnapshotsEndpointSurfaceDaemonAllowsRustSuperset(t *testing.T) {
 		"endpoint-surface",
 		map[string]any{
 			"covered_endpoints": []string{"GET /rest/system/version"},
+			"endpoint_assertions": map[string]any{
+				"GET /rest/system/version": map[string]any{
+					"status_code":   200,
+					"response_kind": "object",
+					"required_keys": []string{"version"},
+				},
+			},
 		},
 		map[string]any{
 			"covered_endpoints": []string{
 				"GET /rest/system/version",
 				"GET /rest/system/status",
+			},
+			"endpoint_assertions": map[string]any{
+				"GET /rest/system/version": map[string]any{
+					"status_code":   200,
+					"response_kind": "object",
+					"required_keys": []string{"version"},
+				},
 			},
 		},
 	)

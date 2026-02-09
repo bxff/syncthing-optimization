@@ -48,6 +48,7 @@
     "recvenc"
   ],
   "required_external_soak_scenarios": [
+    "daemon-api-surface",
     "external-soak-replacement",
     "external-multifolder-replacement",
     "external-folder-modes-replacement",
@@ -67,8 +68,8 @@
     },
     {
       "id": "daemon-api-surface",
-      "go_min_evidence": "synthetic",
-      "rust_min_evidence": "daemon"
+      "go_min_evidence": "external-soak",
+      "rust_min_evidence": "external-soak"
     },
     {
       "id": "folder-type-behavior",

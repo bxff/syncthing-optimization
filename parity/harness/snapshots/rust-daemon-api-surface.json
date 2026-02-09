@@ -1,166 +1,48 @@
 {
-  "covered_endpoint_count": 101,
+  "checks": {
+    "api_probe_ok": true,
+    "daemon_boot_ok": true,
+    "folder_configured": true,
+    "required_endpoints_all_covered": true,
+    "scan_ok": true,
+    "shutdown_requested": true
+  },
+  "covered_endpoint_count": 19,
   "covered_endpoints": [
-    "DELETE /rest/cluster/pending/devices",
-    "DELETE /rest/cluster/pending/folders",
-    "DELETE /rest/config/devices/:id",
-    "DELETE /rest/config/folders/:id",
-    "DELETE /rest/system/config/folders",
     "GET /rest/cluster/pending/devices",
     "GET /rest/cluster/pending/folders",
     "GET /rest/config",
-    "GET /rest/config/defaults/device",
-    "GET /rest/config/defaults/folder",
-    "GET /rest/config/defaults/ignores",
-    "GET /rest/config/devices",
-    "GET /rest/config/devices/:id",
-    "GET /rest/config/folders",
-    "GET /rest/config/folders/:id",
-    "GET /rest/config/gui",
-    "GET /rest/config/insync",
-    "GET /rest/config/ldap",
-    "GET /rest/config/options",
-    "GET /rest/config/restart-required",
     "GET /rest/db/browse",
     "GET /rest/db/completion",
     "GET /rest/db/file",
     "GET /rest/db/ignores",
-    "GET /rest/db/jobs",
     "GET /rest/db/localchanged",
     "GET /rest/db/need",
     "GET /rest/db/remoteneed",
     "GET /rest/db/status",
-    "GET /rest/debug/*method",
-    "GET /rest/events",
-    "GET /rest/events/disk",
-    "GET /rest/folder/errors",
-    "GET /rest/folder/pullerrors",
-    "GET /rest/folder/versions",
-    "GET /rest/noauth/health",
-    "GET /rest/stats/device",
-    "GET /rest/stats/folder",
-    "GET /rest/svc/deviceid",
-    "GET /rest/svc/lang",
-    "GET /rest/svc/random/string",
-    "GET /rest/svc/report",
-    "GET /rest/system/browse",
-    "GET /rest/system/config",
-    "GET /rest/system/config/folders",
-    "GET /rest/system/config/insync",
     "GET /rest/system/connections",
-    "GET /rest/system/discovery",
-    "GET /rest/system/error",
-    "GET /rest/system/log",
-    "GET /rest/system/log.txt",
-    "GET /rest/system/loglevels",
-    "GET /rest/system/paths",
     "GET /rest/system/ping",
     "GET /rest/system/status",
-    "GET /rest/system/upgrade",
     "GET /rest/system/version",
-    "PATCH /rest/config/defaults/device",
-    "PATCH /rest/config/defaults/folder",
-    "PATCH /rest/config/devices/:id",
-    "PATCH /rest/config/folders/:id",
-    "PATCH /rest/config/gui",
-    "PATCH /rest/config/ldap",
-    "PATCH /rest/config/options",
-    "POST /rest/config/devices",
-    "POST /rest/config/folders",
-    "POST /rest/db/bringtofront",
-    "POST /rest/db/ignores",
     "POST /rest/db/override",
-    "POST /rest/db/prio",
-    "POST /rest/db/pull",
-    "POST /rest/db/reset",
     "POST /rest/db/revert",
     "POST /rest/db/scan",
-    "POST /rest/folder/versions",
-    "POST /rest/noauth/auth/logout",
-    "POST /rest/noauth/auth/password",
-    "POST /rest/system/config",
-    "POST /rest/system/config/folders",
-    "POST /rest/system/config/restart",
-    "POST /rest/system/error",
-    "POST /rest/system/error/clear",
-    "POST /rest/system/loglevels",
-    "POST /rest/system/pause",
-    "POST /rest/system/ping",
-    "POST /rest/system/reset",
-    "POST /rest/system/restart",
-    "POST /rest/system/resume",
-    "POST /rest/system/shutdown",
-    "POST /rest/system/upgrade",
-    "PUT /rest/config",
-    "PUT /rest/config/defaults/device",
-    "PUT /rest/config/defaults/folder",
-    "PUT /rest/config/defaults/ignores",
-    "PUT /rest/config/devices",
-    "PUT /rest/config/devices/:id",
-    "PUT /rest/config/folders",
-    "PUT /rest/config/folders/:id",
-    "PUT /rest/config/gui",
-    "PUT /rest/config/ldap",
-    "PUT /rest/config/options"
+    "POST /rest/system/shutdown"
   ],
   "endpoint_assertions": {
-    "DELETE /rest/cluster/pending/devices": {
-      "present_keys": [
-        "device",
-        "dismissed"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "DELETE /rest/cluster/pending/folders": {
-      "present_keys": [
-        "dismissed",
-        "folder"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "DELETE /rest/config/devices/:id": {
-      "present_keys": [
-        "deviceID",
-        "removed"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "DELETE /rest/config/folders/:id": {
-      "present_keys": [
-        "folder",
-        "removed"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "DELETE /rest/system/config/folders": {
-      "present_keys": [
-        "folder",
-        "removed"
-      ],
-      "required_keys": [
-        "removed",
-        "folder"
-      ],
-      "response_kind": "object",
-      "status_code": 200
-    },
     "GET /rest/cluster/pending/devices": {
       "present_keys": [],
-      "required_keys": [],
+      "required_keys": [
+        "count"
+      ],
       "response_kind": "object",
       "status_code": 200
     },
     "GET /rest/cluster/pending/folders": {
       "present_keys": [],
-      "required_keys": [],
+      "required_keys": [
+        "count"
+      ],
       "response_kind": "object",
       "status_code": 200
     },
@@ -175,196 +57,9 @@
         "remoteIgnoredDevices"
       ],
       "required_keys": [
-        "devices",
         "folders",
-        "options",
-        "gui",
-        "defaults",
-        "remoteIgnoredDevices"
-      ],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/config/defaults/device": {
-      "present_keys": [
-        "addresses",
-        "compression",
-        "deviceID",
-        "introducer",
-        "name",
-        "paused"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/config/defaults/folder": {
-      "present_keys": [
-        "copiers",
-        "devices",
-        "filesystemType",
-        "fsWatcherDelayS",
-        "fsWatcherEnabled",
-        "fsWatcherTimeoutS",
-        "hashers",
-        "id",
-        "ignoreDelete",
-        "label",
-        "maxConflicts",
-        "memory",
-        "order",
-        "path",
-        "paused",
-        "pullerDelayS",
-        "pullerMaxPendingKiB",
-        "pullerPauseS",
-        "rescanIntervalS",
-        "scanProgressIntervalS",
-        "type",
-        "versioning"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/config/defaults/ignores": {
-      "present_keys": [
-        "lines"
-      ],
-      "required_keys": [
-        "lines"
-      ],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/config/devices": {
-      "present_keys": [
-        "count",
         "devices"
       ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/config/devices/:id": {
-      "present_keys": [
-        "addresses",
-        "compression",
-        "deviceID",
-        "introducer",
-        "name",
-        "paused"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/config/folders": {
-      "present_keys": [
-        "count",
-        "folders"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/config/folders/:id": {
-      "present_keys": [
-        "copiers",
-        "devices",
-        "filesystemType",
-        "fsWatcherDelayS",
-        "fsWatcherEnabled",
-        "fsWatcherTimeoutS",
-        "hashers",
-        "id",
-        "ignoreDelete",
-        "label",
-        "maxConflicts",
-        "memory",
-        "order",
-        "path",
-        "paused",
-        "pullerDelayS",
-        "pullerMaxPendingKiB",
-        "pullerPauseS",
-        "rescanIntervalS",
-        "scanProgressIntervalS",
-        "type",
-        "versioning"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/config/gui": {
-      "present_keys": [
-        "address",
-        "authMode",
-        "debugging",
-        "enabled",
-        "insecureAdminAccess",
-        "password",
-        "theme",
-        "useTLS",
-        "user"
-      ],
-      "required_keys": [
-        "address",
-        "theme",
-        "useTLS"
-      ],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/config/insync": {
-      "present_keys": [
-        "configInSync"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/config/ldap": {
-      "present_keys": [
-        "address",
-        "bindDN",
-        "enabled",
-        "searchBaseDN"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/config/options": {
-      "present_keys": [
-        "crashReportingEnabled",
-        "deviceName",
-        "globalAnnounceEnabled",
-        "globalAnnounceServers",
-        "listenAddresses",
-        "localAnnounceEnabled",
-        "maxRecvKbps",
-        "maxSendKbps",
-        "progressUpdateIntervalS",
-        "releasesURL",
-        "unackedNotificationIDs",
-        "urAccepted",
-        "urSeen"
-      ],
-      "required_keys": [
-        "listenAddresses",
-        "globalAnnounceServers",
-        "progressUpdateIntervalS"
-      ],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/config/restart-required": {
-      "present_keys": [
-        "requiresRestart"
-      ],
-      "required_keys": [],
       "response_kind": "object",
       "status_code": 200
     },
@@ -377,9 +72,7 @@
         "nextCursor"
       ],
       "required_keys": [
-        "folder",
-        "limit",
-        "items"
+        "0"
       ],
       "response_kind": "object",
       "status_code": 200
@@ -408,6 +101,7 @@
     },
     "GET /rest/db/file": {
       "present_keys": [
+        "entry",
         "exists",
         "file",
         "folder",
@@ -415,8 +109,7 @@
       ],
       "required_keys": [
         "folder",
-        "file",
-        "exists"
+        "file"
       ],
       "response_kind": "object",
       "status_code": 200
@@ -428,24 +121,7 @@
         "patterns"
       ],
       "required_keys": [
-        "folder",
-        "count",
-        "patterns"
-      ],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/db/jobs": {
-      "present_keys": [
-        "folder",
-        "jobs",
-        "state",
-        "stats"
-      ],
-      "required_keys": [
-        "folder",
-        "state",
-        "jobs"
+        "ignore"
       ],
       "response_kind": "object",
       "status_code": 200
@@ -457,9 +133,8 @@
         "folder"
       ],
       "required_keys": [
-        "folder",
-        "count",
-        "files"
+        "page",
+        "perpage"
       ],
       "response_kind": "object",
       "status_code": 200
@@ -473,9 +148,8 @@
         "nextCursor"
       ],
       "required_keys": [
-        "folder",
-        "limit",
-        "items"
+        "page",
+        "perpage"
       ],
       "response_kind": "object",
       "status_code": 200
@@ -488,10 +162,8 @@
         "items"
       ],
       "required_keys": [
-        "folder",
-        "device",
-        "count",
-        "items"
+        "page",
+        "perpage"
       ],
       "response_kind": "object",
       "status_code": 200
@@ -520,159 +192,6 @@
       "response_kind": "object",
       "status_code": 200
     },
-    "GET /rest/debug/*method": {
-      "present_keys": [
-        "debugMethod",
-        "path",
-        "status"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/events": {
-      "present_keys": [],
-      "required_keys": [],
-      "response_kind": "array",
-      "status_code": 200
-    },
-    "GET /rest/events/disk": {
-      "present_keys": [],
-      "required_keys": [],
-      "response_kind": "array",
-      "status_code": 200
-    },
-    "GET /rest/folder/errors": {
-      "present_keys": [
-        "count",
-        "errors",
-        "folder"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/folder/pullerrors": {
-      "present_keys": [
-        "count",
-        "errors",
-        "folder"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/folder/versions": {
-      "present_keys": [
-        "folder",
-        "versions"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/noauth/health": {
-      "present_keys": [
-        "status"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/stats/device": {
-      "present_keys": [
-        "devices"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/stats/folder": {
-      "present_keys": [
-        "folders"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/svc/deviceid": {
-      "present_keys": [
-        "id",
-        "normalized"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/svc/lang": {
-      "present_keys": [
-        "lang"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/svc/random/string": {
-      "present_keys": [
-        "random"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/svc/report": {
-      "present_keys": [
-        "connections",
-        "folders",
-        "observedDevices"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/system/browse": {
-      "present_keys": [
-        "current",
-        "entries"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/system/config": {
-      "present_keys": [
-        "defaults",
-        "devices",
-        "folders",
-        "gui",
-        "ldap",
-        "options",
-        "remoteIgnoredDevices"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/system/config/folders": {
-      "present_keys": [
-        "count",
-        "folders"
-      ],
-      "required_keys": [
-        "count",
-        "folders"
-      ],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/system/config/insync": {
-      "present_keys": [
-        "configInSync"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
     "GET /rest/system/connections": {
       "present_keys": [
         "connections",
@@ -682,58 +201,6 @@
         "total",
         "connections"
       ],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/system/discovery": {
-      "present_keys": [],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/system/error": {
-      "present_keys": [
-        "count",
-        "errors"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/system/log": {
-      "present_keys": [
-        "lines",
-        "text"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/system/log.txt": {
-      "present_keys": [
-        "lines",
-        "text"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/system/loglevels": {
-      "present_keys": [
-        "facilities"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/system/paths": {
-      "present_keys": [
-        "cert",
-        "config",
-        "data",
-        "key"
-      ],
-      "required_keys": [],
       "response_kind": "object",
       "status_code": 200
     },
@@ -766,24 +233,8 @@
       ],
       "required_keys": [
         "myID",
-        "uptimeS",
-        "memoryEstimatedBytes",
-        "memoryBudgetBytes",
-        "guiAddressUsed",
-        "connectionServiceStatus",
-        "discoveryStatus",
-        "urVersionMax"
+        "uptimeS"
       ],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "GET /rest/system/upgrade": {
-      "present_keys": [
-        "latest",
-        "newer",
-        "running"
-      ],
-      "required_keys": [],
       "response_kind": "object",
       "status_code": 200
     },
@@ -803,167 +254,13 @@
       "response_kind": "object",
       "status_code": 200
     },
-    "PATCH /rest/config/defaults/device": {
-      "present_keys": [
-        "saved",
-        "value"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "PATCH /rest/config/defaults/folder": {
-      "present_keys": [
-        "saved",
-        "value"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "PATCH /rest/config/devices/:id": {
-      "present_keys": [
-        "device",
-        "saved"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "PATCH /rest/config/folders/:id": {
-      "present_keys": [
-        "folder",
-        "saved"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "PATCH /rest/config/gui": {
-      "present_keys": [
-        "saved",
-        "section",
-        "value"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "PATCH /rest/config/ldap": {
-      "present_keys": [
-        "saved",
-        "section",
-        "value"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "PATCH /rest/config/options": {
-      "present_keys": [
-        "saved",
-        "section",
-        "value"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "POST /rest/config/devices": {
-      "present_keys": [
-        "device",
-        "saved"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "POST /rest/config/folders": {
-      "present_keys": [
-        "added",
-        "folder"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "POST /rest/db/bringtofront": {
-      "present_keys": [
-        "action",
-        "folder",
-        "ok"
-      ],
-      "required_keys": [
-        "folder",
-        "action",
-        "ok"
-      ],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "POST /rest/db/ignores": {
-      "present_keys": [
-        "folder",
-        "patterns",
-        "saved"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
     "POST /rest/db/override": {
       "present_keys": [
         "action",
         "folder",
         "ok"
       ],
-      "required_keys": [
-        "folder",
-        "action",
-        "ok"
-      ],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "POST /rest/db/prio": {
-      "present_keys": [
-        "file",
-        "folder",
-        "prioritized"
-      ],
       "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "POST /rest/db/pull": {
-      "present_keys": [
-        "folder",
-        "jobs",
-        "pull",
-        "sequence",
-        "state",
-        "stats"
-      ],
-      "required_keys": [
-        "folder",
-        "state",
-        "sequence",
-        "pull"
-      ],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "POST /rest/db/reset": {
-      "present_keys": [
-        "action",
-        "folder",
-        "ok"
-      ],
-      "required_keys": [
-        "folder",
-        "action",
-        "ok"
-      ],
       "response_kind": "object",
       "status_code": 200
     },
@@ -973,11 +270,7 @@
         "folder",
         "ok"
       ],
-      "required_keys": [
-        "folder",
-        "action",
-        "ok"
-      ],
+      "required_keys": [],
       "response_kind": "object",
       "status_code": 200
     },
@@ -991,140 +284,8 @@
         "stats"
       ],
       "required_keys": [
-        "folder",
-        "sequence",
-        "state",
-        "stats"
-      ],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "POST /rest/folder/versions": {
-      "present_keys": [
-        "folder",
-        "restored"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "POST /rest/noauth/auth/logout": {
-      "present_keys": [
-        "loggedOut",
-        "user"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "POST /rest/noauth/auth/password": {
-      "present_keys": [
-        "authenticated",
-        "user"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "POST /rest/system/config": {
-      "present_keys": [
-        "saved"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "POST /rest/system/config/folders": {
-      "present_keys": [
-        "added",
-        "folder"
-      ],
-      "required_keys": [
-        "added",
-        "folder"
-      ],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "POST /rest/system/config/restart": {
-      "present_keys": [
-        "folder",
-        "restarted"
-      ],
-      "required_keys": [
-        "restarted",
-        "folder"
-      ],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "POST /rest/system/error": {
-      "present_keys": [
-        "error",
-        "posted"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "POST /rest/system/error/clear": {
-      "present_keys": [
-        "cleared"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "POST /rest/system/loglevels": {
-      "present_keys": [
-        "facilities",
-        "saved"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "POST /rest/system/pause": {
-      "present_keys": [
-        "devices",
-        "paused"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "POST /rest/system/ping": {
-      "present_keys": [
-        "ping"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "POST /rest/system/reset": {
-      "present_keys": [
-        "action",
-        "folder",
         "ok"
       ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "POST /rest/system/restart": {
-      "present_keys": [
-        "restarting"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "POST /rest/system/resume": {
-      "present_keys": [
-        "devices",
-        "paused"
-      ],
-      "required_keys": [],
       "response_kind": "object",
       "status_code": 200
     },
@@ -1135,117 +296,11 @@
       "required_keys": [],
       "response_kind": "object",
       "status_code": 200
-    },
-    "POST /rest/system/upgrade": {
-      "present_keys": [
-        "reason",
-        "upgrading"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "PUT /rest/config": {
-      "present_keys": [
-        "saved"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "PUT /rest/config/defaults/device": {
-      "present_keys": [
-        "saved",
-        "value"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "PUT /rest/config/defaults/folder": {
-      "present_keys": [
-        "saved",
-        "value"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "PUT /rest/config/defaults/ignores": {
-      "present_keys": [
-        "lines",
-        "saved"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "PUT /rest/config/devices": {
-      "present_keys": [
-        "device",
-        "saved"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "PUT /rest/config/devices/:id": {
-      "present_keys": [
-        "device",
-        "saved"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "PUT /rest/config/folders": {
-      "present_keys": [
-        "folder",
-        "saved"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "PUT /rest/config/folders/:id": {
-      "present_keys": [
-        "folder",
-        "saved"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "PUT /rest/config/gui": {
-      "present_keys": [
-        "saved",
-        "section",
-        "value"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "PUT /rest/config/ldap": {
-      "present_keys": [
-        "saved",
-        "section",
-        "value"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
-    },
-    "PUT /rest/config/options": {
-      "present_keys": [
-        "saved",
-        "section",
-        "value"
-      ],
-      "required_keys": [],
-      "response_kind": "object",
-      "status_code": 200
     }
+  },
+  "metrics": {
+    "seed": 1,
+    "workload_digest": "f86b49601247721d3ceadff3a40eba5f4080e5f742196bcb38c5f36a69545e41"
   },
   "scenario": "daemon-api-surface",
   "source": "rust",

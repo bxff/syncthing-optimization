@@ -1994,7 +1994,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "model lock poisoned"),
                 };
-                if let Err(err) = guard.DismissPendingFolder(None, folder) {
+                if let Err(err) = guard.DismissPendingFolder("", folder) {
                     return make_api_error(400, err);
                 }
                 ApiReply::json(200, json!({"dismissed": true, "folder": folder}))

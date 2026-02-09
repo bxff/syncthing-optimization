@@ -1,0 +1,770 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-02-08T22:44:35Z",
+  "plan_path": "parity/diff-reports/function-pair-review-plan.json",
+  "model": "google/antigravity-claude-opus-4-6-thinking",
+  "total_items": 30,
+  "completed": 30,
+  "no_findings": 9,
+  "with_findings": 21,
+  "errors": 0,
+  "tier_counts": {
+    "T1": 30,
+    "T2": 0,
+    "T3": 0
+  },
+  "severity_count": {
+    "P0": 5,
+    "P1": 16,
+    "P2": 24,
+    "P3": 3
+  },
+  "findings": [
+    {
+      "id": "feat-02621056e16a",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Return type mismatch breaks reflection API",
+      "location": "syncthing-rs/src/bep_compat.rs:27",
+      "message": "Go returns `protoreflect.EnumDescriptor`, a rich interface carrying full protobuf schema metadata (FullName, Values, Options, parent FileDescriptor, etc.), while Rust returns `\u0026'static str`. Any consumer that calls chained descriptor methods (e.g. `.FullName()`, `.Values()`, `.Options()`) will fail at compile time in Rust, and any runtime logic that inspects the descriptor for enum value resolution, proto registration, or reflection-based serialization will silently produce wrong results or panic. This is not a cosmetic difference; it breaks wire-level schema introspection required by the protocol-state-transition and index-sequence-behavior test scenarios."
+    },
+    {
+      "id": "feat-2535ccac35c2",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Return type *Vector vs i64",
+      "location": "syncthing-rs/src/bep_compat.rs:333",
+      "message": "The Go method returns `*Vector`, a protobuf vector-clock struct containing a slice of Counter entries (ID + Value pairs), which is essential for version-vector comparison and conflict resolution on the wire. The Rust method returns a bare `i64`, collapsing the entire vector clock into a single scalar. This breaks wire/schema compatibility (the protobuf field is message-typed, not int64), eliminates multi-device version tracking semantics, and will produce incorrect results in any conflict-resolution or index-sequence-behavior scenario that compares versions from different devices."
+    },
+    {
+      "id": "feat-b94cbb58c3e1",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Return type and semantic mismatch",
+      "location": "syncthing-rs/src/bep_compat.rs:137",
+      "message": "Go EnumDescriptor returns ([]byte, []int) — the gzipped raw protobuf file descriptor and the enum's index path within that file ([]int{0}). The Rust implementation returns a String formatted as \"name:number\", which is an entirely different type and carries none of the protobuf reflection metadata. Any consumer relying on the raw descriptor bytes for service registration, reflection, or descriptor pool lookups will receive incompatible data."
+    },
+    {
+      "id": "feat-ba95763d2f39",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Return type mismatch: EnumDescriptor vs \u0026str",
+      "location": "syncthing-rs/src/bep_compat.rs:27",
+      "message": "Go returns protoreflect.EnumDescriptor, a rich interface exposing full enum metadata (Values, FullName, Options, ParentFile, etc.) from the compiled proto file descriptor. Rust returns \u0026'static str, a plain string. Any consumer relying on descriptor reflection methods (e.g. iterating enum values, reading options, checking source info) will have no equivalent path in Rust, breaking protocol-state-transition and index-sequence-behavior scenarios that inspect descriptor metadata at runtime."
+    },
+    {
+      "id": "feat-d999b9dade6f",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Return type mismatch uint64 vs i64",
+      "location": "syncthing-rs/src/bep_compat.rs:277",
+      "message": "Go `GetIndexId` returns `uint64`, but the Rust port returns `i64`. Any index ID with the high bit set (value \u003e= 2^63) will be interpreted as a negative number in Rust, silently corrupting the value. This breaks wire/schema compatibility with the protobuf definition (`uint64 index_id = 2`) and will cause comparison mismatches during index-sequence-behavior and protocol-state-transition scenarios. The return type and the underlying `IndexId` field type must both be `u64`."
+    },
+    {
+      "id": "feat-02621056e16a",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Visibility downgrade from public to crate-internal",
+      "location": "syncthing-rs/src/bep_compat.rs:27",
+      "message": "Go `Descriptor()` is an exported method (uppercase) implementing the `protoreflect.EnumDescriptor` interface and callable by any external package. Rust declares it `pub(crate)`, restricting access to the defining crate only. External crates depending on bep-compat that need to obtain the descriptor (e.g. for proto registration or reflection) will not be able to call this method, breaking cross-crate interoperability that the Go API guarantees."
+    },
+    {
+      "id": "feat-1b2753f77785",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Return type loses protobuf reflection capability",
+      "location": "syncthing-rs/src/bep_compat.rs:35",
+      "message": "Go returns `protoreflect.Message`, a rich interface providing descriptor access, dynamic field enumeration, and schema-aware operations used throughout the protobuf runtime for marshaling, merging, and protocol negotiation. The Rust implementation returns a generic `Value` (likely serde-based), which discards all protobuf descriptor metadata and reflection capabilities. Any downstream code relying on `protoreflect.Message` methods such as `Descriptor()`, `Range()`, `Get()`, `NewField()`, or `WhichOneof()` will have no equivalent path in the Rust port, breaking protocol-state-transition and index-sequence-behavior scenarios that inspect or manipulate messages reflectively."
+    },
+    {
+      "id": "feat-1d61922a07e9",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Symbol mismatch in mapping metadata",
+      "location": "internal/gen/bep/bep.pb.go:447",
+      "message": "The mapping declares Go symbol `FileDownloadProgressUpdate.Reset` but the Go source window at lines 447-452 contains `Hello.Reset()`, not `FileDownloadProgressUpdate.Reset`; this means either the Rust `Reset` at bep_compat.rs:39 is mapped to the wrong Go method, or the source window is incorrect, and the actual `FileDownloadProgressUpdate.Reset` behavior has not been verified against this Rust implementation."
+    },
+    {
+      "id": "feat-2535ccac35c2",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Nil/None path lost for absent version",
+      "location": "syncthing-rs/src/bep_compat.rs:333-335",
+      "message": "The Go method can return `nil` both when the receiver is nil and when `x.Version` is an unset field (nil pointer). The Rust method always returns an `i64` value (defaulting to 0), making it impossible for callers to distinguish \"version not set\" from \"version is zero\". This matters for protocol-state-transition and crash-recovery scenarios where an absent version vector signals an uninitialized or reset state distinct from a zero-valued version."
+    },
+    {
+      "id": "feat-2be9680853d4",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Version field flattened from Vector to i64",
+      "location": "syncthing-rs/src/bep_core.rs:143",
+      "message": "Go's FileDownloadProgressUpdate.Version is *Vector (bep.pb.go:1865), a protobuf message containing Counters []*Counter (bep.pb.go:1239), representing a multi-entry vector clock. The Rust port declares Version as i64 (bep_core.rs:143), a single scalar that cannot represent multiple counter entries. Any DownloadProgress message whose FileDownloadProgressUpdate carries a version vector with more than one counter will lose data during deserialization, breaking wire compatibility and the scenario/index-sequence-behavior and scenario/protocol-state-transition parity tests."
+    },
+    {
+      "id": "feat-347ca1ab0ad4",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Clone-vs-reference return semantics",
+      "location": "syncthing-rs/src/bep_compat.rs:710",
+      "message": "Go's GetFiles (bep.pb.go:861) returns the internal slice by reference, meaning callers share the same backing array and any mutation to elements or slice length is visible to the Index owner. The Rust port performs a full deep clone via `self.Files.clone()`, so callers receive an independent copy. Any Go call-site that appends to, truncates, or mutates elements of the returned slice to implicitly update the parent Index message will silently have no effect in the Rust port, breaking behavioral equivalence for scenarios such as crash-recovery and index-sequence-behavior that may rely on in-place mutation of file lists."
+    },
+    {
+      "id": "feat-3a564000a236",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Output format mismatch: proto text vs JSON",
+      "location": "syncthing-rs/src/bep_compat.rs:43-44",
+      "message": "Go ClusterConfig.String() at internal/gen/bep/bep.pb.go:581-582 delegates to protoimpl.X.MessageStringOf(x) which produces the protobuf text format representation (e.g. \"folders:{id:\\\"abc\\\" devices:{...}}\"), while the Rust impl_proto_common! macro at bep_compat.rs:43-44 calls as_json_string(self) which delegates to serde_json::to_string producing JSON (e.g. \"{\\\"Folders\\\":[{\\\"Id\\\":\\\"abc\\\"}]}\"). These are structurally different serialization formats with different field naming conventions (proto uses lowercase snake_case from the .proto schema; serde uses the Rust struct field names which are PascalCase). Any caller that parses, logs, compares, or transmits the String() output will observe incompatible results between Go and Rust, breaking the scenario/protocol-state-transition and scenario/crash-recovery parity tests if String() output is persisted or compared across implementations."
+    },
+    {
+      "id": "feat-825f59a8950f",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Struct receiver mismatch",
+      "location": "internal/gen/bep/bep.pb.go:749",
+      "message": "The mapping declares the Go symbol as `FileDownloadProgressUpdate.GetName` but the Go source at line 749 defines the method on `*Device`, not `*FileDownloadProgressUpdate`. If the Rust implementation at syncthing-rs/src/bep_compat.rs:289 is attached to a `FileDownloadProgressUpdate` struct rather than a `Device` struct, the getter is bound to the wrong protobuf message type, which will cause field misrouting and wire-level incompatibility when serializing or accessing the `Name` field across these distinct message types."
+    },
+    {
+      "id": "feat-87b4336c6b41",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "String output format mismatch",
+      "location": "syncthing-rs/src/bep_compat.rs:44",
+      "message": "Go's `EnumStringOf` returns the bare canonical protobuf enum name (e.g. `MESSAGE_TYPE_CLUSTER_CONFIG`) by looking up the enum descriptor, while the Rust implementation delegates to `as_json_string(self)` which produces a JSON-serialized representation; at minimum the JSON path wraps the value in double quotes and may emit a numeric value or a differently-cased variant name depending on serde annotations, so the two implementations will never produce byte-identical output for any input, breaking wire-log compatibility and any downstream consumer that pattern-matches on the string form."
+    },
+    {
+      "id": "feat-9e7583805018",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Return type not semantically equivalent",
+      "location": "syncthing-rs/src/bep_compat.rs:35",
+      "message": "Go ProtoReflect returns protoreflect.Message, a live reflection interface that exposes Descriptor(), Get(), Set(), Range(), NewField(), and other field-level introspection methods used by the protobuf runtime for marshalling, merging, and wire-format negotiation. The Rust port returns serde_json::Value, a static JSON snapshot that cannot support any of these operations. Any future caller (or parity test such as protocol-state-transition) that exercises reflection-based marshalling or descriptor traversal will get structurally incompatible behavior."
+    },
+    {
+      "id": "feat-b176dd42d685",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "String output format diverges from protobuf enum name",
+      "location": "syncthing-rs/src/bep_compat.rs:145-147",
+      "message": "The Go `FileDownloadProgressUpdateType.String()` at `internal/gen/bep/bep.pb.go:414-415` delegates to `protoimpl.X.EnumStringOf` which resolves the enum descriptor and returns the protobuf enum value name (e.g. `\"FILE_DOWNLOAD_PROGRESS_UPDATE_TYPE_APPEND\"` for 0, `\"FILE_DOWNLOAD_PROGRESS_UPDATE_TYPE_FORGET\"` for 1). The Rust implementation uses the `impl_enumish!` macro (line 158-161 instantiation), whose `String()` at line 145-147 returns `format!(\"{}({})\", $name, self.Number())`, producing `\"FileDownloadProgressUpdateType(0)\"` and `\"FileDownloadProgressUpdateType(1)\"` respectively. These are entirely different string representations, breaking any log parsing, wire-format compatibility, or equality comparisons against the Go output. Note also that the review-target snippet (lines 43-45, `as_json_string`) is from `impl_proto_common!` which applies to message types, not to `FileDownloadProgressUpdateType`; the actual enum path is `impl_enumish!`."
+    },
+    {
+      "id": "feat-b341fe748fad",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Return type mismatch: EnumType vs string",
+      "location": "syncthing-rs/src/bep_compat.rs:149",
+      "message": "The Go method returns `protoreflect.EnumType` (a rich reflection interface backed by `\u0026file_bep_bep_proto_enumTypes[0]`), which exposes methods such as `Descriptor()`, `New(EnumNumber)`, and full protobuf enum reflection capabilities. The Rust port returns `\u0026'static str` (a plain string name), collapsing the entire reflection surface to a single scalar. Any downstream code that calls `.Descriptor()` or `.New()` on the returned type—including protocol-state-transition or index-sequence-behavior scenarios that dynamically resolve enum values from wire numbers—will have no equivalent path in the Rust implementation, breaking wire/schema compatibility for round-trip enum resolution."
+    },
+    {
+      "id": "feat-b94cbb58c3e1",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Receiver arity mismatch",
+      "location": "syncthing-rs/src/bep_compat.rs:137",
+      "message": "Go EnumDescriptor is defined on the type itself with a value receiver and requires no instance state — it returns a file-level constant. The Rust version takes \u0026self and reads self.Number(), making it an instance method whose output varies per variant. The Go method is callable without a concrete enum value; the Rust method is not."
+    },
+    {
+      "id": "feat-ba95763d2f39",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Mapping ID references FileDownloadProgressUpdateType but Go source shows MessageType",
+      "location": "internal/gen/bep/bep.pb.go:70",
+      "message": "The review target metadata states the Go symbol is FileDownloadProgressUpdateType.Descriptor, but the actual Go source at lines 70-72 defines the method on MessageType, and it indexes enumTypes[0] which corresponds to MessageType. If a separate FileDownloadProgressUpdateType.Descriptor exists elsewhere (likely indexing a different enumTypes slot), the Rust macro-generated Descriptor may be returning the wrong descriptor string for the wrong enum, causing silent wire-format or schema identity mismatches."
+    },
+    {
+      "id": "feat-ba95763d2f39",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Visibility downgrade from public to pub(crate)",
+      "location": "syncthing-rs/src/bep_compat.rs:27",
+      "message": "Go Descriptor() is exported (public) and callable by any package. Rust declares pub(crate), restricting access to the defining crate only. External crates that need to inspect the enum descriptor for schema negotiation or compatibility checks cannot call this method, breaking cross-crate parity with Go's public API surface."
+    },
+    {
+      "id": "feat-ddd88bc8a8e2",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Return type loses structured descriptor",
+      "location": "syncthing-rs/src/bep_compat.rs:27",
+      "message": "The Go method returns `protoreflect.EnumDescriptor`, a rich interface that exposes enum value definitions, full name, options, and parent file descriptor. The Rust port returns `\u0026'static str`, collapsing all structured descriptor access into an opaque string. Any call site that interrogates the descriptor for enum values, source locations, or options will have no equivalent path in Rust, breaking parity for reflection-dependent consumers such as the protocol-state-transition and index-sequence-behavior scenarios."
+    },
+    {
+      "id": "feat-008436590c22",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Missing nil-receiver default value path",
+      "location": "syncthing-rs/src/bep_compat.rs:329-331",
+      "message": "The Go getter returns the default enum value `FILE_DOWNLOAD_PROGRESS_UPDATE_TYPE_APPEND` (protobuf field-default / zero value 0) when the receiver is nil. The Rust port takes `\u0026self`, so a nil-receiver call is impossible at the language level; however, the port does not document or enforce that a default-constructed `FileDownloadProgressUpdate` initialises `UpdateType` to the equivalent zero-value constant. If the Rust struct is ever constructed with an uninitialised or non-zero default for `UpdateType` (e.g. via `Default` derive that uses a different sentinel), the observable default-path behavior will diverge from Go."
+    },
+    {
+      "id": "feat-008436590c22",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Return type is raw i32 instead of enum",
+      "location": "syncthing-rs/src/bep_compat.rs:329",
+      "message": "The Go method returns the strongly-typed enum `FileDownloadProgressUpdateType`, while the Rust method returns a bare `i32`. This loses type-level discrimination and means callers cannot match on named variants; it also risks accepting out-of-range values that the Go enum type would surface during protobuf validation or `String()`/`Enum()` calls, degrading wire-schema fidelity."
+    },
+    {
+      "id": "feat-02621056e16a",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Receiver semantics differ subtly",
+      "location": "internal/gen/bep/bep.pb.go:70",
+      "message": "Go uses a value receiver `(MessageType)` with no reference to the receiver value — it unconditionally returns `file_bep_bep_proto_enumTypes[0].Descriptor()`, a singleton looked up from a package-level generated slice. Rust takes `\u0026self` and calls `descriptor($name)` where `$name` is a macro-expanded compile-time token. While neither actually inspects the instance value, the Go version is tied to a specific index (`[0]`) in a generated type registry, meaning the descriptor identity is coupled to proto codegen ordering. The Rust version uses a name-based lookup, which could diverge if the registry ordering or naming convention drifts between the Go and Rust codegen outputs."
+    },
+    {
+      "id": "feat-1b2753f77785",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Lazy message-info initialization elided",
+      "location": "syncthing-rs/src/bep_compat.rs:36",
+      "message": "Go lines 463-466 perform lazy initialization of the message's type metadata via `LoadMessageInfo`/`StoreMessageInfo`, ensuring the global `msgTypes` descriptor is attached to the concrete message state exactly once per instance. The Rust `as_value(self)` call performs no equivalent registration, so if any part of the system later queries cached type metadata on the same instance (as the Go protobuf runtime does for efficient re-serialization and merge operations under the memory-cap-50mb constraint), the Rust port will either redundantly recompute or lack the metadata entirely."
+    },
+    {
+      "id": "feat-1b2753f77785",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Nil receiver path absent",
+      "location": "syncthing-rs/src/bep_compat.rs:35",
+      "message": "Go lines 462-469 explicitly handle a nil receiver: when `x == nil`, the method returns `mi.MessageOf(x)`, yielding a valid zero-value protobuf reflection rather than panicking. The Rust signature `\u0026self` guarantees a valid reference, meaning any call site that in Go would invoke `ProtoReflect` on a nil `*Hello` (e.g., during crash-recovery deserialization of incomplete state) has no equivalent safe path and would require an `Option` wrapper at the call site that is not present, risking a divergence in crash-recovery scenarios."
+    },
+    {
+      "id": "feat-2535ccac35c2",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Receiver type mismatch vs mapping metadata",
+      "location": "internal/gen/bep/bep.pb.go:1040",
+      "message": "The mapping metadata declares the Go symbol as `FileDownloadProgressUpdate.GetVersion`, but the provided Go source shows the method on `*FileInfo`. If the Rust implementation is intended to port `FileDownloadProgressUpdate.GetVersion` (which returns `int32` per the protobuf schema) rather than `FileInfo.GetVersion` (which returns `*Vector`), the return type `i64` is still wrong (should be `i32`), and the source-of-truth method is misidentified, risking silent behavioral divergence."
+    },
+    {
+      "id": "feat-2be9680853d4",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Clone returns independent copy vs Go shared slice",
+      "location": "syncthing-rs/src/bep_compat.rs:308",
+      "message": "Go returns []*FileDownloadProgressUpdate (bep.pb.go:1851), a slice of pointers that share identity with the DownloadProgress.Updates backing array; mutations to returned elements are visible through the original struct. The Rust port calls self.Updates.clone() (bep_compat.rs:308), producing a fully independent deep copy. Any caller that mutates an element of the returned Vec expecting the change to propagate back to the DownloadProgress instance will silently diverge from Go behavior, which can surface under scenario/crash-recovery if updates are modified in-place after retrieval."
+    },
+    {
+      "id": "feat-3375ae20bff6",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Nil-receiver guard absent",
+      "location": "syncthing-rs/src/bep_compat.rs:303",
+      "message": "The Go method (bep.pb.go:853-856) returns the zero value (empty string) when the receiver pointer is nil, providing safe default behavior for unset optional protobuf message fields. The Rust implementation takes `\u0026self`, which structurally prevents nil calls but does not encode the nil-to-default-value fallback. If callers hold an `Option\u003cIndex\u003e` (the Rust equivalent of a nil `*Index`), they must manually supply the empty-string default; this unguarded responsibility shift risks panics or incorrect behavior if callers unwrap without defaulting, and no documentation or wrapper enforces the contract."
+    },
+    {
+      "id": "feat-3375ae20bff6",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Visibility restricted to pub(crate)",
+      "location": "syncthing-rs/src/bep_compat.rs:303",
+      "message": "The Go getter `GetFolder` is an exported (uppercase, public) method available to any external package, consistent with protobuf-generated Go code conventions. The Rust port declares it `pub(crate)`, restricting access to the defining crate only. Any external crate consuming the `bep-compat` component that needs to call `GetFolder` on an `Index` value—as would be expected for protobuf message accessors—will fail to compile."
+    },
+    {
+      "id": "feat-347ca1ab0ad4",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Pointer indirection flattened to owned values",
+      "location": "syncthing-rs/src/bep_compat.rs:709",
+      "message": "Go returns `[]*FileInfo` (bep.pb.go:859) — a slice of pointers — so two Index messages can share the same FileInfo object by pointer, and identity/aliasing comparisons (`==` on pointer) are meaningful. The Rust signature returns `Vec\u003cFileInfo\u003e` (owned values), collapsing pointer identity into value semantics. Any protocol-state-transition or index-sequence-behavior scenario that relies on shared FileInfo references across multiple Index or IndexUpdate messages will diverge because the Rust side always produces distinct copies."
+    },
+    {
+      "id": "feat-3a564000a236",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Enum String format divergence",
+      "location": "syncthing-rs/src/bep_compat.rs:145-146",
+      "message": "The Go snippet provided (lines 66-68) is actually MessageType.String() which uses protoimpl.X.EnumStringOf to return the protobuf enum value name (e.g. \"MESSAGE_TYPE_CLUSTER_CONFIG\" for value 0). The Rust impl_enumish! macro at bep_compat.rs:145-146 uses format!(\"{}({})\", $name, self.Number()) producing \"MessageType(0)\" instead. This applies to all eight enum types expanded via impl_enumish! (Compression, ErrorCode, FileDownloadProgressUpdateType, FileInfoType, FolderStopReason, FolderType, MessageCompression, MessageType). Any code path that matches on or logs the enum string will see different values, affecting diagnostic output and any enum-name-based protocol negotiation."
+    },
+    {
+      "id": "feat-3a564000a236",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Nil-receiver divergence",
+      "location": "internal/gen/bep/bep.pb.go:581",
+      "message": "Go ClusterConfig.String() has a pointer receiver (*ClusterConfig) and protoimpl.X.MessageStringOf handles nil gracefully by returning an empty string. The Rust implementation at bep_compat.rs:43 takes \u0026self which cannot be null; callers that previously relied on nil-safe String() in Go will need an Option wrapper or will panic if the equivalent None path is exercised. This affects crash-recovery scenarios where partially-initialized state may call String() on a nil message."
+    },
+    {
+      "id": "feat-7787a2283d2b",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Return-type divergence",
+      "location": "syncthing-rs/src/bep_compat.rs:31",
+      "message": "The Go method `ProtoMessage()` is a no-op marker with no return value (unit/void), existing solely to satisfy the `proto.Message` interface. The Rust port changes the signature to return `bool` (always `true`), introducing a fabricated return value. Any downstream Rust code that branches on this boolean is exercising a code path with no Go equivalent, breaking semantic equivalence and type fidelity."
+    },
+    {
+      "id": "feat-7787a2283d2b",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Symbol-receiver mismatch",
+      "location": "internal/gen/bep/bep.pb.go:458",
+      "message": "The mapping metadata declares the Go symbol as `Index.ProtoMessage`, but the provided Go source at line 458 shows the receiver is `*Hello`, not `*Index`. If the Rust implementation was ported against the `Hello` struct while the mapping targets `Index`, the wrong source was used; if `Index.ProtoMessage` exists elsewhere in the file with identical shape this is a documentation error, but either way the mapping is unverifiable as presented."
+    },
+    {
+      "id": "feat-7a94209b9eae",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "nil-vs-empty slice divergence",
+      "location": "syncthing-rs/src/bep_compat.rs:318",
+      "message": "Go returns a nil slice when the receiver's BlockIndexes field is nil (the zero-value for an unset repeated protobuf field), and Go callers can distinguish nil from empty via `slice == nil`. The Rust implementation always returns a concrete empty `Vec\u003ci32\u003e` via `.clone()` on a default-initialized Vec, making it impossible for downstream logic to distinguish \"field was never set\" (nil) from \"field was explicitly set to empty.\" Any Rust caller ported from Go code that branches on nil-ness (e.g., presence checks, conditional serialization, or the crash-recovery and protocol-state-transition test scenarios that may assert on field-set semantics) will observe different behavior. To preserve parity, the return type should be `Option\u003cVec\u003ci32\u003e\u003e` with `None` representing Go's nil slice, or the field itself should be `Option\u003cVec\u003ci32\u003e\u003e`."
+    },
+    {
+      "id": "feat-87b4336c6b41",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Symbol/code mismatch in mapping",
+      "location": "internal/gen/bep/bep.pb.go:66",
+      "message": "The mapping metadata declares the Go symbol as `FileDownloadProgressUpdate.String` (a message-level method whose generated `String()` uses `prototext.Format` to emit protobuf text format), but the Go snippet provided is `MessageType.String()` (an enum-level method using `EnumStringOf`); if the Rust `as_json_string` implementation is intended to cover the message-type `String()`, the divergence is even wider because protobuf text format differs structurally from JSON, and if it is intended to cover the enum-type `String()`, the mapping metadata is wrong, risking silent coverage gaps in the required parity tests."
+    },
+    {
+      "id": "feat-9e7583805018",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Nil receiver path missing",
+      "location": "syncthing-rs/src/bep_compat.rs:35",
+      "message": "Go lines 462-469 handle a nil receiver by falling through to mi.MessageOf(x), which returns a valid zero-value protoreflect.Message carrying the message descriptor. This is part of the protobuf API contract and is used by generic code that inspects message types without an instance. The Rust signature takes \u0026self, making this path unreachable; an Option::None would need to be handled at the call site, but no such handling exists."
+    },
+    {
+      "id": "feat-b176dd42d685",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Unknown enum value stringification differs",
+      "location": "syncthing-rs/src/bep_compat.rs:146",
+      "message": "For out-of-range enum values (e.g. integer 99), Go's `EnumStringOf` returns just the numeric string `\"99\"`, while the Rust `impl_enumish!` macro produces `\"FileDownloadProgressUpdateType(99)\"`. Any consumer that falls back to parsing the numeric string for unrecognized values will fail against the Rust output."
+    },
+    {
+      "id": "feat-b341fe748fad",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Go symbol vs snippet mismatch",
+      "location": "internal/gen/bep/bep.pb.go:74",
+      "message": "The mapping declares the Go symbol as `FileDownloadProgressUpdateType.Type` but the provided Go snippet shows the method defined on `MessageType` (line 74). If these are distinct generated enum types that share the same code pattern but point to different indices in `file_bep_bep_proto_enumTypes` (index 0 vs another index), the Rust macro expansion must emit the correct per-enum-type identity; a single `$name` string cannot distinguish which protobuf enum type descriptor is being referenced, risking incorrect type identity when multiple enum types coexist."
+    },
+    {
+      "id": "feat-b341fe748fad",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Receiver semantics: value vs reference",
+      "location": "internal/gen/bep/bep.pb.go:74",
+      "message": "The Go method uses a value receiver `(MessageType)` and ignores the receiver entirely, always returning the static type table entry for index 0. The Rust method takes `\u0026self` and returns `$name`, a macro-injected string literal. While both are effectively static, the Go version is bound to a specific index in `file_bep_bep_proto_enumTypes` which ties it to code-generation order; the Rust version relies on a macro parameter with no equivalent index-based linkage, meaning a code-generation reorder in Go would silently diverge from the Rust mapping with no compile-time detection."
+    },
+    {
+      "id": "feat-b94cbb58c3e1",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Missing raw descriptor and index path",
+      "location": "syncthing-rs/src/bep_compat.rs:138",
+      "message": "The second element of the Go return, []int{0}, encodes the enum's position in the protobuf file descriptor tree and is consumed by protobuf internals (e.g., proto.EnumName, descriptor resolution). The Rust port drops this index entirely and substitutes an unrelated string, breaking wire-level schema introspection and any code path that navigates the descriptor hierarchy."
+    },
+    {
+      "id": "feat-ba95763d2f39",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Receiver semantics differ: value receiver vs \u0026self",
+      "location": "syncthing-rs/src/bep_compat.rs:27",
+      "message": "Go defines the method on the bare type `func (MessageType) Descriptor()` meaning the receiver value is unused and the method effectively returns a type-level constant descriptor. Rust takes `\u0026self`, implying an instance is required and could theoretically vary per-value. While functionally equivalent when the body ignores self, the contract difference means Rust callers must construct or hold an instance to obtain the descriptor, unlike Go where a zero-value suffices with no ambiguity about instance dependence."
+    },
+    {
+      "id": "feat-d005325a54d9",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Return-type mismatch: void vs bool",
+      "location": "syncthing-rs/src/bep_compat.rs:31",
+      "message": "The Go method `ProtoMessage()` is a no-op marker with no return value (signature `func (*Hello) ProtoMessage() {}`), existing solely to satisfy the `proto.Message` interface as a type-level tag. The Rust port changes the signature to `fn ProtoMessage(\u0026self) -\u003e bool` and returns `true`, converting a zero-cost marker into a boolean predicate. Any Rust caller that branches on this return value is exercising a code path with no Go equivalent, and any future interop or trait-based dispatch that expects unit-return semantics will break. The Rust side should return `()` (or use a marker trait) to preserve semantic equivalence."
+    },
+    {
+      "id": "feat-ddd88bc8a8e2",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Visibility narrowed to crate-private",
+      "location": "syncthing-rs/src/bep_compat.rs:27",
+      "message": "The Go `Descriptor()` method is exported (uppercase) and callable by any external package. The Rust implementation is declared `pub(crate)`, restricting access to the defining crate only. External crates that depend on `bep-compat` and call `Descriptor()` (e.g., crash-recovery or memory-cap-50mb harnesses) will fail to compile."
+    },
+    {
+      "id": "feat-2be9680853d4",
+      "tier": "T1",
+      "priority": "P3",
+      "title": "Nil-receiver guard absent",
+      "location": "syncthing-rs/src/bep_compat.rs:307",
+      "message": "Go guards against a nil receiver (bep.pb.go:1852) and returns nil, whereas Rust takes \u0026self (bep_compat.rs:307) which cannot be null. If any call site in Go passes a nil *DownloadProgress and relies on receiving a nil slice (distinct from an empty slice), the Rust port will panic or require an Option wrapper that is not present today. Risk is low because Rust's type system prevents this at compile time, but the nil-vs-empty semantic gap could matter for downstream nil-checks ported from Go."
+    },
+    {
+      "id": "feat-347ca1ab0ad4",
+      "tier": "T1",
+      "priority": "P3",
+      "title": "Nil receiver guard absent",
+      "location": "syncthing-rs/src/bep_compat.rs:709",
+      "message": "Go's generated getter guards against a nil receiver (`if x != nil`, bep.pb.go:860) and returns nil, which is idiomatic in protobuf Go and exercised when an uninitialized or zeroed message pointer is accessed. The Rust method takes `\u0026self` with no Option wrapper, so there is no equivalent code path that returns an empty/default value for a missing Index. If any translated call-site previously relied on nil-safe access (e.g., calling GetFiles on an Option-wrapped Index without unwrapping), it will panic at runtime rather than returning an empty Vec, which could surface under crash-recovery scenarios."
+    },
+    {
+      "id": "feat-9e7583805018",
+      "tier": "T1",
+      "priority": "P3",
+      "title": "Silent null on serialization failure",
+      "location": "syncthing-rs/src/bep_compat.rs:13",
+      "message": "as_value uses unwrap_or(Value::Null), silently returning JSON null if serde serialization fails. Go's ProtoReflect is infallible—it wraps the existing message pointer in a reflection adapter and never produces an error. A serialization failure in Rust (e.g., from a future field type that does not implement Serialize) would produce Value::Null instead of surfacing the error, masking data loss in crash-recovery or index-sequence-behavior scenarios."
+    }
+  ],
+  "results": [
+    {
+      "id": "feat-008436590c22",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "FileDownloadProgressUpdate.GetUpdateType",
+      "rust_symbol": "GetUpdateType",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-008436590c22.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-008436590c22.txt",
+      "duration_ms": 33317,
+      "finding_count": 2
+    },
+    {
+      "id": "feat-02621056e16a",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "Index.Descriptor",
+      "rust_symbol": "Descriptor",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-02621056e16a.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-02621056e16a.txt",
+      "duration_ms": 28210,
+      "finding_count": 3
+    },
+    {
+      "id": "feat-1aaa831e6362",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "Index.Reset",
+      "rust_symbol": "Reset",
+      "status": "no-findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-1aaa831e6362.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-1aaa831e6362.txt",
+      "duration_ms": 63056,
+      "finding_count": 0
+    },
+    {
+      "id": "feat-1b2753f77785",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "Index.ProtoReflect",
+      "rust_symbol": "ProtoReflect",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-1b2753f77785.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-1b2753f77785.txt",
+      "duration_ms": 36937,
+      "finding_count": 3
+    },
+    {
+      "id": "feat-1d61922a07e9",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "FileDownloadProgressUpdate.Reset",
+      "rust_symbol": "Reset",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-1d61922a07e9.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-1d61922a07e9.txt",
+      "duration_ms": 28901,
+      "finding_count": 1
+    },
+    {
+      "id": "feat-2535ccac35c2",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "FileDownloadProgressUpdate.GetVersion",
+      "rust_symbol": "GetVersion",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-2535ccac35c2.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-2535ccac35c2.txt",
+      "duration_ms": 26223,
+      "finding_count": 3
+    },
+    {
+      "id": "feat-2be9680853d4",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "DownloadProgress.GetUpdates",
+      "rust_symbol": "GetUpdates",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-2be9680853d4.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-2be9680853d4.txt",
+      "duration_ms": 100299,
+      "finding_count": 3
+    },
+    {
+      "id": "feat-3375ae20bff6",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "Index.GetFolder",
+      "rust_symbol": "GetFolder",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-3375ae20bff6.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-3375ae20bff6.txt",
+      "duration_ms": 67848,
+      "finding_count": 2
+    },
+    {
+      "id": "feat-347ca1ab0ad4",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "Index.GetFiles",
+      "rust_symbol": "GetFiles",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-347ca1ab0ad4.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-347ca1ab0ad4.txt",
+      "duration_ms": 85097,
+      "finding_count": 3
+    },
+    {
+      "id": "feat-3a564000a236",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "ClusterConfig.String",
+      "rust_symbol": "String",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-3a564000a236.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-3a564000a236.txt",
+      "duration_ms": 88880,
+      "finding_count": 3
+    },
+    {
+      "id": "feat-5f8eb7f0daf4",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "ClusterConfig.Reset",
+      "rust_symbol": "Reset",
+      "status": "no-findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-5f8eb7f0daf4.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-5f8eb7f0daf4.txt",
+      "duration_ms": 31128,
+      "finding_count": 0
+    },
+    {
+      "id": "feat-7787a2283d2b",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "Index.ProtoMessage",
+      "rust_symbol": "ProtoMessage",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-7787a2283d2b.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-7787a2283d2b.txt",
+      "duration_ms": 27359,
+      "finding_count": 2
+    },
+    {
+      "id": "feat-7a94209b9eae",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "FileDownloadProgressUpdate.GetBlockIndexes",
+      "rust_symbol": "GetBlockIndexes",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-7a94209b9eae.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-7a94209b9eae.txt",
+      "duration_ms": 37742,
+      "finding_count": 1
+    },
+    {
+      "id": "feat-7c4a4bb46706",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "FileDownloadProgressUpdateType.Enum",
+      "rust_symbol": "Enum",
+      "status": "no-findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-7c4a4bb46706.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-7c4a4bb46706.txt",
+      "duration_ms": 43191,
+      "finding_count": 0
+    },
+    {
+      "id": "feat-825f59a8950f",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "FileDownloadProgressUpdate.GetName",
+      "rust_symbol": "GetName",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-825f59a8950f.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-825f59a8950f.txt",
+      "duration_ms": 27825,
+      "finding_count": 1
+    },
+    {
+      "id": "feat-87b4336c6b41",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "FileDownloadProgressUpdate.String",
+      "rust_symbol": "String",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-87b4336c6b41.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-87b4336c6b41.txt",
+      "duration_ms": 39320,
+      "finding_count": 2
+    },
+    {
+      "id": "feat-9b4cb3fe1fd5",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "Device.GetMaxSequence",
+      "rust_symbol": "GetMaxSequence",
+      "status": "no-findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-9b4cb3fe1fd5.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-9b4cb3fe1fd5.txt",
+      "duration_ms": 16827,
+      "finding_count": 0
+    },
+    {
+      "id": "feat-9e7583805018",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "FileDownloadProgressUpdate.ProtoReflect",
+      "rust_symbol": "ProtoReflect",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-9e7583805018.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-9e7583805018.txt",
+      "duration_ms": 71985,
+      "finding_count": 3
+    },
+    {
+      "id": "feat-a0cbab190dc4",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "FileDownloadProgressUpdate.GetBlockSize",
+      "rust_symbol": "GetBlockSize",
+      "status": "no-findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-a0cbab190dc4.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-a0cbab190dc4.txt",
+      "duration_ms": 76422,
+      "finding_count": 0
+    },
+    {
+      "id": "feat-b176dd42d685",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "FileDownloadProgressUpdateType.String",
+      "rust_symbol": "String",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-b176dd42d685.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-b176dd42d685.txt",
+      "duration_ms": 59809,
+      "finding_count": 2
+    },
+    {
+      "id": "feat-b341fe748fad",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "FileDownloadProgressUpdateType.Type",
+      "rust_symbol": "Type",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-b341fe748fad.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-b341fe748fad.txt",
+      "duration_ms": 32881,
+      "finding_count": 3
+    },
+    {
+      "id": "feat-b94cbb58c3e1",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "FileDownloadProgressUpdateType.EnumDescriptor",
+      "rust_symbol": "EnumDescriptor",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-b94cbb58c3e1.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-b94cbb58c3e1.txt",
+      "duration_ms": 21695,
+      "finding_count": 3
+    },
+    {
+      "id": "feat-ba95763d2f39",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "FileDownloadProgressUpdateType.Descriptor",
+      "rust_symbol": "Descriptor",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-ba95763d2f39.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-ba95763d2f39.txt",
+      "duration_ms": 28682,
+      "finding_count": 4
+    },
+    {
+      "id": "feat-d005325a54d9",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "FileDownloadProgressUpdate.ProtoMessage",
+      "rust_symbol": "ProtoMessage",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-d005325a54d9.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-d005325a54d9.txt",
+      "duration_ms": 21086,
+      "finding_count": 1
+    },
+    {
+      "id": "feat-d1c733548895",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "Index.GetLastSequence",
+      "rust_symbol": "GetLastSequence",
+      "status": "no-findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-d1c733548895.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-d1c733548895.txt",
+      "duration_ms": 19928,
+      "finding_count": 0
+    },
+    {
+      "id": "feat-d999b9dade6f",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "Device.GetIndexId",
+      "rust_symbol": "GetIndexId",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-d999b9dade6f.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-d999b9dade6f.txt",
+      "duration_ms": 17352,
+      "finding_count": 1
+    },
+    {
+      "id": "feat-ddd88bc8a8e2",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "FileDownloadProgressUpdate.Descriptor",
+      "rust_symbol": "Descriptor",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-ddd88bc8a8e2.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-ddd88bc8a8e2.txt",
+      "duration_ms": 36549,
+      "finding_count": 2
+    },
+    {
+      "id": "feat-dde5a69b7e3c",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "FileInfo.GetSequence",
+      "rust_symbol": "GetSequence",
+      "status": "no-findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-dde5a69b7e3c.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-dde5a69b7e3c.txt",
+      "duration_ms": 25211,
+      "finding_count": 0
+    },
+    {
+      "id": "feat-de80a3bd6ae5",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "FileInfo.GetLocalFlags",
+      "rust_symbol": "GetLocalFlags",
+      "status": "no-findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-de80a3bd6ae5.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-de80a3bd6ae5.txt",
+      "duration_ms": 12756,
+      "finding_count": 0
+    },
+    {
+      "id": "feat-fae20867bb99",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "FileDownloadProgressUpdateType.Number",
+      "rust_symbol": "Number",
+      "status": "no-findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-fae20867bb99.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-fae20867bb99.txt",
+      "duration_ms": 21879,
+      "finding_count": 0
+    }
+  ]
+}

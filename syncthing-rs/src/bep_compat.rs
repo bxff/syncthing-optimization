@@ -28,9 +28,7 @@ macro_rules! impl_proto_common {
                 descriptor($name)
             }
 
-            pub(crate) fn ProtoMessage(&self) -> bool {
-                true
-            }
+            pub(crate) fn ProtoMessage(&self) {}
 
             pub(crate) fn ProtoReflect(&self) -> Value {
                 as_value(self)
@@ -274,7 +272,7 @@ impl Device {
         self.Id.clone()
     }
 
-    pub(crate) fn GetIndexId(&self) -> i64 {
+    pub(crate) fn GetIndexId(&self) -> u64 {
         self.IndexId
     }
 
@@ -304,8 +302,8 @@ impl DownloadProgress {
         self.Folder.clone()
     }
 
-    pub(crate) fn GetUpdates(&self) -> Vec<FileDownloadProgressUpdate> {
-        self.Updates.clone()
+    pub(crate) fn GetUpdates(&self) -> &[FileDownloadProgressUpdate] {
+        &self.Updates
     }
 
     pub(crate) fn toWire(&self) -> Value {
@@ -314,8 +312,8 @@ impl DownloadProgress {
 }
 
 impl FileDownloadProgressUpdate {
-    pub(crate) fn GetBlockIndexes(&self) -> Vec<i32> {
-        self.BlockIndexes.clone()
+    pub(crate) fn GetBlockIndexes(&self) -> &[i32] {
+        &self.BlockIndexes
     }
 
     pub(crate) fn GetBlockSize(&self) -> i32 {
@@ -330,8 +328,8 @@ impl FileDownloadProgressUpdate {
         self.UpdateType
     }
 
-    pub(crate) fn GetVersion(&self) -> i64 {
-        self.Version
+    pub(crate) fn GetVersion(&self) -> Option<Vector> {
+        self.Version.clone()
     }
 
     pub(crate) fn toWire(&self) -> Value {

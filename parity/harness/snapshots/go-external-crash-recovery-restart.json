@@ -25,7 +25,7 @@
   "source": "go",
   "state_projection": {
     "device_ids": [
-      "QKHSSXR-B6U5F5R-FODBXQX-TTAHT3I-LARG5QO-LSGZJEJ-MSDTFJH-SLY3XQM"
+      "WZOMK5V-BGVU4Y7-UMZHT2P-JK5K6AY-YLL5A4F-LFLPJSK-UMOTCKI-RDPFBAW"
     ],
     "folder_summaries": [
       {
@@ -39,13 +39,13 @@
     ],
     "invalid_pending_device_ids": [],
     "invalid_pending_folder_ids": [],
-    "my_id": "QKHSSXR-B6U5F5R-FODBXQX-TTAHT3I-LARG5QO-LSGZJEJ-MSDTFJH-SLY3XQM",
+    "my_id": "WZOMK5V-BGVU4Y7-UMZHT2P-JK5K6AY-YLL5A4F-LFLPJSK-UMOTCKI-RDPFBAW",
     "pending_device_ids": [],
     "pending_folder_ids": [],
     "phase_projection": {
       "post_restart": {
         "device_ids": [
-          "QKHSSXR-B6U5F5R-FODBXQX-TTAHT3I-LARG5QO-LSGZJEJ-MSDTFJH-SLY3XQM"
+          "WZOMK5V-BGVU4Y7-UMZHT2P-JK5K6AY-YLL5A4F-LFLPJSK-UMOTCKI-RDPFBAW"
         ],
         "folder_summaries": [
           {
@@ -59,13 +59,13 @@
         ],
         "invalid_pending_device_ids": [],
         "invalid_pending_folder_ids": [],
-        "my_id": "QKHSSXR-B6U5F5R-FODBXQX-TTAHT3I-LARG5QO-LSGZJEJ-MSDTFJH-SLY3XQM",
+        "my_id": "WZOMK5V-BGVU4Y7-UMZHT2P-JK5K6AY-YLL5A4F-LFLPJSK-UMOTCKI-RDPFBAW",
         "pending_device_ids": [],
         "pending_folder_ids": []
       },
       "pre_crash": {
         "device_ids": [
-          "QKHSSXR-B6U5F5R-FODBXQX-TTAHT3I-LARG5QO-LSGZJEJ-MSDTFJH-SLY3XQM"
+          "WZOMK5V-BGVU4Y7-UMZHT2P-JK5K6AY-YLL5A4F-LFLPJSK-UMOTCKI-RDPFBAW"
         ],
         "folder_summaries": [
           {
@@ -79,7 +79,7 @@
         ],
         "invalid_pending_device_ids": [],
         "invalid_pending_folder_ids": [],
-        "my_id": "QKHSSXR-B6U5F5R-FODBXQX-TTAHT3I-LARG5QO-LSGZJEJ-MSDTFJH-SLY3XQM",
+        "my_id": "WZOMK5V-BGVU4Y7-UMZHT2P-JK5K6AY-YLL5A4F-LFLPJSK-UMOTCKI-RDPFBAW",
         "pending_device_ids": [],
         "pending_folder_ids": []
       }

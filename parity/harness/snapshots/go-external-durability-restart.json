@@ -25,7 +25,7 @@
   "source": "go",
   "state_projection": {
     "device_ids": [
-      "CEP4QST-HRJ7AWA-SNOZZQY-PNBY65C-D775VI4-BSYKJRR-JMG5L5R-HN5QLAL"
+      "DVKND4B-CBBSSFO-EZV7FNH-F7V6FOF-2QUWFSA-YIQNBRA-GWFH3UK-6G5ZAAV"
     ],
     "folder_summaries": [
       {
@@ -39,13 +39,13 @@
     ],
     "invalid_pending_device_ids": [],
     "invalid_pending_folder_ids": [],
-    "my_id": "CEP4QST-HRJ7AWA-SNOZZQY-PNBY65C-D775VI4-BSYKJRR-JMG5L5R-HN5QLAL",
+    "my_id": "DVKND4B-CBBSSFO-EZV7FNH-F7V6FOF-2QUWFSA-YIQNBRA-GWFH3UK-6G5ZAAV",
     "pending_device_ids": [],
     "pending_folder_ids": [],
     "phase_projection": {
       "post_restart": {
         "device_ids": [
-          "CEP4QST-HRJ7AWA-SNOZZQY-PNBY65C-D775VI4-BSYKJRR-JMG5L5R-HN5QLAL"
+          "DVKND4B-CBBSSFO-EZV7FNH-F7V6FOF-2QUWFSA-YIQNBRA-GWFH3UK-6G5ZAAV"
         ],
         "folder_summaries": [
           {
@@ -59,13 +59,13 @@
         ],
         "invalid_pending_device_ids": [],
         "invalid_pending_folder_ids": [],
-        "my_id": "CEP4QST-HRJ7AWA-SNOZZQY-PNBY65C-D775VI4-BSYKJRR-JMG5L5R-HN5QLAL",
+        "my_id": "DVKND4B-CBBSSFO-EZV7FNH-F7V6FOF-2QUWFSA-YIQNBRA-GWFH3UK-6G5ZAAV",
         "pending_device_ids": [],
         "pending_folder_ids": []
       },
       "pre_restart": {
         "device_ids": [
-          "CEP4QST-HRJ7AWA-SNOZZQY-PNBY65C-D775VI4-BSYKJRR-JMG5L5R-HN5QLAL"
+          "DVKND4B-CBBSSFO-EZV7FNH-F7V6FOF-2QUWFSA-YIQNBRA-GWFH3UK-6G5ZAAV"
         ],
         "folder_summaries": [
           {
@@ -79,7 +79,7 @@
         ],
         "invalid_pending_device_ids": [],
         "invalid_pending_folder_ids": [],
-        "my_id": "CEP4QST-HRJ7AWA-SNOZZQY-PNBY65C-D775VI4-BSYKJRR-JMG5L5R-HN5QLAL",
+        "my_id": "DVKND4B-CBBSSFO-EZV7FNH-F7V6FOF-2QUWFSA-YIQNBRA-GWFH3UK-6G5ZAAV",
         "pending_device_ids": [],
         "pending_folder_ids": []
       }

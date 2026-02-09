@@ -819,8 +819,10 @@ func compareSnapshots(scenarioID, mode string, goSnap, rustSnap map[string]any) 
 	case "endpoint-surface":
 		goCovered := toStringSet(goSnap["covered_endpoints"])
 		rustCovered := toStringSet(rustSnap["covered_endpoints"])
+		requiredEndpoints := make([]string, 0)
 		if scenarioID == "daemon-api-surface" {
-			requiredEndpoints, err := loadRequiredAPIEndpoints(replacementGatesPath())
+			var err error
+			requiredEndpoints, err = loadRequiredAPIEndpoints(replacementGatesPath())
 			if err != nil {
 				return false, fmt.Sprintf("load required api endpoints: %v", err)
 			}
@@ -862,6 +864,48 @@ func compareSnapshots(scenarioID, mode string, goSnap, rustSnap map[string]any) 
 		// Go endpoint. Rust may carry additional endpoints while migration is in
 		// progress, but those are not considered replacement blockers.
 		if scenarioID == "daemon-api-surface" && len(missingInRust) == 0 {
+			goAssertions, ok := endpointAssertionsMap(goSnap["endpoint_assertions"])
+			if !ok {
+				return false, "go daemon api snapshot missing endpoint_assertions"
+			}
+			rustAssertions, ok := endpointAssertionsMap(rustSnap["endpoint_assertions"])
+			if !ok {
+				return false, "rust daemon api snapshot missing endpoint_assertions"
+			}
+			for _, endpoint := range requiredEndpoints {
+				goAssertion, ok := goAssertions[endpoint]
+				if !ok {
+					return false, fmt.Sprintf("go daemon api assertion missing required endpoint %q", endpoint)
+				}
+				rustAssertion, ok := rustAssertions[endpoint]
+				if !ok {
+					return false, fmt.Sprintf("rust daemon api assertion missing required endpoint %q", endpoint)
+				}
+				goStatus, ok := numberAsInt64(goAssertion["status_code"])
+				if !ok {
+					return false, fmt.Sprintf("go daemon api assertion has non-numeric status_code for %q", endpoint)
+				}
+				rustStatus, ok := numberAsInt64(rustAssertion["status_code"])
+				if !ok {
+					return false, fmt.Sprintf("rust daemon api assertion has non-numeric status_code for %q", endpoint)
+				}
+				if goStatus != rustStatus {
+					return false, fmt.Sprintf("endpoint %q status_code differs (go=%d rust=%d)", endpoint, goStatus, rustStatus)
+				}
+				goKind := strings.ToLower(strings.TrimSpace(asString(goAssertion["response_kind"])))
+				rustKind := strings.ToLower(strings.TrimSpace(asString(rustAssertion["response_kind"])))
+				if goKind == "" || rustKind == "" {
+					return false, fmt.Sprintf("endpoint %q missing response_kind assertion", endpoint)
+				}
+				if goKind != rustKind {
+					return false, fmt.Sprintf("endpoint %q response_kind differs (go=%s rust=%s)", endpoint, goKind, rustKind)
+				}
+				goRequired := toStringSet(goAssertion["required_keys"])
+				rustRequired := toStringSet(rustAssertion["required_keys"])
+				if !stringSetEqual(goRequired, rustRequired) {
+					return false, fmt.Sprintf("endpoint %q required_keys differ", endpoint)
+				}
+			}
 			return true, ""
 		}
 		if len(missingInRust) == 0 && len(extraInRust) == 0 {
@@ -1497,6 +1541,34 @@ func toStringSet(value any) map[string]struct{} {
 		}
 	}
 	return out
+}
+
+func endpointAssertionsMap(value any) (map[string]map[string]any, bool) {
+	rawMap, ok := value.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	out := make(map[string]map[string]any, len(rawMap))
+	for endpoint, raw := range rawMap {
+		assertion, ok := raw.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		out[strings.TrimSpace(endpoint)] = assertion
+	}
+	return out, true
+}
+
+func stringSetEqual(a, b map[string]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for key := range a {
+		if _, ok := b[key]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func computeInputDigest(roots []string) (string, error) {

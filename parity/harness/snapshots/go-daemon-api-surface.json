@@ -1,25 +1,17 @@
 {
-  "covered_endpoint_count": 93,
+  "checks": {
+    "api_probe_ok": true,
+    "daemon_boot_ok": true,
+    "folder_configured": true,
+    "required_endpoints_all_covered": true,
+    "scan_ok": true,
+    "shutdown_requested": true
+  },
+  "covered_endpoint_count": 19,
   "covered_endpoints": [
-    "DELETE /rest/cluster/pending/devices",
-    "DELETE /rest/cluster/pending/folders",
-    "DELETE /rest/config/devices/:id",
-    "DELETE /rest/config/folders/:id",
     "GET /rest/cluster/pending/devices",
     "GET /rest/cluster/pending/folders",
     "GET /rest/config",
-    "GET /rest/config/defaults/device",
-    "GET /rest/config/defaults/folder",
-    "GET /rest/config/defaults/ignores",
-    "GET /rest/config/devices",
-    "GET /rest/config/devices/:id",
-    "GET /rest/config/folders",
-    "GET /rest/config/folders/:id",
-    "GET /rest/config/gui",
-    "GET /rest/config/insync",
-    "GET /rest/config/ldap",
-    "GET /rest/config/options",
-    "GET /rest/config/restart-required",
     "GET /rest/db/browse",
     "GET /rest/db/completion",
     "GET /rest/db/file",
@@ -28,73 +20,300 @@
     "GET /rest/db/need",
     "GET /rest/db/remoteneed",
     "GET /rest/db/status",
-    "GET /rest/debug/*method",
-    "GET /rest/events",
-    "GET /rest/events/disk",
-    "GET /rest/folder/errors",
-    "GET /rest/folder/pullerrors",
-    "GET /rest/folder/versions",
-    "GET /rest/noauth/health",
-    "GET /rest/stats/device",
-    "GET /rest/stats/folder",
-    "GET /rest/svc/deviceid",
-    "GET /rest/svc/lang",
-    "GET /rest/svc/random/string",
-    "GET /rest/svc/report",
-    "GET /rest/system/browse",
-    "GET /rest/system/config",
-    "GET /rest/system/config/insync",
     "GET /rest/system/connections",
-    "GET /rest/system/discovery",
-    "GET /rest/system/error",
-    "GET /rest/system/log",
-    "GET /rest/system/log.txt",
-    "GET /rest/system/loglevels",
-    "GET /rest/system/paths",
     "GET /rest/system/ping",
     "GET /rest/system/status",
-    "GET /rest/system/upgrade",
     "GET /rest/system/version",
-    "PATCH /rest/config/defaults/device",
-    "PATCH /rest/config/defaults/folder",
-    "PATCH /rest/config/devices/:id",
-    "PATCH /rest/config/folders/:id",
-    "PATCH /rest/config/gui",
-    "PATCH /rest/config/ldap",
-    "PATCH /rest/config/options",
-    "POST /rest/config/devices",
-    "POST /rest/config/folders",
-    "POST /rest/db/ignores",
     "POST /rest/db/override",
-    "POST /rest/db/prio",
     "POST /rest/db/revert",
     "POST /rest/db/scan",
-    "POST /rest/folder/versions",
-    "POST /rest/noauth/auth/logout",
-    "POST /rest/noauth/auth/password",
-    "POST /rest/system/config",
-    "POST /rest/system/error",
-    "POST /rest/system/error/clear",
-    "POST /rest/system/loglevels",
-    "POST /rest/system/pause",
-    "POST /rest/system/ping",
-    "POST /rest/system/reset",
-    "POST /rest/system/restart",
-    "POST /rest/system/resume",
-    "POST /rest/system/shutdown",
-    "POST /rest/system/upgrade",
-    "PUT /rest/config",
-    "PUT /rest/config/defaults/device",
-    "PUT /rest/config/defaults/folder",
-    "PUT /rest/config/defaults/ignores",
-    "PUT /rest/config/devices",
-    "PUT /rest/config/devices/:id",
-    "PUT /rest/config/folders",
-    "PUT /rest/config/folders/:id",
-    "PUT /rest/config/gui",
-    "PUT /rest/config/ldap",
-    "PUT /rest/config/options"
+    "POST /rest/system/shutdown"
   ],
+  "endpoint_assertions": {
+    "GET /rest/cluster/pending/devices": {
+      "present_keys": [],
+      "required_keys": [
+        "count"
+      ],
+      "response_kind": "object",
+      "status_code": 200
+    },
+    "GET /rest/cluster/pending/folders": {
+      "present_keys": [],
+      "required_keys": [
+        "count"
+      ],
+      "response_kind": "object",
+      "status_code": 200
+    },
+    "GET /rest/config": {
+      "present_keys": [
+        "defaults",
+        "devices",
+        "folders",
+        "gui",
+        "ldap",
+        "options",
+        "remoteIgnoredDevices",
+        "version"
+      ],
+      "required_keys": [
+        "folders",
+        "devices"
+      ],
+      "response_kind": "object",
+      "status_code": 200
+    },
+    "GET /rest/db/browse": {
+      "present_keys": [],
+      "required_keys": [
+        "0"
+      ],
+      "response_kind": "array",
+      "status_code": 200
+    },
+    "GET /rest/db/completion": {
+      "present_keys": [
+        "completion",
+        "globalBytes",
+        "globalItems",
+        "needBytes",
+        "needDeletes",
+        "needItems",
+        "remoteState",
+        "sequence"
+      ],
+      "required_keys": [
+        "folder",
+        "device",
+        "completionPct",
+        "needBytes"
+      ],
+      "response_kind": "object",
+      "status_code": 200
+    },
+    "GET /rest/db/file": {
+      "present_keys": [
+        "availability",
+        "global",
+        "local"
+      ],
+      "required_keys": [
+        "folder",
+        "file"
+      ],
+      "response_kind": "object",
+      "status_code": 200
+    },
+    "GET /rest/db/ignores": {
+      "present_keys": [
+        "error",
+        "expanded",
+        "ignore"
+      ],
+      "required_keys": [
+        "ignore"
+      ],
+      "response_kind": "object",
+      "status_code": 200
+    },
+    "GET /rest/db/localchanged": {
+      "present_keys": [
+        "files",
+        "page",
+        "perpage"
+      ],
+      "required_keys": [
+        "page",
+        "perpage"
+      ],
+      "response_kind": "object",
+      "status_code": 200
+    },
+    "GET /rest/db/need": {
+      "present_keys": [
+        "page",
+        "perpage",
+        "progress",
+        "queued",
+        "rest"
+      ],
+      "required_keys": [
+        "page",
+        "perpage"
+      ],
+      "response_kind": "object",
+      "status_code": 200
+    },
+    "GET /rest/db/remoteneed": {
+      "present_keys": [
+        "files",
+        "page",
+        "perpage"
+      ],
+      "required_keys": [
+        "page",
+        "perpage"
+      ],
+      "response_kind": "object",
+      "status_code": 200
+    },
+    "GET /rest/db/status": {
+      "present_keys": [
+        "error",
+        "errors",
+        "globalBytes",
+        "globalDeleted",
+        "globalDirectories",
+        "globalFiles",
+        "globalSymlinks",
+        "globalTotalItems",
+        "ignorePatterns",
+        "inSyncBytes",
+        "inSyncFiles",
+        "invalid",
+        "localBytes",
+        "localDeleted",
+        "localDirectories",
+        "localFiles",
+        "localSymlinks",
+        "localTotalItems",
+        "needBytes",
+        "needDeletes",
+        "needDirectories",
+        "needFiles",
+        "needSymlinks",
+        "needTotalItems",
+        "pullErrors",
+        "receiveOnlyChangedBytes",
+        "receiveOnlyChangedDeletes",
+        "receiveOnlyChangedDirectories",
+        "receiveOnlyChangedFiles",
+        "receiveOnlyChangedSymlinks",
+        "receiveOnlyTotalItems",
+        "remoteSequence",
+        "sequence",
+        "state",
+        "stateChanged",
+        "version",
+        "watchError"
+      ],
+      "required_keys": [
+        "folder",
+        "state",
+        "localFiles",
+        "needFiles"
+      ],
+      "response_kind": "object",
+      "status_code": 200
+    },
+    "GET /rest/system/connections": {
+      "present_keys": [
+        "connections",
+        "total"
+      ],
+      "required_keys": [
+        "total",
+        "connections"
+      ],
+      "response_kind": "object",
+      "status_code": 200
+    },
+    "GET /rest/system/ping": {
+      "present_keys": [
+        "ping"
+      ],
+      "required_keys": [],
+      "response_kind": "object",
+      "status_code": 200
+    },
+    "GET /rest/system/status": {
+      "present_keys": [
+        "alloc",
+        "connectionServiceStatus",
+        "cpuPercent",
+        "discoveryEnabled",
+        "discoveryErrors",
+        "discoveryMethods",
+        "discoveryStatus",
+        "goroutines",
+        "guiAddressOverridden",
+        "guiAddressUsed",
+        "lastDialStatus",
+        "myID",
+        "pathSeparator",
+        "startTime",
+        "sys",
+        "tilde",
+        "uptime",
+        "urVersionMax"
+      ],
+      "required_keys": [
+        "myID",
+        "uptimeS"
+      ],
+      "response_kind": "object",
+      "status_code": 200
+    },
+    "GET /rest/system/version": {
+      "present_keys": [
+        "arch",
+        "codename",
+        "container",
+        "date",
+        "extra",
+        "isBeta",
+        "isCandidate",
+        "isRelease",
+        "longVersion",
+        "os",
+        "stamp",
+        "tags",
+        "user",
+        "version"
+      ],
+      "required_keys": [
+        "version",
+        "longVersion",
+        "os",
+        "arch"
+      ],
+      "response_kind": "object",
+      "status_code": 200
+    },
+    "POST /rest/db/override": {
+      "present_keys": [],
+      "required_keys": [],
+      "response_kind": "object",
+      "status_code": 200
+    },
+    "POST /rest/db/revert": {
+      "present_keys": [],
+      "required_keys": [],
+      "response_kind": "object",
+      "status_code": 200
+    },
+    "POST /rest/db/scan": {
+      "present_keys": [],
+      "required_keys": [
+        "ok"
+      ],
+      "response_kind": "object",
+      "status_code": 200
+    },
+    "POST /rest/system/shutdown": {
+      "present_keys": [
+        "ok"
+      ],
+      "required_keys": [],
+      "response_kind": "object",
+      "status_code": 200
+    }
+  },
+  "metrics": {
+    "seed": 1,
+    "workload_digest": "f86b49601247721d3ceadff3a40eba5f4080e5f742196bcb38c5f36a69545e41"
+  },
   "scenario": "daemon-api-surface",
   "source": "go",
   "status": "validated"

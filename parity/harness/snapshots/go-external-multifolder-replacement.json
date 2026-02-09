@@ -42,7 +42,7 @@
   "source": "go",
   "state_projection": {
     "device_ids": [
-      "6JWH7IR-BRYGM6M-KNYVR4X-YFSLUHC-BM74M76-5PMSQMF-HYYX6WM-QU2M3QN"
+      "RWGHKRP-D65UA4D-Q3QFML3-HP7KSPI-K3JIBY5-3C3IJT2-MONGRTN-6KXMNA6"
     ],
     "folder_summaries": [
       {
@@ -82,7 +82,7 @@
     ],
     "invalid_pending_device_ids": [],
     "invalid_pending_folder_ids": [],
-    "my_id": "6JWH7IR-BRYGM6M-KNYVR4X-YFSLUHC-BM74M76-5PMSQMF-HYYX6WM-QU2M3QN",
+    "my_id": "RWGHKRP-D65UA4D-Q3QFML3-HP7KSPI-K3JIBY5-3C3IJT2-MONGRTN-6KXMNA6",
     "pending_device_ids": [],
     "pending_folder_ids": []
   },

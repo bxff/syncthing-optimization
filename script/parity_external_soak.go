@@ -30,6 +30,7 @@ import (
 )
 
 const (
+	daemonAPISurfaceScenarioID    = "daemon-api-surface"
 	externalSoakScenarioID        = "external-soak-replacement"
 	externalMultiFolderScenarioID = "external-multifolder-replacement"
 	externalFolderModesScenarioID = "external-folder-modes-replacement"
@@ -62,7 +63,8 @@ var expectedFolderModeTypes = map[string]string{
 func main() {
 	if len(os.Args) < 3 || os.Args[1] != "scenario" {
 		fatalf(
-			"usage: go run ./script/parity_external_soak.go scenario <%s|%s|%s|%s|%s> --impl <go|rust>",
+			"usage: go run ./script/parity_external_soak.go scenario <%s|%s|%s|%s|%s|%s> --impl <go|rust>",
+			daemonAPISurfaceScenarioID,
 			externalSoakScenarioID,
 			externalMultiFolderScenarioID,
 			externalFolderModesScenarioID,
@@ -71,7 +73,8 @@ func main() {
 		)
 	}
 	id := strings.TrimSpace(os.Args[2])
-	if id != externalSoakScenarioID &&
+	if id != daemonAPISurfaceScenarioID &&
+		id != externalSoakScenarioID &&
 		id != externalMultiFolderScenarioID &&
 		id != externalFolderModesScenarioID &&
 		id != externalDurabilityScenarioID &&
@@ -87,6 +90,19 @@ func main() {
 	}
 	if *impl != "go" && *impl != "rust" {
 		fatalf("--impl must be go or rust")
+	}
+
+	if id == daemonAPISurfaceScenarioID {
+		out, err := runScenarioDaemonAPISurface(*impl, *seed)
+		if err != nil {
+			fatalf("external soak failed: %v", err)
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(out); err != nil {
+			fatalf("encode output: %v", err)
+		}
+		return
 	}
 
 	checks, metrics, stateProjection, err := runScenario(id, *impl, *seed)
@@ -122,9 +138,56 @@ func runScenario(id, impl string, seed int64) (map[string]any, map[string]any, m
 		return runScenarioExternalDurability(impl, seed)
 	case externalCrashScenarioID:
 		return runScenarioExternalCrashRecovery(impl, seed)
+	case daemonAPISurfaceScenarioID:
+		out, err := runScenarioDaemonAPISurface(impl, seed)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		checks, _ := out["checks"].(map[string]any)
+		metrics, _ := out["metrics"].(map[string]any)
+		return checks, metrics, nil, nil
 	default:
 		return nil, nil, nil, fmt.Errorf("unsupported scenario %q", id)
 	}
+}
+
+func runScenarioDaemonAPISurface(impl string, seed int64) (map[string]any, error) {
+	var (
+		metrics apiSurfaceMetrics
+		err     error
+	)
+	switch impl {
+	case "go":
+		metrics, err = runGoDaemonAPISurface(seed)
+	case "rust":
+		metrics, err = runRustDaemonAPISurface(seed)
+	default:
+		err = fmt.Errorf("unsupported impl %q", impl)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]any{
+		"scenario":               daemonAPISurfaceScenarioID,
+		"source":                 impl,
+		"status":                 "validated",
+		"covered_endpoints":      metrics.CoveredEndpoints,
+		"covered_endpoint_count": len(metrics.CoveredEndpoints),
+		"endpoint_assertions":    metrics.EndpointAssertions,
+		"checks": map[string]any{
+			"daemon_boot_ok":                 true,
+			"folder_configured":              metrics.FolderConfigured,
+			"scan_ok":                        metrics.ScanOK,
+			"api_probe_ok":                   metrics.APIProbeOK,
+			"shutdown_requested":             metrics.ShutdownRequested,
+			"required_endpoints_all_covered": metrics.APIProbeOK,
+		},
+		"metrics": map[string]any{
+			"seed":            metrics.Seed,
+			"workload_digest": metrics.WorkloadDigest,
+		},
+	}, nil
 }
 
 func runScenarioExternalSoak(impl string, seed int64) (map[string]any, map[string]any, map[string]any, error) {
@@ -439,6 +502,17 @@ type crashMetrics struct {
 	StateProjection          map[string]any
 }
 
+type apiSurfaceMetrics struct {
+	FolderConfigured   bool
+	ScanOK             bool
+	APIProbeOK         bool
+	ShutdownRequested  bool
+	Seed               int64
+	WorkloadDigest     string
+	CoveredEndpoints   []string
+	EndpointAssertions map[string]any
+}
+
 type daemonProc struct {
 	cmd    *exec.Cmd
 	stderr bytes.Buffer
@@ -510,6 +584,418 @@ func (p *daemonProc) wait(timeout time.Duration) error {
 		return nil
 	}
 	return err
+}
+
+type replacementGateConfig struct {
+	RequiredAPIEndpoints []string `json:"required_api_endpoints"`
+}
+
+func runGoDaemonAPISurface(seed int64) (apiSurfaceMetrics, error) {
+	metrics := apiSurfaceMetrics{
+		Seed:           seed,
+		WorkloadDigest: workloadDigest("daemon-api-surface", seed),
+	}
+	root, err := os.MkdirTemp("", "syncthing-go-api-surface-")
+	if err != nil {
+		return metrics, fmt.Errorf("create temp root: %w", err)
+	}
+	defer os.RemoveAll(root)
+
+	homeDir := filepath.Join(root, "home")
+	folderDir := filepath.Join(root, "folder")
+	if err := prepareSoakFolder(folderDir, seed); err != nil {
+		return metrics, err
+	}
+
+	if err := runCmd(20*time.Second, "go", "run", "./cmd/syncthing", "generate", "--home", homeDir, "--no-port-probing"); err != nil {
+		return metrics, fmt.Errorf("generate go config: %w", err)
+	}
+	apiKey, err := parseAPIKey(filepath.Join(homeDir, "config.xml"))
+	if err != nil {
+		return metrics, err
+	}
+	apiPort, err := freePort()
+	if err != nil {
+		return metrics, err
+	}
+
+	proc := &daemonProc{
+		cmd: exec.Command(
+			"go", "run", "./cmd/syncthing", "serve",
+			"--home", homeDir,
+			"--no-browser",
+			"--no-restart",
+			"--gui-address", fmt.Sprintf("http://127.0.0.1:%d", apiPort),
+			"--log-file=-",
+		),
+	}
+	if err := proc.start(); err != nil {
+		return metrics, fmt.Errorf("start go daemon: %w", err)
+	}
+	defer proc.stop()
+
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", apiPort)
+	if err := waitForPing(baseURL, apiKey, startupTimeout); err != nil {
+		return metrics, fmt.Errorf("go daemon startup: %w (stderr=%s)", err, strings.TrimSpace(proc.stderr.String()))
+	}
+	if err := verifyRuntimeIdentity(baseURL, apiKey, "go"); err != nil {
+		return metrics, fmt.Errorf("go runtime identity check: %w", err)
+	}
+
+	if err := runCmd(
+		20*time.Second,
+		"go", "run", "./cmd/syncthing", "cli",
+		"--home", homeDir,
+		"--gui-address", fmt.Sprintf("127.0.0.1:%d", apiPort),
+		"--gui-apikey", apiKey,
+		"config", "folders", "add",
+		"--id", "default",
+		"--path", folderDir,
+		"--type", "sendreceive",
+	); err != nil {
+		return metrics, fmt.Errorf("configure go folder: %w", err)
+	}
+	metrics.FolderConfigured = true
+
+	if _, _, err := requestJSON(http.MethodPost, baseURL+"/rest/db/scan?folder=default", apiKey); err != nil {
+		return metrics, fmt.Errorf("go scan request: %w", err)
+	}
+	metrics.ScanOK = true
+
+	systemStatus, statusCode, err := requestJSON(http.MethodGet, baseURL+"/rest/system/status", apiKey)
+	if err != nil {
+		return metrics, fmt.Errorf("go system status request: %w", err)
+	}
+	if statusCode != http.StatusOK {
+		return metrics, fmt.Errorf("go system status returned status %d", statusCode)
+	}
+	myID := strings.TrimSpace(stringField(systemStatus, "myID"))
+	if myID == "" {
+		myID = "local-device"
+	}
+
+	covered, assertions, err := probeDaemonAPIEndpoints(baseURL, apiKey, "default", myID)
+	if err != nil {
+		return metrics, fmt.Errorf("go api probe: %w", err)
+	}
+	metrics.APIProbeOK = true
+	metrics.ShutdownRequested = true
+	metrics.CoveredEndpoints = covered
+	metrics.EndpointAssertions = assertions
+
+	if err := proc.wait(shutdownTimeout); err != nil {
+		return metrics, fmt.Errorf("go daemon shutdown wait: %w", err)
+	}
+	return metrics, nil
+}
+
+func runRustDaemonAPISurface(seed int64) (apiSurfaceMetrics, error) {
+	metrics := apiSurfaceMetrics{
+		Seed:           seed,
+		WorkloadDigest: workloadDigest("daemon-api-surface", seed),
+	}
+	root, err := os.MkdirTemp("", "syncthing-rs-api-surface-")
+	if err != nil {
+		return metrics, fmt.Errorf("create temp root: %w", err)
+	}
+	defer os.RemoveAll(root)
+
+	folderDir := filepath.Join(root, "folder")
+	dbRoot := filepath.Join(root, "db")
+	if err := prepareSoakFolder(folderDir, seed); err != nil {
+		return metrics, err
+	}
+	if err := os.MkdirAll(dbRoot, 0o755); err != nil {
+		return metrics, fmt.Errorf("create rust db root: %w", err)
+	}
+
+	apiPort, err := freePort()
+	if err != nil {
+		return metrics, err
+	}
+	bepPort, err := freePort()
+	if err != nil {
+		return metrics, err
+	}
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", apiPort)
+
+	proc := &daemonProc{
+		cmd: exec.Command(
+			"cargo", "run", "--quiet", "--manifest-path", "syncthing-rs/Cargo.toml", "--",
+			"daemon",
+			"--folder", fmt.Sprintf("default:%s", folderDir),
+			"--db-root", dbRoot,
+			"--api-listen", fmt.Sprintf("127.0.0.1:%d", apiPort),
+			"--listen", fmt.Sprintf("127.0.0.1:%d", bepPort),
+		),
+	}
+	if err := proc.start(); err != nil {
+		return metrics, fmt.Errorf("start rust daemon: %w", err)
+	}
+	defer proc.stop()
+	metrics.FolderConfigured = true
+
+	if err := waitForPing(baseURL, "", startupTimeout); err != nil {
+		return metrics, fmt.Errorf("rust daemon startup: %w (stderr=%s)", err, strings.TrimSpace(proc.stderr.String()))
+	}
+	if err := verifyRuntimeIdentity(baseURL, "", "rust"); err != nil {
+		return metrics, fmt.Errorf("rust runtime identity check: %w", err)
+	}
+
+	if _, _, err := requestJSON(http.MethodPost, baseURL+"/rest/db/scan?folder=default", ""); err != nil {
+		return metrics, fmt.Errorf("rust scan request: %w", err)
+	}
+	metrics.ScanOK = true
+
+	systemStatus, statusCode, err := requestJSON(http.MethodGet, baseURL+"/rest/system/status", "")
+	if err != nil {
+		return metrics, fmt.Errorf("rust system status request: %w", err)
+	}
+	if statusCode != http.StatusOK {
+		return metrics, fmt.Errorf("rust system status returned status %d", statusCode)
+	}
+	myID := strings.TrimSpace(stringField(systemStatus, "myID"))
+	if myID == "" {
+		myID = "local-device"
+	}
+
+	covered, assertions, err := probeDaemonAPIEndpoints(baseURL, "", "default", myID)
+	if err != nil {
+		return metrics, fmt.Errorf("rust api probe: %w", err)
+	}
+	metrics.APIProbeOK = true
+	metrics.ShutdownRequested = true
+	metrics.CoveredEndpoints = covered
+	metrics.EndpointAssertions = assertions
+
+	if err := proc.wait(shutdownTimeout); err != nil {
+		return metrics, fmt.Errorf("rust daemon shutdown wait: %w", err)
+	}
+	return metrics, nil
+}
+
+func probeDaemonAPIEndpoints(baseURL, apiKey, folderID, deviceID string) ([]string, map[string]any, error) {
+	requiredEndpoints, err := loadRequiredAPIEndpointsForProbe()
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(requiredEndpoints) == 0 {
+		return nil, nil, errors.New("required api endpoints list is empty")
+	}
+
+	covered := make([]string, 0, len(requiredEndpoints))
+	assertions := make(map[string]any, len(requiredEndpoints))
+	nonShutdown := make([]string, 0, len(requiredEndpoints))
+	hasShutdown := false
+	for _, endpoint := range requiredEndpoints {
+		if endpoint == "POST /rest/system/shutdown" {
+			hasShutdown = true
+			continue
+		}
+		nonShutdown = append(nonShutdown, endpoint)
+	}
+
+	for _, endpoint := range nonShutdown {
+		method, target, err := apiProbeTarget(baseURL, endpoint, folderID, deviceID)
+		if err != nil {
+			return nil, nil, err
+		}
+		payload, statusCode, err := requestJSONAny(method, target, apiKey)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s probe failed: %w", endpoint, err)
+		}
+		responseKind, presentKeys := apiProbeResponseShape(payload)
+		requiredKeys := requiredAPIResponseKeysForProbe(endpoint)
+		presentSet := make(map[string]struct{}, len(presentKeys))
+		for _, k := range presentKeys {
+			presentSet[k] = struct{}{}
+		}
+		missingKeys := make([]string, 0)
+		for _, rk := range requiredKeys {
+			if _, found := presentSet[rk]; !found {
+				missingKeys = append(missingKeys, rk)
+			}
+		}
+		if len(missingKeys) > 0 {
+			return nil, nil, fmt.Errorf("%s probe missing required keys: %v (present=%v)", endpoint, missingKeys, presentKeys)
+		}
+		assertions[endpoint] = map[string]any{
+			"status_code":   statusCode,
+			"response_kind": responseKind,
+			"required_keys": requiredKeys,
+			"present_keys":  presentKeys,
+		}
+		covered = append(covered, endpoint)
+	}
+
+	if hasShutdown {
+		method, target, err := apiProbeTarget(baseURL, "POST /rest/system/shutdown", folderID, deviceID)
+		if err != nil {
+			return nil, nil, err
+		}
+		payload, statusCode, err := requestJSONAny(method, target, apiKey)
+		if err != nil {
+			return nil, nil, fmt.Errorf("POST /rest/system/shutdown probe failed: %w", err)
+		}
+		responseKind, presentKeys := apiProbeResponseShape(payload)
+		requiredKeys := requiredAPIResponseKeysForProbe("POST /rest/system/shutdown")
+		presentSet := make(map[string]struct{}, len(presentKeys))
+		for _, k := range presentKeys {
+			presentSet[k] = struct{}{}
+		}
+		missingKeys := make([]string, 0)
+		for _, rk := range requiredKeys {
+			if _, found := presentSet[rk]; !found {
+				missingKeys = append(missingKeys, rk)
+			}
+		}
+		if len(missingKeys) > 0 {
+			return nil, nil, fmt.Errorf("POST /rest/system/shutdown probe missing required keys: %v (present=%v)", missingKeys, presentKeys)
+		}
+		assertions["POST /rest/system/shutdown"] = map[string]any{
+			"status_code":   statusCode,
+			"response_kind": responseKind,
+			"required_keys": requiredKeys,
+			"present_keys":  presentKeys,
+		}
+		covered = append(covered, "POST /rest/system/shutdown")
+	}
+
+	sort.Strings(covered)
+	return covered, assertions, nil
+}
+
+func loadRequiredAPIEndpointsForProbe() ([]string, error) {
+	gatesPath := strings.TrimSpace(os.Getenv("PARITY_REPLACEMENT_GATES_PATH"))
+	if gatesPath == "" {
+		gatesPath = "parity/replacement-gates.json"
+	}
+	bs, err := os.ReadFile(gatesPath)
+	if err != nil {
+		return nil, fmt.Errorf("read replacement gates: %w", err)
+	}
+	var cfg replacementGateConfig
+	if err := json.Unmarshal(bs, &cfg); err != nil {
+		return nil, fmt.Errorf("decode replacement gates: %w", err)
+	}
+	return dedupeSortedNonEmpty(cfg.RequiredAPIEndpoints), nil
+}
+
+func apiProbeTarget(baseURL, endpoint, folderID, deviceID string) (string, string, error) {
+	switch endpoint {
+	case "GET /rest/system/ping":
+		return http.MethodGet, baseURL + "/rest/system/ping", nil
+	case "GET /rest/system/version":
+		return http.MethodGet, baseURL + "/rest/system/version", nil
+	case "GET /rest/system/status":
+		return http.MethodGet, baseURL + "/rest/system/status", nil
+	case "GET /rest/system/connections":
+		return http.MethodGet, baseURL + "/rest/system/connections", nil
+	case "GET /rest/config":
+		return http.MethodGet, baseURL + "/rest/config", nil
+	case "GET /rest/cluster/pending/devices":
+		return http.MethodGet, baseURL + "/rest/cluster/pending/devices", nil
+	case "GET /rest/cluster/pending/folders":
+		return http.MethodGet, baseURL + "/rest/cluster/pending/folders", nil
+	case "GET /rest/db/status":
+		return http.MethodGet, encodeURLQuery(baseURL+"/rest/db/status", url.Values{"folder": []string{folderID}}), nil
+	case "GET /rest/db/completion":
+		return http.MethodGet, encodeURLQuery(baseURL+"/rest/db/completion", url.Values{
+			"folder": []string{folderID},
+			"device": []string{deviceID},
+		}), nil
+	case "GET /rest/db/file":
+		return http.MethodGet, encodeURLQuery(baseURL+"/rest/db/file", url.Values{
+			"folder": []string{folderID},
+			"file":   []string{"a.txt"},
+		}), nil
+	case "GET /rest/db/ignores":
+		return http.MethodGet, encodeURLQuery(baseURL+"/rest/db/ignores", url.Values{"folder": []string{folderID}}), nil
+	case "GET /rest/db/localchanged":
+		return http.MethodGet, encodeURLQuery(baseURL+"/rest/db/localchanged", url.Values{"folder": []string{folderID}}), nil
+	case "GET /rest/db/need":
+		return http.MethodGet, encodeURLQuery(baseURL+"/rest/db/need", url.Values{
+			"folder": []string{folderID},
+			"limit":  []string{"10"},
+		}), nil
+	case "GET /rest/db/remoteneed":
+		return http.MethodGet, encodeURLQuery(baseURL+"/rest/db/remoteneed", url.Values{
+			"folder": []string{folderID},
+			"device": []string{deviceID},
+		}), nil
+	case "GET /rest/db/browse":
+		return http.MethodGet, encodeURLQuery(baseURL+"/rest/db/browse", url.Values{
+			"folder": []string{folderID},
+			"limit":  []string{"10"},
+		}), nil
+	case "POST /rest/db/scan":
+		return http.MethodPost, encodeURLQuery(baseURL+"/rest/db/scan", url.Values{"folder": []string{folderID}}), nil
+	case "POST /rest/db/override":
+		return http.MethodPost, encodeURLQuery(baseURL+"/rest/db/override", url.Values{"folder": []string{folderID}}), nil
+	case "POST /rest/db/revert":
+		return http.MethodPost, encodeURLQuery(baseURL+"/rest/db/revert", url.Values{"folder": []string{folderID}}), nil
+	case "POST /rest/system/shutdown":
+		return http.MethodPost, baseURL + "/rest/system/shutdown", nil
+	default:
+		return "", "", fmt.Errorf("unsupported required api endpoint %q", endpoint)
+	}
+}
+
+func requiredAPIResponseKeysForProbe(endpoint string) []string {
+	switch endpoint {
+	case "GET /rest/system/version":
+		return []string{"version", "longVersion", "os", "arch"}
+	case "GET /rest/system/status":
+		return []string{"myID", "uptime", "alloc", "sys", "goroutines", "startTime", "pathSeparator", "urVersionMax", "connectionServiceStatus", "discoveryStatus", "guiAddressUsed"}
+	case "GET /rest/system/connections":
+		return []string{"total", "connections"}
+	case "GET /rest/db/status":
+		return []string{"state", "localFiles", "needFiles"}
+	case "GET /rest/db/completion":
+		return []string{"completion", "globalBytes", "needBytes", "globalItems", "needItems", "needDeletes", "sequence", "remoteState"}
+	case "GET /rest/db/file":
+		return []string{"global", "local", "availability"}
+	case "GET /rest/db/ignores":
+		return []string{"ignore", "expanded", "error"}
+	case "GET /rest/db/localchanged":
+		return []string{"files", "page", "perpage"}
+	case "GET /rest/db/need":
+		return []string{"progress", "queued", "rest", "page", "perpage"}
+	case "GET /rest/db/remoteneed":
+		return []string{"files", "page", "perpage"}
+	case "GET /rest/db/browse":
+		return []string{}
+	case "POST /rest/db/scan":
+		return []string{}
+	case "GET /rest/cluster/pending/devices":
+		return []string{}
+	case "GET /rest/cluster/pending/folders":
+		return []string{}
+	case "GET /rest/config":
+		return []string{"folders", "devices"}
+	case "POST /rest/system/shutdown":
+		return []string{"ok"}
+	default:
+		return []string{}
+	}
+}
+
+func apiProbeResponseShape(payload any) (string, []string) {
+	switch typed := payload.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		return "object", keys
+	case []any:
+		return "array", []string{}
+	case nil:
+		return "null", []string{}
+	default:
+		return "scalar", []string{}
+	}
 }
 
 func runGoExternalSoak(seed int64) (soakMetrics, error) {

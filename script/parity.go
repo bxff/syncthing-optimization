@@ -1613,8 +1613,8 @@ func validateReplacementAPIEndpointCoverage(report *guardrailReport, required []
 		}
 
 		presentKeys := toStringSet(assertion["present_keys"])
-		requiredKeys := requiredKeysByEndpoint[endpoint]
-		if len(requiredKeys) == 0 {
+		requiredKeys, hasRequiredRule := requiredKeysByEndpoint[endpoint]
+		if !hasRequiredRule {
 			requiredKeys = stringSliceFromAny(assertion["required_keys"])
 		}
 		for _, key := range requiredKeys {
@@ -1636,20 +1636,24 @@ func validateReplacementAPIEndpointCoverage(report *guardrailReport, required []
 
 func replacementAPIRequiredResponseKeys() map[string][]string {
 	return map[string][]string{
-		"GET /rest/system/version":     {"version", "longVersion", "os", "arch"},
-		"GET /rest/system/status":      {"myID", "uptimeS", "memoryEstimatedBytes", "memoryBudgetBytes"},
-		"GET /rest/system/connections": {"total", "connections"},
-		"GET /rest/db/browse":          {"folder", "limit", "items"},
-		"GET /rest/db/completion":      {"folder", "device", "completionPct", "needBytes"},
-		"GET /rest/db/file":            {"folder", "file", "exists"},
-		"GET /rest/db/ignores":         {"folder", "count", "patterns"},
-		"GET /rest/db/localchanged":    {"folder", "count", "files"},
-		"GET /rest/db/need":            {"folder", "limit", "items"},
-		"GET /rest/db/remoteneed":      {"folder", "device", "count", "items"},
-		"GET /rest/db/status":          {"folder", "state", "localFiles", "needFiles"},
-		"POST /rest/db/override":       {"folder", "action", "ok"},
-		"POST /rest/db/revert":         {"folder", "action", "ok"},
-		"POST /rest/db/scan":           {"folder", "sequence", "state", "stats"},
+		"GET /rest/system/version":          {"version", "longVersion", "os", "arch"},
+		"GET /rest/system/status":           {"myID", "uptime", "alloc", "sys", "goroutines", "startTime", "pathSeparator", "urVersionMax", "connectionServiceStatus", "discoveryStatus", "guiAddressUsed"},
+		"GET /rest/system/connections":      {"total", "connections"},
+		"GET /rest/cluster/pending/devices": {},
+		"GET /rest/cluster/pending/folders": {},
+		"GET /rest/config":                  {"devices", "folders"},
+		"GET /rest/db/browse":               {},
+		"GET /rest/db/completion":           {"completion", "globalBytes", "needBytes", "globalItems", "needItems", "needDeletes", "sequence", "remoteState"},
+		"GET /rest/db/file":                 {"global", "local", "availability"},
+		"GET /rest/db/ignores":              {"ignore", "expanded", "error"},
+		"GET /rest/db/localchanged":         {"files", "page", "perpage"},
+		"GET /rest/db/need":                 {"progress", "queued", "rest", "page", "perpage"},
+		"GET /rest/db/remoteneed":           {"files", "page", "perpage"},
+		"GET /rest/db/status":               {"state", "localFiles", "needFiles"},
+		"POST /rest/db/override":            {},
+		"POST /rest/db/revert":              {},
+		"POST /rest/db/scan":                {},
+		"POST /rest/system/shutdown":        {"ok"},
 	}
 }
 
@@ -1910,15 +1914,37 @@ func missingRequiredStrings(required []string, covered map[string]struct{}) []st
 }
 
 func validateGoVsRustRESTSurface(report *guardrailReport) {
-	goSurface, err := extractGoRESTSurface()
-	if err != nil {
+	gates := replacementGates{}
+	if err := readJSON("parity/replacement-gates.json", &gates); err != nil {
 		report.Failures = append(report.Failures, reportFailure{
 			Rule:    "replacement-rest-surface",
-			Path:    "lib/api/api.go",
-			Message: fmt.Sprintf("failed to extract go rest surface: %v", err),
+			Path:    "parity/replacement-gates.json",
+			Message: fmt.Sprintf("failed to read replacement gates: %v", err),
 		})
 		return
 	}
+
+	requiredEndpoints := dedupeSortedStrings(gates.RequiredAPIEndpoints)
+	if len(requiredEndpoints) == 0 {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-rest-surface",
+			Path:    "parity/replacement-gates.json",
+			Message: "replacement gates required_api_endpoints is empty",
+		})
+		return
+	}
+
+	goSnapshot := map[string]any{}
+	const goPath = "parity/harness/snapshots/go-daemon-api-surface.json"
+	if err := readJSON(goPath, &goSnapshot); err != nil {
+		report.Failures = append(report.Failures, reportFailure{
+			Rule:    "replacement-rest-surface",
+			Path:    goPath,
+			Message: "missing or invalid go daemon api surface snapshot",
+		})
+		return
+	}
+	goSurface := toStringSet(goSnapshot["covered_endpoints"])
 
 	rustSnapshot := map[string]any{}
 	const rustPath = "parity/harness/snapshots/rust-daemon-api-surface.json"
@@ -1932,21 +1958,19 @@ func validateGoVsRustRESTSurface(report *guardrailReport) {
 	}
 	rustSurface := toStringSet(rustSnapshot["covered_endpoints"])
 
-	missing := make([]string, 0)
-	for endpoint := range goSurface {
-		if _, ok := rustSurface[endpoint]; ok {
-			continue
-		}
-		missing = append(missing, endpoint)
-	}
-	sort.Strings(missing)
-	const gapPath = "parity/diff-reports/replacement-rest-surface-missing.json"
-	if len(missing) == 0 {
+	missingGo := missingRequiredStrings(requiredEndpoints, goSurface)
+	missingRust := missingRequiredStrings(requiredEndpoints, rustSurface)
+	if len(missingGo) == 0 && len(missingRust) == 0 {
+		const gapPath = "parity/diff-reports/replacement-rest-surface-missing.json"
 		_ = os.Remove(gapPath)
 		return
 	}
 
-	if err := writeReplacementGapFile(gapPath, "replacement-rest-surface", len(goSurface), len(rustSurface), missing); err != nil {
+	missingUnion := append([]string{}, missingGo...)
+	missingUnion = append(missingUnion, missingRust...)
+	missingUnion = dedupeSortedStrings(missingUnion)
+	const gapPath = "parity/diff-reports/replacement-rest-surface-missing.json"
+	if err := writeReplacementGapFile(gapPath, "replacement-rest-surface", len(goSurface), len(rustSurface), missingUnion); err != nil {
 		report.Failures = append(report.Failures, reportFailure{
 			Rule:    "replacement-rest-surface",
 			Path:    gapPath,
@@ -1954,22 +1978,35 @@ func validateGoVsRustRESTSurface(report *guardrailReport) {
 		})
 	}
 
-	preview := missing
-	if len(preview) > 25 {
-		preview = preview[:25]
-	}
 	report.Failures = append(report.Failures, reportFailure{
-		Rule: "replacement-rest-surface",
-		Path: gapPath,
-		Message: fmt.Sprintf(
-			"go exposes %d REST endpoints while rust daemon evidence covers %d; missing %d endpoint(s), first %d: %s",
-			len(goSurface),
-			len(rustSurface),
-			len(missing),
-			len(preview),
-			strings.Join(preview, ", "),
-		),
+		Rule:    "replacement-rest-surface",
+		Path:    gapPath,
+		Message: fmt.Sprintf("required daemon API endpoints missing (go=%d rust=%d)", len(missingGo), len(missingRust)),
 	})
+}
+
+func dedupeSortedStrings(values []string) []string {
+	if len(values) == 0 {
+		return []string{}
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	if len(out) == 0 {
+		return []string{}
+	}
+	return out
 }
 
 func extractGoRESTSurface() (map[string]struct{}, error) {

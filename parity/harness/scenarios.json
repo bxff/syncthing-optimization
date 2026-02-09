@@ -43,7 +43,8 @@
       "severity": "P0",
       "required": true,
       "tags": [
-        "core"
+        "core",
+        "external-soak"
       ],
       "comparator": "json-equal",
       "go": {
@@ -182,22 +183,23 @@
         "command": [
           "go",
           "run",
-          "./script/parity_harness_go.go",
+          "./script/parity_external_soak.go",
           "scenario",
-          "daemon-api-surface"
+          "daemon-api-surface",
+          "--impl",
+          "go"
         ],
         "snapshot_path": "parity/harness/snapshots/go-daemon-api-surface.json"
       },
       "rust": {
         "command": [
-          "cargo",
+          "go",
           "run",
-          "--quiet",
-          "--manifest-path",
-          "syncthing-rs/Cargo.toml",
-          "--",
-          "daemon-scenario",
-          "daemon-api-surface"
+          "./script/parity_external_soak.go",
+          "scenario",
+          "daemon-api-surface",
+          "--impl",
+          "rust"
         ],
         "snapshot_path": "parity/harness/snapshots/rust-daemon-api-surface.json"
       }

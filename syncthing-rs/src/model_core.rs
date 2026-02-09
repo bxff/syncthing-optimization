@@ -15,6 +15,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 
 pub(crate) static ErrFolderMissing: &str = "folder missing";
 pub(crate) static ErrFolderNotRunning: &str = "folder not running";
@@ -94,16 +95,20 @@ impl FolderCompletion {
         self.GlobalItems += other.GlobalItems;
         self.GlobalBytes += other.GlobalBytes;
         self.Sequence = self.Sequence.max(other.Sequence);
+        self.setCompletionPct();
     }
 
     pub(crate) fn setCompletionPct(&mut self) {
-        if self.GlobalItems <= 0 {
+        if self.GlobalBytes <= 0 {
             self.CompletionPct = 100;
             return;
         }
-        let done = (self.GlobalItems - self.NeedItems - self.NeedDeletes).max(0);
-        let pct = (done as i64 * 100 / self.GlobalItems as i64).clamp(0, 100);
+        let need_ratio = self.NeedBytes as f64 / self.GlobalBytes as f64;
+        let pct = (100_f64 * (1_f64 - need_ratio)).clamp(0_f64, 100_f64);
         self.CompletionPct = pct as i32;
+        if self.NeedBytes == 0 && self.NeedDeletes > 0 {
+            self.CompletionPct = 95;
+        }
     }
 
     pub(crate) fn Map(&self) -> BTreeMap<&'static str, Value> {
@@ -415,11 +420,66 @@ impl model {
             .unwrap_or(false)
     }
 
-    pub(crate) fn ConnectionStats(&self, device: &str) -> Option<ConnectionStats> {
+    pub(crate) fn ConnectionStats(&self) -> BTreeMap<String, Value> {
+        let mut out = BTreeMap::new();
+        let mut connections = BTreeMap::new();
+        for (device, stats) in &self.connections {
+            if device == &self.id {
+                continue;
+            }
+            connections.insert(
+                device.clone(),
+                serde_json::json!({
+                    "address": stats.Address,
+                    "type": stats.Type,
+                    "crypto": stats.Crypto,
+                    "isLocal": stats.IsLocal,
+                    "connected": stats.Connected,
+                    "paused": stats.Paused,
+                    "primary": stats.Primary,
+                    "secondary": stats.Secondary,
+                    "clientVersion": stats.ClientVersion,
+                    "statistics": stats.protocol_Statistics,
+                }),
+            );
+        }
+        out.insert(
+            "connections".to_string(),
+            Value::Object(connections.into_iter().collect()),
+        );
+        let in_total = self
+            .connections
+            .values()
+            .filter_map(|stats| stats.protocol_Statistics.get("inBytesTotal"))
+            .copied()
+            .sum::<i64>();
+        let out_total = self
+            .connections
+            .values()
+            .filter_map(|stats| stats.protocol_Statistics.get("outBytesTotal"))
+            .copied()
+            .sum::<i64>();
+        out.insert(
+            "total".to_string(),
+            serde_json::json!({
+                "inBytesTotal": in_total,
+                "outBytesTotal": out_total,
+            }),
+        );
+        out
+    }
+
+    pub(crate) fn ConnectionStatsForDevice(&self, device: &str) -> Option<ConnectionStats> {
         self.connections.get(device).cloned()
     }
 
-    pub(crate) fn DeviceStatistics(&self, device: &str) -> BTreeMap<String, i64> {
+    pub(crate) fn DeviceStatistics(
+        &self,
+    ) -> Result<BTreeMap<String, BTreeMap<String, i64>>, String> {
+        Ok(self.deviceStatRefs.clone())
+    }
+
+    pub(crate) fn DeviceStatisticsForDevice(&self, device: &str) -> BTreeMap<String, i64> {
         self.deviceStatRefs.get(device).cloned().unwrap_or_default()
     }
 
@@ -431,12 +491,14 @@ impl model {
         Ok(())
     }
 
-    pub(crate) fn DelayScan(&mut self, folder_id: &str) -> Result<(), String> {
-        self.folderRunners
-            .get_mut(folder_id)
-            .ok_or_else(|| ErrFolderMissing.to_string())?
-            .DelayScan();
-        Ok(())
+    pub(crate) fn DelayScan(&mut self, folder_id: &str, next: Duration) {
+        if let Some(folder) = self.folderRunners.get_mut(folder_id) {
+            folder.DelayScan(next);
+        }
+    }
+
+    pub(crate) fn DelayScanImmediate(&mut self, folder_id: &str) {
+        self.DelayScan(folder_id, Duration::from_secs(0))
     }
 
     pub(crate) fn FolderErrors(
@@ -451,12 +513,16 @@ impl model {
     }
 
     pub(crate) fn FolderProgressBytesCompleted(&self, folder_id: &str) -> i64 {
-        let completion = self.folderCompletion(folder_id);
+        let completion = self
+            .Completion("local", folder_id)
+            .unwrap_or_else(|_| FolderCompletion::default());
         completion.GlobalBytes - completion.NeedBytes
     }
 
     pub(crate) fn FolderStatistics(&self, folder_id: &str) -> BTreeMap<String, Value> {
-        let c = self.folderCompletion(folder_id);
+        let c = self
+            .Completion("local", folder_id)
+            .unwrap_or_else(|_| FolderCompletion::default());
         let mut out = BTreeMap::from([
             ("completionPct".to_string(), Value::from(c.CompletionPct)),
             ("needItems".to_string(), Value::from(c.NeedItems)),
@@ -531,47 +597,90 @@ impl model {
         out
     }
 
-    pub(crate) fn Completion(&self, folder_id: &str, _device: &str) -> FolderCompletion {
-        self.folderCompletion(folder_id)
+    pub(crate) fn Completion(
+        &self,
+        device: &str,
+        folder_id: &str,
+    ) -> Result<FolderCompletion, String> {
+        let normalized_device = if device == self.id { "local" } else { device };
+        if folder_id.is_empty() {
+            let mut aggregate = FolderCompletion::default();
+            for cfg in self.folderCfgs.values() {
+                if cfg.paused {
+                    continue;
+                }
+                if normalized_device != "local" && !cfg.shared_with(normalized_device) {
+                    continue;
+                }
+                match self.folderCompletion(normalized_device, &cfg.id) {
+                    Ok(comp) => aggregate.add(&comp),
+                    Err(err) if err == ErrFolderPaused => continue,
+                    Err(err) => return Err(err),
+                }
+            }
+            return Ok(aggregate);
+        }
+        self.folderCompletion(normalized_device, folder_id)
     }
 
-    pub(crate) fn folderCompletion(&self, folder_id: &str) -> FolderCompletion {
-        let global = self.GlobalSize(folder_id);
-        let need = self.NeedSize(folder_id);
-        let mut c = FolderCompletion {
-            GlobalItems: global.0 as i32,
-            GlobalBytes: global.1,
-            NeedItems: need.0 as i32,
-            NeedDeletes: 0,
-            NeedBytes: need.1,
-            Sequence: self.Sequence(folder_id),
-            RemoteState: self
-                .remoteFolderStates
-                .get(folder_id)
-                .cloned()
-                .unwrap_or_else(|| "idle".to_string()),
-            ..Default::default()
-        };
-        c.setCompletionPct();
-        c
+    pub(crate) fn folderCompletion(
+        &self,
+        device: &str,
+        folder_id: &str,
+    ) -> Result<FolderCompletion, String> {
+        self.checkFolderRunningRLocked(folder_id)?;
+        let state = self
+            .remoteFolderStates
+            .get(&format!("{device}:{folder_id}"))
+            .or_else(|| self.remoteFolderStates.get(folder_id))
+            .cloned()
+            .unwrap_or_else(|| "idle".to_string());
+        let db = self
+            .sdb
+            .read()
+            .map_err(|_| "db lock poisoned".to_string())?;
+        let global = db.count_global(folder_id)?;
+        let need = db.count_need(folder_id, device)?;
+        let sequence = db.get_device_sequence(folder_id, device)?;
+        Ok(newFolderCompletion(global, need, sequence, &state))
     }
 
     pub(crate) fn CurrentFolderFile(&self, folder_id: &str, path: &str) -> Option<db::FileInfo> {
+        self.CurrentFolderFileStatus(folder_id, path).ok().flatten()
+    }
+
+    pub(crate) fn CurrentFolderFileStatus(
+        &self,
+        folder_id: &str,
+        path: &str,
+    ) -> Result<Option<db::FileInfo>, String> {
+        if !self.folderCfgs.contains_key(folder_id) {
+            return Err(ErrFolderMissing.to_string());
+        }
         self.sdb
             .read()
-            .ok()?
+            .map_err(|_| "db lock poisoned".to_string())?
             .get_device_file(folder_id, "local", path)
-            .ok()
-            .flatten()
+            .map_err(|e| format!("current folder file lookup failed: {e}"))
     }
 
     pub(crate) fn CurrentGlobalFile(&self, folder_id: &str, path: &str) -> Option<db::FileInfo> {
+        self.CurrentGlobalFileStatus(folder_id, path).ok().flatten()
+    }
+
+    pub(crate) fn CurrentGlobalFileStatus(
+        &self,
+        folder_id: &str,
+        path: &str,
+    ) -> Result<Option<db::FileInfo>, String> {
+        if !self.folderCfgs.contains_key(folder_id) {
+            return Err(ErrFolderMissing.to_string());
+        }
         self.sdb
             .read()
-            .ok()?
+            .map_err(|_| "db lock poisoned".to_string())?
             .get_global_file(folder_id, path)
-            .ok()
-            .flatten()
+            .map_err(|e| format!("current global file lookup failed: {e}"))
     }
 
     pub(crate) fn CurrentIgnores(&self, folder_id: &str) -> Vec<String> {
@@ -629,11 +738,21 @@ impl model {
     }
 
     pub(crate) fn AllGlobalFiles(&self, folder_id: &str) -> Vec<db::FileMetadata> {
+        self.AllGlobalFilesStatus(folder_id).unwrap_or_default()
+    }
+
+    pub(crate) fn AllGlobalFilesStatus(
+        &self,
+        folder_id: &str,
+    ) -> Result<Vec<db::FileMetadata>, String> {
+        if !self.folderCfgs.contains_key(folder_id) {
+            return Err(ErrFolderMissing.to_string());
+        }
         self.sdb
             .read()
-            .ok()
-            .and_then(|db| db.all_global_files(folder_id).ok())
-            .unwrap_or_default()
+            .map_err(|_| "db lock poisoned".to_string())?
+            .all_global_files(folder_id)
+            .map_err(|e| format!("all global files query failed: {e}"))
     }
 
     pub(crate) fn AllForBlocksHash(&self, folder_id: &str, hash: &[u8]) -> Vec<db::FileMetadata> {
@@ -892,7 +1011,7 @@ impl model {
         self.folderRunners
             .get_mut(folder_id)
             .ok_or_else(|| ErrFolderMissing.to_string())?
-            .Scan(&[]);
+            .Scan(&[])?;
         Ok(())
     }
 
@@ -904,7 +1023,19 @@ impl model {
         self.folderRunners
             .get_mut(folder_id)
             .ok_or_else(|| ErrFolderMissing.to_string())?
-            .Scan(subs);
+            .Scan(subs)?;
+        Ok(())
+    }
+
+    pub(crate) fn ScheduleForceRescan(
+        &mut self,
+        folder_id: &str,
+        subs: &[String],
+    ) -> Result<(), String> {
+        self.folderRunners
+            .get_mut(folder_id)
+            .ok_or_else(|| ErrFolderMissing.to_string())?
+            .ScheduleForceRescan(subs);
         Ok(())
     }
 
@@ -960,12 +1091,24 @@ impl model {
             .collect()
     }
 
-    pub(crate) fn DismissPendingDevice(&mut self, device: &str) {
+    pub(crate) fn DismissPendingDevice(&mut self, device: &str) -> Result<(), String> {
+        if device.trim().is_empty() {
+            return Err("device id is required".to_string());
+        }
         self.connections.remove(device);
+        Ok(())
     }
 
-    pub(crate) fn DismissPendingFolder(&mut self, folder: &str) {
+    pub(crate) fn DismissPendingFolder(
+        &mut self,
+        _device: &str,
+        folder: &str,
+    ) -> Result<(), String> {
+        if folder.trim().is_empty() {
+            return Err("folder id is required".to_string());
+        }
         self.foldersRunning.remove(folder);
+        Ok(())
     }
 
     pub(crate) fn UsageReportingStats(&self) -> BTreeMap<String, Value> {
@@ -1047,7 +1190,8 @@ impl model {
             .sdb
             .write()
             .map_err(|_| "db lock poisoned".to_string())?;
-        db.update(folder_id, "remote", files.to_vec())
+        db.update(folder_id, "remote", files.to_vec())?;
+        Ok(())
     }
 
     pub(crate) fn IndexUpdate(
@@ -1113,7 +1257,14 @@ impl model {
     }
 
     pub(crate) fn checkFolderRunningRLocked(&self, folder_id: &str) -> Result<(), String> {
-        if !self.foldersRunning.get(folder_id).copied().unwrap_or(false) {
+        match self.folderCfgs.get(folder_id) {
+            None => return Err(ErrFolderMissing.to_string()),
+            Some(cfg) if cfg.paused => return Err(ErrFolderPaused.to_string()),
+            Some(_) => {}
+        }
+        if !self.folderRunners.contains_key(folder_id)
+            || !self.foldersRunning.get(folder_id).copied().unwrap_or(false)
+        {
             return Err(ErrFolderNotRunning.to_string());
         }
         Ok(())
@@ -1307,7 +1458,20 @@ impl service {
         self.model
             .lock()
             .map_err(|_| "service lock poisoned".to_string())?
-            .DelayScan(folder_id)
+            .DelayScanImmediate(folder_id);
+        Ok(())
+    }
+
+    pub(crate) fn DelayScanWithDuration(
+        &self,
+        folder_id: &str,
+        next: Duration,
+    ) -> Result<(), String> {
+        self.model
+            .lock()
+            .map_err(|_| "service lock poisoned".to_string())?
+            .DelayScan(folder_id, next);
+        Ok(())
     }
 
     pub(crate) fn Errors(&self, folder_id: &str) -> Result<Vec<folder_core::FileError>, String> {
@@ -1362,7 +1526,10 @@ impl service {
         folder_id: &str,
         subs: &[String],
     ) -> Result<(), String> {
-        self.Scan(folder_id, subs)
+        self.model
+            .lock()
+            .map_err(|_| "service lock poisoned".to_string())?
+            .ScheduleForceRescan(folder_id, subs)
     }
 
     pub(crate) fn SchedulePull(&self, folder_id: &str) -> Result<(), String> {
@@ -1410,8 +1577,24 @@ pub(crate) fn NewModelWithRuntime(db_root: Option<PathBuf>, memory_cap_mb: Optio
     model_with_runtime(root, cap_mb)
 }
 
-pub(crate) fn newFolderCompletion() -> FolderCompletion {
-    FolderCompletion::default()
+pub(crate) fn newFolderCompletion(
+    global: db::Counts,
+    need: db::Counts,
+    sequence: i64,
+    state: &str,
+) -> FolderCompletion {
+    let mut comp = FolderCompletion {
+        GlobalBytes: global.bytes,
+        NeedBytes: need.bytes,
+        GlobalItems: (global.files + global.directories + global.symlinks) as i32,
+        NeedItems: (need.files + need.directories + need.symlinks) as i32,
+        NeedDeletes: need.deleted as i32,
+        Sequence: sequence,
+        RemoteState: state.to_string(),
+        ..Default::default()
+    };
+    comp.setCompletionPct();
+    comp
 }
 
 pub(crate) fn newFolderConfiguration(id: &str, path: &str) -> FolderConfiguration {
@@ -1561,8 +1744,8 @@ mod tests {
     #[test]
     fn completion_map_sets_percentage() {
         let mut c = FolderCompletion {
-            NeedItems: 2,
-            GlobalItems: 10,
+            NeedBytes: 20,
+            GlobalBytes: 100,
             ..Default::default()
         };
         c.setCompletionPct();
@@ -1652,10 +1835,15 @@ mod tests {
 
     #[test]
     fn new_model_with_runtime_fails_when_root_is_not_directory() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "syncthing-rs-runtime-invalid-root-{}",
+            "syncthing-rs-runtime-invalid-root-{}-{nanos}",
             std::process::id()
         ));
+        let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_file(&root);
         fs::write(&root, b"not-a-directory").expect("create blocking file");
 

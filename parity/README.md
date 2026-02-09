@@ -63,6 +63,44 @@ Run PR drift guard (require parity artifacts when Rust/parity-critical files cha
 GOCACHE=/tmp/go-cache go run ./script/parity_pr_guard.go --base origin/main --head HEAD
 ```
 
+Build agentic Go↔Rust function-pair review plan (from `mapping-rust.json`):
+
+```bash
+go run ./script/parity_pair_review.go plan \
+  --mapping parity/mapping-rust.json \
+  --manifest parity/feature-manifest.json \
+  --out parity/diff-reports/function-pair-review-plan.json
+```
+
+Run tiered function-pair review with Opus 4.6 (`opencode`):
+
+```bash
+go run ./script/parity_pair_review.go run \
+  --plan parity/diff-reports/function-pair-review-plan.json \
+  --tier T1 \
+  --workers 4 \
+  --timeout 15m \
+  --model google/antigravity-claude-opus-4-6-thinking \
+  --out parity/diff-reports/function-pair-discrepancy-report.json
+```
+
+Dry-run prompt/materialization (no agent calls):
+
+```bash
+go run ./script/parity_pair_review.go run \
+  --plan parity/diff-reports/function-pair-review-plan.json \
+  --tier T1 \
+  --limit 10 \
+  --dry-run \
+  --out parity/diff-reports/function-pair-discrepancy-report-dryrun.json
+```
+
+The function-pair reviewer writes:
+- `parity/diff-reports/function-pair-review-plan.json`: tiered review queue.
+- `parity/diff-reports/function-pair-discrepancy-report.json`: structured discrepancy summary.
+- `parity/diff-reports/function-pair-prompts/*.txt`: per-pair prompt artifacts.
+- `parity/diff-reports/function-pair-raw/*.txt`: raw agent responses for auditability.
+
 ## Status values
 
 - `missing`: feature not implemented in Rust.

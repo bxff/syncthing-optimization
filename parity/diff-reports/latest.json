@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-02-08T10:40:31Z",
+  "generated_at": "2026-02-08T22:00:37Z",
   "produced_by": "parity-harness",
   "input_roots": [
     "syncthing-rs/src",
@@ -17,7 +17,7 @@
     "script/parity_harness.go",
     "script/parity_harness_go.go"
   ],
-  "inputs_digest": "6924cdb600352413b715447c4cf96ccb84fcd018447350f653c42aef594d657b",
+  "inputs_digest": "db31a05fbd1fc1f97e7cb7d901c8f6d0c62833187f7ef06b97ef1cdcfb96e803",
   "match": true,
   "mismatches": [],
   "scenarios": [
@@ -47,9 +47,9 @@
       "required": true,
       "status": "pass",
       "message": "go and rust outputs match (runs=1)",
-      "evidence": "synthetic",
-      "go_evidence": "synthetic",
-      "rust_evidence": "daemon"
+      "evidence": "external-soak",
+      "go_evidence": "external-soak",
+      "rust_evidence": "external-soak"
     },
     {
       "id": "external-crash-recovery-restart",

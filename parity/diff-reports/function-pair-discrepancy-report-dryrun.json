@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-02-08T22:17:51Z",
+  "plan_path": "parity/diff-reports/function-pair-review-plan.json",
+  "model": "google/antigravity-claude-opus-4-6-thinking",
+  "total_items": 2,
+  "completed": 2,
+  "no_findings": 2,
+  "with_findings": 0,
+  "errors": 0,
+  "tier_counts": {
+    "T1": 2,
+    "T2": 0,
+    "T3": 0
+  },
+  "severity_count": {
+    "P0": 0,
+    "P1": 0,
+    "P2": 0,
+    "P3": 0
+  },
+  "findings": [],
+  "results": [
+    {
+      "id": "feat-bd7c4406ffe1",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.AllGlobalFiles",
+      "rust_symbol": "all_global_files",
+      "status": "dry-run",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-bd7c4406ffe1.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-bd7c4406ffe1.txt",
+      "duration_ms": 1,
+      "finding_count": 0
+    },
+    {
+      "id": "feat-e03a3eb8083c",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.AllGlobalFilesPrefix",
+      "rust_symbol": "all_global_files_prefix",
+      "status": "dry-run",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-e03a3eb8083c.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-e03a3eb8083c.txt",
+      "duration_ms": 1,
+      "finding_count": 0
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-02-08T22:19:02Z",
+  "plan_path": "parity/diff-reports/function-pair-review-plan.json",
+  "model": "google/antigravity-claude-opus-4-6-thinking",
+  "total_items": 1,
+  "completed": 1,
+  "no_findings": 0,
+  "with_findings": 1,
+  "errors": 0,
+  "tier_counts": {
+    "T1": 1,
+    "T2": 0,
+    "T3": 0
+  },
+  "severity_count": {
+    "P0": 0,
+    "P1": 1,
+    "P2": 1,
+    "P3": 0
+  },
+  "findings": [
+    {
+      "id": "feat-bd7c4406ffe1",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Eager Vec replaces lazy iterator losing streaming semantics",
+      "location": "syncthing-rs/src/db.rs:147",
+      "message": "Go AllGlobalFiles returns (iter.Seq[FileMetadata], func() error) — a lazy, streaming iterator paired with a deferred error callback invoked after iteration completes. Rust all_global_files returns Result\u003cVec\u003cFileMetadata\u003e, String\u003e, which eagerly materializes all results into a single Vec before returning and reports errors upfront via Result rather than post-iteration. This changes three behaviors: (1) memory profile is unbounded-upfront instead of incremental, directly affecting the memory-cap-50mb and memory-cap-diagnostics scenarios; (2) callers cannot observe partial results before an error because Result fails before any data is available, whereas Go callers receive items up to the point of failure and then read the error from the closure; (3) early termination by dropping the iterator in Go avoids fetching remaining rows, but the Rust port always fetches all rows regardless of how many the caller consumes."
+    },
+    {
+      "id": "feat-bd7c4406ffe1",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Deferred error closure semantics lost",
+      "location": "syncthing-rs/src/db.rs:147",
+      "message": "In Go, the second return value func() error is a closure that must be called after the iterator is exhausted to check for errors encountered during iteration (e.g., mid-scan I/O failures or corruption). Rust collapses this into a single Result\u003cVec\u003c…\u003e, String\u003e which can only represent success-with-all-data or failure-with-no-data. Any Go caller pattern that processes partial data and then inspects the error (common in crash-recovery and wal-free-durability scenarios) has no Rust equivalent and will silently differ in error-handling behavior."
+    }
+  ],
+  "results": [
+    {
+      "id": "feat-bd7c4406ffe1",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.AllGlobalFiles",
+      "rust_symbol": "all_global_files",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-bd7c4406ffe1.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-bd7c4406ffe1.txt",
+      "duration_ms": 42226,
+      "finding_count": 2
+    }
+  ]
+}

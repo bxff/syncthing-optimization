@@ -5,7 +5,7 @@
 use crate::config::{FolderConfiguration, MemoryPolicy};
 use crate::db::{self, Db};
 use crate::folder_modes::{mode_actions, FolderMode};
-use crate::planner::{classify_paths, compute_need, VersionedFile};
+use crate::planner::{compute_need, VersionedFile};
 use crate::store::compare_path_order;
 use crate::walker::{walk_deterministic, WalkConfig};
 use crc32fast::Hasher;
@@ -15,7 +15,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 pub(crate) const deletedBatchSize: usize = 1000;
 pub(crate) const kqueueItemCountThreshold: usize = 100_000;
@@ -36,7 +36,7 @@ pub(crate) const defaultCopiers: usize = 4;
 pub(crate) const defaultPullerPause: f64 = 1.0;
 pub(crate) const defaultPullerPendingKiB: usize = 64 * 1024;
 pub(crate) const maxPullerIterations: usize = 4096;
-pub(crate) const retainBits: u32 = 0xFFFF;
+pub(crate) const retainBits: u32 = 0o7000;
 
 pub(crate) static activity: &str = "folder_activity";
 pub(crate) static blockStats: &str = "block_stats";
@@ -262,8 +262,9 @@ pub(crate) struct syncRequest {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct scanBatch {
     pub(crate) f: String,
+    pub(crate) db: Option<Arc<RwLock<db::WalFreeDb>>>,
     pub(crate) updateBatch: Vec<db::FileInfo>,
-    pub(crate) toRemove: BTreeSet<String>,
+    pub(crate) toRemove: Vec<String>,
 }
 
 impl scanBatch {
@@ -272,30 +273,37 @@ impl scanBatch {
     }
 
     pub(crate) fn Remove(&mut self, path: &str) {
-        self.toRemove.insert(path.to_string());
+        self.toRemove.push(path.to_string());
     }
 
-    pub(crate) fn Flush(&mut self) -> (Vec<db::FileInfo>, Vec<String>) {
+    pub(crate) fn Flush(&mut self) -> Result<(Vec<db::FileInfo>, Vec<String>), String> {
         let mut updates = Vec::new();
         std::mem::swap(&mut updates, &mut self.updateBatch);
-        let removes = self.flushToRemove();
-        (updates, removes)
+        let removes = self.flushToRemove()?;
+        Ok((updates, removes))
     }
 
     pub(crate) fn FlushIfFull(
         &mut self,
         threshold: usize,
-    ) -> Option<(Vec<db::FileInfo>, Vec<String>)> {
+    ) -> Result<Option<(Vec<db::FileInfo>, Vec<String>)>, String> {
         if self.updateBatch.len() + self.toRemove.len() >= threshold {
-            return Some(self.Flush());
+            return Ok(Some(self.Flush()?));
         }
-        None
+        Ok(None)
     }
 
-    pub(crate) fn flushToRemove(&mut self) -> Vec<String> {
-        let removes = self.toRemove.iter().cloned().collect::<Vec<_>>();
+    pub(crate) fn flushToRemove(&mut self) -> Result<Vec<String>, String> {
+        if self.toRemove.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some(db) = &self.db {
+            let mut guard = db.write().map_err(|_| "db lock poisoned".to_string())?;
+            guard.drop_files_named(&self.f, LOCAL_DEVICE_ID, &self.toRemove)?;
+        }
+        let removes = self.toRemove.clone();
         self.toRemove.clear();
-        removes
+        Ok(removes)
     }
 }
 
@@ -359,6 +367,7 @@ pub(crate) struct folder {
     pub(crate) runtimeMemoryBudget: Arc<RuntimeMemoryBudget>,
     pub(crate) forcedRescanPaths: BTreeSet<String>,
     pub(crate) scanScheduled: bool,
+    pub(crate) scanDelayUntil: Option<Instant>,
     pub(crate) pullScheduled: bool,
     pub(crate) errorsMut: Vec<FileError>,
     pub(crate) watchErr: Option<String>,
@@ -372,7 +381,7 @@ pub(crate) struct folder {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct ScanExecutionStats {
+pub(crate) struct ScanExecutionStats {
     files_seen: usize,
     files_updated: usize,
     files_deleted: usize,
@@ -473,12 +482,15 @@ impl folder {
         self.pullScheduled = true;
     }
 
-    pub(crate) fn DelayScan(&mut self) {
-        self.scanScheduled = false;
+    pub(crate) fn DelayScan(&mut self, next: Duration) {
+        self.scanScheduled = true;
+        self.scanDelayUntil = Instant::now().checked_add(next);
     }
 
     pub(crate) fn Errors(&self) -> Vec<FileError> {
-        self.errorsMut.clone()
+        let mut errors = self.errorsMut.clone();
+        errors.sort_by(|a, b| a.Path.cmp(&b.Path).then_with(|| a.Err.cmp(&b.Err)));
+        errors
     }
 
     pub(crate) fn Jobs(&self) -> BTreeMap<&'static str, bool> {
@@ -494,8 +506,8 @@ impl folder {
     }
 
     pub(crate) fn Revert(&mut self) {
-        self.forcedRescanPaths.clear();
         self.scanScheduled = true;
+        self.pullScheduled = true;
     }
 
     pub(crate) fn Reschedule(&mut self) {
@@ -503,24 +515,23 @@ impl folder {
         self.SchedulePull();
     }
 
-    pub(crate) fn Scan(&mut self, subdirs: &[String]) {
+    pub(crate) fn Scan(&mut self, subdirs: &[String]) -> Result<(), String> {
         self.clearScanErrors();
-        self.scanSubdirs(subdirs);
-        let normalized_subdirs = normalize_scan_subdirs(subdirs);
-        let scan_root = self.config.path.clone();
-        match self.scan_filesystem_deterministic(&normalized_subdirs) {
-            Ok(stats) => {
-                if stats.files_seen > 0 {
-                    self.pullScheduled = true;
-                }
-            }
-            Err(err) => self.newScanError(&scan_root, &err),
-        }
+        self.scanSubdirs(subdirs)?;
         self.scanScheduled = false;
+        self.scanDelayUntil = None;
+        Ok(())
     }
 
     pub(crate) fn ScheduleForceRescan(&mut self, subdirs: &[String]) {
-        self.handleForcedRescans(subdirs);
+        let normalized = normalize_scan_subdirs(subdirs);
+        if normalized.is_empty() {
+            self.forcedRescanPaths.insert(String::new());
+        } else {
+            for sub in normalized {
+                self.forcedRescanPaths.insert(sub);
+            }
+        }
         self.forcedRescanRequested();
     }
 
@@ -535,7 +546,14 @@ impl folder {
     pub(crate) fn Serve(&mut self) {
         self.startWatch();
         if self.scanScheduled {
-            self.scanTimerFired();
+            if let Some(next_scan_at) = self.scanDelayUntil {
+                if Instant::now() < next_scan_at {
+                    return;
+                }
+            }
+            if let Err(err) = self.scanTimerFired() {
+                self.newScanError(&self.config.path.clone(), &err);
+            }
         }
         if self.pullScheduled {
             let _ = self.pull();
@@ -547,7 +565,7 @@ impl folder {
     }
 
     pub(crate) fn clearScanErrors(&mut self) {
-        self.errorsMut.retain(|e| !e.Err.contains("scan"));
+        self.errorsMut.clear();
     }
 
     pub(crate) fn doInSync(&self) -> bool {
@@ -585,10 +603,57 @@ impl folder {
             .or_else(|| self.errorsMut.first().map(|e| e.Err.clone()))
     }
 
-    pub(crate) fn handleForcedRescans(&mut self, paths: &[String]) {
-        for path in paths {
-            self.forcedRescanPaths.insert(path.clone());
+    pub(crate) fn handleForcedRescans(&mut self) -> Result<(), String> {
+        if self.forcedRescanPaths.is_empty() {
+            return Ok(());
         }
+
+        let mut drained = self.forcedRescanPaths.iter().cloned().collect::<Vec<_>>();
+        self.forcedRescanPaths.clear();
+        drained.sort_by(|a, b| compare_path_order(a, b));
+
+        let mut mark_err: Option<String> = None;
+        if let Ok(mut db) = self.db.write() {
+            let mut updates = Vec::new();
+            let mut next_sequence = db
+                .get_device_sequence(&self.config.id, LOCAL_DEVICE_ID)
+                .unwrap_or(0)
+                .saturating_add(1);
+            for path in &drained {
+                if path.is_empty() {
+                    continue;
+                }
+                match db.get_device_file(&self.config.id, LOCAL_DEVICE_ID, path) {
+                    Ok(Some(mut local)) => {
+                        local.local_flags |= db::FLAG_LOCAL_MUST_RESCAN;
+                        local.sequence = next_sequence;
+                        next_sequence = next_sequence.saturating_add(1);
+                        updates.push(local);
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        mark_err = Some(format!("force-rescan lookup failed for {path}: {err}"));
+                        break;
+                    }
+                }
+            }
+            if mark_err.is_none() && !updates.is_empty() {
+                if let Err(err) = db.update(&self.config.id, LOCAL_DEVICE_ID, updates) {
+                    mark_err = Some(format!("force-rescan mark update failed: {err}"));
+                }
+            }
+        } else {
+            mark_err = Some("db lock poisoned".to_string());
+        }
+
+        if let Some(err) = mark_err {
+            let scan_path = self.config.path.clone();
+            self.newScanError(&scan_path, &err);
+            return Err(err);
+        }
+
+        self.scanSubdirs(&drained)?;
+        Ok(())
     }
 
     pub(crate) fn forcedRescanRequested(&mut self) {
@@ -608,6 +673,7 @@ impl folder {
     pub(crate) fn newScanBatch(&self) -> scanBatch {
         scanBatch {
             f: self.config.id.clone(),
+            db: Some(self.db.clone()),
             ..Default::default()
         }
     }
@@ -615,7 +681,7 @@ impl folder {
     pub(crate) fn newScanError(&mut self, path: &str, err: &str) {
         self.errorsMut.push(FileError {
             Path: path.to_string(),
-            Err: format!("scan: {err}"),
+            Err: err.to_string(),
         });
     }
 
@@ -879,23 +945,70 @@ impl folder {
         }
     }
 
-    pub(crate) fn scanSubdirs(&mut self, subdirs: &[String]) {
-        self.scanSubdirsChangedAndNew(subdirs);
-        self.scanSubdirsDeletedAndIgnored(subdirs);
+    pub(crate) fn scanSubdirs(&mut self, subdirs: &[String]) -> Result<(), String> {
+        if let Some(err) = self.getHealthErrorAndLoadIgnores() {
+            return Err(err);
+        }
+
+        let normalized = normalize_scan_subdirs(subdirs);
+        let mut changed = 0_usize;
+        match self.scanSubdirsChangedAndNew(&normalized) {
+            Ok(stats) => {
+                changed = changed.saturating_add(stats.files_updated + stats.files_deleted);
+            }
+            Err(err) => {
+                return Err(err);
+            }
+        }
+
+        match self.scanSubdirsDeletedAndIgnored(&normalized) {
+            Ok(extra) => {
+                changed = changed.saturating_add(extra);
+            }
+            Err(err) => {
+                return Err(err);
+            }
+        }
+
+        if changed > 0 {
+            self.SchedulePull();
+        }
+        Ok(())
     }
 
-    pub(crate) fn scanSubdirsChangedAndNew(&mut self, subdirs: &[String]) {
-        for s in subdirs {
-            self.forcedRescanPaths.insert(s.clone());
-        }
+    pub(crate) fn scanSubdirsChangedAndNew(
+        &mut self,
+        subdirs: &[String],
+    ) -> Result<ScanExecutionStats, String> {
+        self.scan_filesystem_deterministic(subdirs)
     }
 
-    pub(crate) fn scanSubdirsDeletedAndIgnored(&mut self, subdirs: &[String]) {
-        let paths = subdirs.to_vec();
-        let classified = classify_paths(&paths, &[".tmp", ".DS_Store"]);
-        for ignored in classified.ignored {
-            self.forcedRescanPaths.remove(&ignored);
+    pub(crate) fn scanSubdirsDeletedAndIgnored(
+        &mut self,
+        subdirs: &[String],
+    ) -> Result<usize, String> {
+        if subdirs.is_empty() {
+            self.forcedRescanPaths.clear();
+            return Ok(0);
         }
+        let mut removed = 0_usize;
+        let mut keep = BTreeSet::new();
+        for pending in &self.forcedRescanPaths {
+            let covered = subdirs.iter().any(|sub| {
+                if sub.is_empty() {
+                    true
+                } else {
+                    pending == sub || pending.starts_with(&format!("{sub}/"))
+                }
+            });
+            if covered {
+                removed = removed.saturating_add(1);
+            } else {
+                keep.insert(pending.clone());
+            }
+        }
+        self.forcedRescanPaths = keep;
+        Ok(removed)
     }
 
     fn scan_filesystem_deterministic(
@@ -996,9 +1109,14 @@ impl folder {
         Ok(stats)
     }
 
-    pub(crate) fn scanTimerFired(&mut self) {
-        let forced = self.forcedRescanPaths.iter().cloned().collect::<Vec<_>>();
-        self.Scan(&forced);
+    pub(crate) fn scanTimerFired(&mut self) -> Result<(), String> {
+        self.scanDelayUntil = None;
+        if self.forcedRescanPaths.is_empty() {
+            self.Scan(&[])?;
+            return Ok(());
+        }
+        self.handleForcedRescans()?;
+        Ok(())
     }
 
     pub(crate) fn scheduleWatchRestart(&mut self) {
@@ -1033,7 +1151,7 @@ impl folder {
     ) -> Vec<String> {
         let need = compute_need(local, remote);
         for p in &need.need_paths {
-            self.forcedRescanPaths.insert(p.clone());
+            self.forcedRescanPaths.remove(p);
         }
         need.need_paths
     }
@@ -1042,11 +1160,113 @@ impl folder {
         for p in pulled {
             self.forcedRescanPaths.remove(p);
         }
+        let _ = self.emitDiskChangeEvents(pulled);
     }
 
     pub(crate) fn updateLocalsFromScanning(&mut self, scanned: &[String]) {
+        let mut updates = Vec::new();
+        let mut next_sequence = self
+            .db
+            .read()
+            .ok()
+            .and_then(|db| {
+                db.get_device_sequence(&self.config.id, LOCAL_DEVICE_ID)
+                    .ok()
+            })
+            .unwrap_or(0)
+            .saturating_add(1);
+
+        for path in scanned {
+            if should_skip_scan_path(path) {
+                continue;
+            }
+            let local = self.build_local_file_snapshot(path, next_sequence);
+            match local {
+                Ok(Some(fi)) => {
+                    next_sequence = next_sequence.saturating_add(1);
+                    updates.push(fi);
+                }
+                Ok(None) => {}
+                Err(err) => self.newScanError(path, &err),
+            }
+        }
+
+        if !updates.is_empty() {
+            let folder_id = self.config.id.clone();
+            let persist = self
+                .db
+                .write()
+                .map_err(|_| "db lock poisoned".to_string())
+                .and_then(|mut db| db.update(&folder_id, LOCAL_DEVICE_ID, updates));
+            if let Err(err) = persist {
+                let scan_path = self.config.path.clone();
+                self.newScanError(&scan_path, &format!("update locals from scanning: {err}"));
+            }
+        }
+
         for p in scanned {
-            self.forcedRescanPaths.insert(p.clone());
+            self.forcedRescanPaths.remove(p);
+        }
+        let _ = self.emitDiskChangeEvents(scanned);
+    }
+
+    fn build_local_file_snapshot(
+        &self,
+        path: &str,
+        sequence: i64,
+    ) -> Result<Option<db::FileInfo>, String> {
+        let abs = safe_join_relative_path(Path::new(&self.config.path), path)?;
+        match fs::symlink_metadata(&abs) {
+            Ok(meta) => {
+                let file_type = if meta.is_dir() {
+                    db::FileInfoType::Directory
+                } else if meta.file_type().is_symlink() {
+                    db::FileInfoType::Symlink
+                } else {
+                    db::FileInfoType::File
+                };
+                let block_hashes = if file_type == db::FileInfoType::File {
+                    hash_file_blocks(&abs)?
+                } else {
+                    Vec::new()
+                };
+                let modified_ns = file_modified_ns(&meta)?;
+                let size = if file_type == db::FileInfoType::Directory {
+                    0
+                } else {
+                    i64::try_from(meta.len()).unwrap_or(i64::MAX)
+                };
+                Ok(Some(db::FileInfo {
+                    folder: self.config.id.clone(),
+                    path: path.trim_matches('/').to_string(),
+                    sequence,
+                    modified_ns,
+                    size,
+                    deleted: false,
+                    ignored: false,
+                    local_flags: 0,
+                    file_type,
+                    block_hashes,
+                }))
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let existing = self
+                    .db
+                    .read()
+                    .map_err(|_| "db lock poisoned".to_string())?
+                    .get_device_file(&self.config.id, LOCAL_DEVICE_ID, path)
+                    .map_err(|e| format!("lookup local file {path}: {e}"))?;
+                if let Some(mut fi) = existing {
+                    fi.deleted = true;
+                    fi.ignored = false;
+                    fi.sequence = sequence;
+                    fi.block_hashes.clear();
+                    fi.local_flags = 0;
+                    return Ok(Some(fi));
+                }
+                Ok(None)
+            }
+            Err(err) => Err(format!("stat {}: {err}", abs.display())),
         }
     }
 
@@ -1445,7 +1665,11 @@ impl sendReceiveFolder {
         while let Some(path) = self.queue.pop_front() {
             match self.copyBlock(&path) {
                 Ok(()) => copied += 1,
-                Err(err) => self.tempPullErrors.push(self.newPullError(&path, &err)),
+                Err(err) => {
+                    let pull_err = self.newPullError(&path, &err);
+                    self.tempPullErrors.push(pull_err.clone());
+                    self.folder.errorsMut.push(pull_err);
+                }
             }
         }
         copied
@@ -1811,11 +2035,62 @@ pub(crate) struct receiveOnlyFolder {
 
 impl receiveOnlyFolder {
     pub(crate) fn Revert(&mut self) {
-        self.revert();
+        if let Err(err) = self.revert() {
+            let scan_path = self.sendReceiveFolder.folder.config.path.clone();
+            self.sendReceiveFolder.folder.newScanError(&scan_path, &err);
+        }
     }
 
-    pub(crate) fn revert(&mut self) {
-        self.sendReceiveFolder.folder.Revert();
+    pub(crate) fn revert(&mut self) -> Result<(), String> {
+        let folder_id = self.sendReceiveFolder.folder.config.id.clone();
+        let mut db = self
+            .sendReceiveFolder
+            .folder
+            .db
+            .write()
+            .map_err(|_| "db lock poisoned".to_string())?;
+        let mut sequence = db
+            .get_device_sequence(&folder_id, LOCAL_DEVICE_ID)
+            .map_err(|e| format!("load local sequence: {e}"))?
+            .saturating_add(1);
+        let locals = db
+            .all_local_files_ordered(&folder_id, LOCAL_DEVICE_ID)
+            .map_err(|e| format!("load local files: {e}"))?;
+
+        let mut updates = Vec::new();
+        for mut local in locals {
+            if local.local_flags & db::FLAG_LOCAL_RECEIVE_ONLY == 0 {
+                continue;
+            }
+            local.local_flags &= !db::FLAG_LOCAL_RECEIVE_ONLY;
+            match db.get_global_file(&folder_id, &local.path) {
+                Ok(Some(global)) => {
+                    if global.local_flags & db::FLAG_LOCAL_RECEIVE_ONLY != 0 {
+                        local.deleted = true;
+                        local.block_hashes.clear();
+                    } else {
+                        let mut merged = global;
+                        merged.local_flags &= !db::FLAG_LOCAL_RECEIVE_ONLY;
+                        merged.sequence = sequence;
+                        sequence = sequence.saturating_add(1);
+                        updates.push(merged);
+                        continue;
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => return Err(format!("lookup global {}: {err}", local.path)),
+            }
+            local.sequence = sequence;
+            sequence = sequence.saturating_add(1);
+            updates.push(local);
+        }
+        if !updates.is_empty() {
+            db.update(&folder_id, LOCAL_DEVICE_ID, updates)
+                .map_err(|e| format!("persist receive-only revert: {e}"))?;
+        }
+        drop(db);
+        self.sendReceiveFolder.folder.SchedulePull();
+        Ok(())
     }
 }
 
@@ -1826,22 +2101,82 @@ pub(crate) struct receiveEncryptedFolder {
 
 impl receiveEncryptedFolder {
     pub(crate) fn Revert(&mut self) {
-        self.revert();
+        if let Err(err) = self.revert() {
+            let scan_path = self.sendReceiveFolder.folder.config.path.clone();
+            self.sendReceiveFolder.folder.newScanError(&scan_path, &err);
+        }
     }
 
-    pub(crate) fn revert(&mut self) {
-        self.sendReceiveFolder.folder.Revert();
+    pub(crate) fn revert(&mut self) -> Result<(), String> {
+        let folder_id = self.sendReceiveFolder.folder.config.id.clone();
+        let mut db = self
+            .sendReceiveFolder
+            .folder
+            .db
+            .write()
+            .map_err(|_| "db lock poisoned".to_string())?;
+        let mut sequence = db
+            .get_device_sequence(&folder_id, LOCAL_DEVICE_ID)
+            .map_err(|e| format!("load local sequence: {e}"))?
+            .saturating_add(1);
+        let locals = db
+            .all_local_files_ordered(&folder_id, LOCAL_DEVICE_ID)
+            .map_err(|e| format!("load local files: {e}"))?;
+        let mut dirs = Vec::new();
+        let mut files_to_delete = Vec::new();
+        let mut updates = Vec::new();
+
+        for mut local in locals {
+            let receive_only_changed = local.local_flags & db::FLAG_LOCAL_RECEIVE_ONLY != 0;
+            if !receive_only_changed || local.deleted {
+                continue;
+            }
+            if local.file_type == db::FileInfoType::Directory {
+                dirs.push(local.path.clone());
+                continue;
+            }
+            files_to_delete.push(local.path.clone());
+            local.deleted = true;
+            local.block_hashes.clear();
+            local.sequence = sequence;
+            sequence = sequence.saturating_add(1);
+            updates.push(local);
+        }
+
+        if !updates.is_empty() {
+            db.update(&folder_id, LOCAL_DEVICE_ID, updates)
+                .map_err(|e| format!("persist receive-encrypted revert: {e}"))?;
+        }
+        drop(db);
+
+        for path in files_to_delete {
+            let _ = self.sendReceiveFolder.deleteItemOnDisk(&path);
+        }
+        let _ = self.revertHandleDirs(&dirs);
+        self.sendReceiveFolder.folder.SchedulePull();
+        Ok(())
     }
 
     pub(crate) fn revertHandleDirs(&mut self, dirs: &[String]) -> usize {
-        let mut q = deleteQueue {
-            handler: Arc::new(Mutex::new(self.sendReceiveFolder.clone())),
-            ..Default::default()
-        };
-        for d in dirs {
-            q.handle(d);
+        if dirs.is_empty() {
+            return 0;
         }
-        q.flush()
+        let mut sorted = dirs.to_vec();
+        sorted.sort_by(|a, b| b.cmp(a));
+        let mut removed = 0_usize;
+        for dir in sorted {
+            if self
+                .sendReceiveFolder
+                .deleteDirOnDiskHandleChildren(&dir)
+                .is_ok()
+            {
+                removed = removed.saturating_add(1);
+            }
+            self.sendReceiveFolder
+                .folder
+                .ScheduleForceRescan(&[dir.clone()]);
+        }
+        removed
     }
 }
 
@@ -2000,7 +2335,7 @@ mod tests {
     fn scan_batch_flushes() {
         let mut sb = scanBatch::default();
         sb.Remove("a");
-        let (_, removes) = sb.Flush();
+        let (_, removes) = sb.Flush().expect("flush");
         assert_eq!(removes, vec!["a"]);
     }
 

@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-02-08T23:39:03Z",
+  "plan_path": "parity/diff-reports/function-pair-review-plan.json",
+  "model": "google/antigravity-claude-opus-4-6-thinking",
+  "total_items": 3,
+  "completed": 3,
+  "no_findings": 3,
+  "with_findings": 0,
+  "errors": 0,
+  "tier_counts": {
+    "T1": 3,
+    "T2": 0,
+    "T3": 0
+  },
+  "severity_count": {
+    "P0": 0,
+    "P1": 0,
+    "P2": 0,
+    "P3": 0
+  },
+  "findings": [],
+  "results": [
+    {
+      "id": "feat-b4f8008a7b4b",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.AllLocalBlocksWithHash",
+      "rust_symbol": "all_local_blocks_with_hash",
+      "status": "dry-run",
+      "duration_ms": 0,
+      "finding_count": 0
+    },
+    {
+      "id": "feat-bd7c4406ffe1",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.AllGlobalFiles",
+      "rust_symbol": "all_global_files",
+      "status": "dry-run",
+      "duration_ms": 0,
+      "finding_count": 0
+    },
+    {
+      "id": "feat-e03a3eb8083c",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.AllGlobalFilesPrefix",
+      "rust_symbol": "all_global_files_prefix",
+      "status": "dry-run",
+      "duration_ms": 0,
+      "finding_count": 0
+    }
+  ]
+}

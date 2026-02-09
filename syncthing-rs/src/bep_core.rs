@@ -124,7 +124,7 @@ pub(crate) struct Device {
     pub(crate) Addresses: Vec<String>,
     pub(crate) Compression: i32,
     pub(crate) Introducer: bool,
-    pub(crate) IndexId: i64,
+    pub(crate) IndexId: u64,
     pub(crate) MaxSequence: i64,
     pub(crate) CertName: String,
     pub(crate) EncryptionPasswordToken: String,
@@ -140,7 +140,7 @@ pub(crate) struct DownloadProgress {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub(crate) struct FileDownloadProgressUpdate {
     pub(crate) Name: String,
-    pub(crate) Version: i64,
+    pub(crate) Version: Option<Vector>,
     pub(crate) BlockIndexes: Vec<i32>,
     pub(crate) BlockSize: i32,
     pub(crate) UpdateType: i32,

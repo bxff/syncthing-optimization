@@ -1,0 +1,777 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-02-08T22:31:29Z",
+  "plan_path": "parity/diff-reports/function-pair-review-plan.json",
+  "model": "google/antigravity-claude-opus-4-6-thinking",
+  "total_items": 30,
+  "completed": 30,
+  "no_findings": 0,
+  "with_findings": 23,
+  "errors": 7,
+  "tier_counts": {
+    "T1": 30,
+    "T2": 0,
+    "T3": 0
+  },
+  "severity_count": {
+    "P0": 2,
+    "P1": 25,
+    "P2": 21,
+    "P3": 0
+  },
+  "findings": [
+    {
+      "id": "feat-44b57231bd5e",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Wrong data source for sequences",
+      "location": "syncthing-rs/src/db.rs:1033",
+      "message": "Go queries the `indexids` table (`SELECT d.device_id, i.sequence FROM indexids i INNER JOIN devices d ...` at folderdb_indexid.go:117-120) to return per-device index-acknowledged sequence numbers. Rust instead scans every file record in the folder via `store.for_each_file_in_folder` and computes `max(file.sequence)` per device. These are semantically different values: `indexids.sequence` is an explicitly stored index-level sequence that may lag behind or differ from the maximum file-level sequence, especially after partial updates, crash recovery, or when index IDs are set independently of file ingestion. This will cause divergent results in scenario/crash-recovery and scenario/index-sequence-behavior tests."
+    },
+    {
+      "id": "feat-862f3970a59a",
+      "tier": "T1",
+      "priority": "P0",
+      "title": "Need detection uses sequence instead of version comparison",
+      "location": "syncthing-rs/src/db.rs:1341",
+      "message": "Rust `requires_update` determines need by comparing `global.sequence \u003e current.sequence` or deleted-status divergence, whereas Go `needSizeRemote` at `internal/db/sqlite/folderdb_counts.go:79` determines need by checking whether the device possesses a file with the same `version_idx` as the global winner (`f.version_idx = g.version_idx`). Version vectors and sequences are distinct concepts in Syncthing; two files can share a sequence ordering yet differ in version, or vice versa. This will produce wrong need counts in any scenario where a device holds a conflicting or concurrent version of a file, or where sequence values do not monotonically track version-vector changes."
+    },
+    {
+      "id": "feat-1ccb621f2319",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "device param type mismatch: DeviceID ([32]byte) vs \u0026str",
+      "location": "syncthing-rs/src/db.rs:214",
+      "message": "Go's `SetIndexID` accepts `device protocol.DeviceID`, a `[32]byte` fixed-size binary array that enforces a 32-byte length invariant at the type level and preserves arbitrary byte content. The Rust port uses `device: \u0026str`, a variable-length UTF-8 string, which removes the fixed-length guarantee, rejects valid DeviceIDs containing non-UTF-8 byte sequences, and accepts arbitrarily long or short strings that would be impossible in Go. Any caller passing a binary DeviceID that is not valid UTF-8 will fail in Rust but succeed in Go, breaking semantic equivalence on edge-case inputs and wire/schema compatibility when the device parameter is serialized or used as a storage key."
+    },
+    {
+      "id": "feat-43a42b165b98",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Return type mismatch: EnumDescriptor vs \u0026str",
+      "location": "syncthing-rs/src/bep_compat.rs:27",
+      "message": "The Go method returns a protoreflect.EnumDescriptor (bep.pb.go:70), a rich interface that exposes the full protobuf enum schema including value enumeration, options, full qualified name, parent file descriptor, and source-location metadata. The Rust port returns \u0026'static str (bep_compat.rs:27), a plain string that cannot satisfy any reflection query against the descriptor. Any downstream code that calls Descriptor() to introspect enum values, check deprecation flags, resolve source info, or walk the descriptor tree will silently receive a degraded result, breaking wire-schema introspection parity and potentially failing the protocol-state-transition and index-sequence-behavior scenarios that depend on descriptor-driven dispatch."
+    },
+    {
+      "id": "feat-44b57231bd5e",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Local device not excluded",
+      "location": "syncthing-rs/src/db.rs:1033",
+      "message": "Go's SQL includes the filter `WHERE i.device_idx != {{.LocalDeviceIdx}}` (folderdb_indexid.go:119), ensuring the local device is excluded from the returned map. The Rust implementation iterates all devices in the folder store (store.rs:362 `for (device, path_store) in device_store`) without any filter, so the local device's max sequence is included in the returned BTreeMap. Callers such as folder_summary that display remote-only device sequences will show an extra spurious entry for the local device."
+    },
+    {
+      "id": "feat-548fbf6dbdba",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Lazy iterator replaced by eager Vec",
+      "location": "syncthing-rs/src/db.rs:180",
+      "message": "Go returns `(iter.Seq[protocol.FileInfo], func() error)` — a lazy, streaming iterator with a deferred error callback invoked after iteration completes. Rust returns `Result\u003cVec\u003cFileInfo\u003e, String\u003e`, which eagerly materializes all results into memory before the caller sees any item and surfaces errors immediately rather than deferring them. This breaks streaming semantics, changes error-reporting timing, and will fail the `scenario/memory-cap-50mb` parity test when the needed-file set is large, since Go can process items one at a time without holding the full result set in memory."
+    },
+    {
+      "id": "feat-548fbf6dbdba",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Signed limit/offset changed to unsigned usize",
+      "location": "syncthing-rs/src/db.rs:178-179",
+      "message": "Go declares `limit, offset int` (signed, 64-bit on 64-bit platforms). Rust uses `usize` (unsigned). In Go, callers can pass negative values (e.g., `limit = -1` is a common idiom meaning \"no limit\"); the Rust signature cannot represent this, so any call-site that relies on negative sentinel values will either fail to compile or require a different convention, silently altering pagination/filtering behavior."
+    },
+    {
+      "id": "feat-5b37bb298002",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "eager Vec vs lazy iterator",
+      "location": "syncthing-rs/src/db.rs:161",
+      "message": "Go returns `(iter.Seq[protocol.FileInfo], func() error)` — a lazy, streaming iterator that yields items on demand and defers error reporting until the caller invokes the error closure after partial or full consumption. Rust returns `Result\u003cVec\u003cFileInfo\u003e, String\u003e`, which eagerly materializes the entire result set into memory before returning. This breaks streaming semantics, changes memory profile (directly relevant to the memory-cap-50mb parity test), and eliminates the ability to partially consume results before encountering an error."
+    },
+    {
+      "id": "feat-5b37bb298002",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "limit type signed-vs-unsigned",
+      "location": "syncthing-rs/src/db.rs:160",
+      "message": "Go declares `limit int` (signed, 64-bit on 64-bit platforms) which allows negative sentinel values (e.g., -1 commonly meaning \"no limit\") while Rust declares `limit: usize` (unsigned). Any Go caller passing a negative limit to signal unbounded iteration has no equivalent representation in the Rust port, silently changing semantics or causing a panic at the call site."
+    },
+    {
+      "id": "feat-5f8adcf77c68",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "DeviceID typed parameter downgraded to plain string",
+      "location": "syncthing-rs/src/db.rs:154",
+      "message": "Go's device parameter is protocol.DeviceID, a [32]byte newtype with Luhn-based check-digit validation and a specific base32 wire encoding (see protocol.DeviceID). Rust accepts \u0026str at db.rs:154, losing compile-time type safety and check-digit validation at the interface boundary. Any caller passing an un-validated or differently-encoded device string will silently produce wrong lookups or empty results instead of a type error, breaking wire/schema compatibility (Check 5)."
+    },
+    {
+      "id": "feat-5f8adcf77c68",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Lazy iterator replaced by eager Vec",
+      "location": "syncthing-rs/src/db.rs:154",
+      "message": "Go returns (iter.Seq[protocol.FileInfo], func() error) at interface.go:40, a lazy pull-based iterator with a deferred error callback that is invoked after iteration completes. Rust returns Result\u003cVec\u003cFileInfo\u003e, String\u003e at db.rs:154, which forces eager collection of every matching file into memory before the caller sees any result. This breaks streaming semantics: Go callers can abort mid-iteration without materializing the full result set, whereas Rust always materializes it. This is a concrete behavioral divergence that will violate the scenario/memory-cap-50mb parity test for large folders and changes error-observation timing from deferred to upfront."
+    },
+    {
+      "id": "feat-722588d75244",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Eager Vec replaces lazy iterator, breaks streaming semantics",
+      "location": "syncthing-rs/src/db.rs:167",
+      "message": "Go returns `(iter.Seq[protocol.FileInfo], func() error)` — a lazy, pull-based iterator that yields one FileInfo at a time without materializing the full result set, plus a deferred error callback checked after iteration. Rust returns `Result\u003cVec\u003cFileInfo\u003e, String\u003e`, eagerly collecting every matching file into memory before returning. This eliminates streaming capability, changes memory profile from O(1) to O(n) in the number of matching files, and will violate the `scenario/memory-cap-50mb` parity test for large prefix matches. It also collapses the two-phase error model: in Go a caller can receive partial results and then discover an I/O error via the close function, whereas in Rust partial results are impossible — the call either fully succeeds or fully fails."
+    },
+    {
+      "id": "feat-7239b98a92db",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Return type breaks reflection contract",
+      "location": "syncthing-rs/src/bep_compat.rs:35",
+      "message": "Go returns `protoreflect.Message`, a full reflection handle exposing field descriptors, presence checks, dynamic get/set, and the parent `MessageDescriptor`. Rust returns `Value` (a serialized data snapshot) which provides none of these capabilities. Any consumer that calls `ProtoReflect()` to walk field descriptors, check field presence, or round-trip through the protobuf reflection API will get a type mismatch or missing functionality. This breaks wire/schema compatibility for any code path that relies on descriptor-driven serialization or dynamic field access."
+    },
+    {
+      "id": "feat-862f3970a59a",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Counts struct missing Symlinks field",
+      "location": "syncthing-rs/src/db.rs:81",
+      "message": "Go `Counts` at `internal/db/counts.go:18` includes a `Symlinks int` field tracked separately from files and directories; `TotalItems()` at line 40 sums `Files + Directories + Symlinks + Deleted`. Rust `Counts` at db.rs:81 has no symlinks field. In `add_file_to_counts` at db.rs:1396, a symlink that is not a directory will fall into the `else` branch and increment `files`, misclassifying symlinks as regular files and producing incorrect counts for any folder containing symlinks."
+    },
+    {
+      "id": "feat-862f3970a59a",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Missing local vs remote device dispatch",
+      "location": "syncthing-rs/src/db.rs:1065",
+      "message": "Go `CountNeed` at `internal/db/sqlite/folderdb_counts.go:34` branches on `device == protocol.LocalDeviceID`, routing local-device queries to `needSizeLocal()` which reads precomputed aggregate counts from the `counts` table filtered by `FlagLocalNeeded`, and remote-device queries to `needSizeRemote()` which runs a SQL UNION ALL against the `files` table. Rust `count_need` at db.rs:1065 has a single code path that iterates all global winners via `for_each_global_winner` regardless of device identity. The Go local path leverages incrementally-maintained counts that reflect `LocalFlags` metadata; the Rust path recomputes from scratch and has no awareness of `LocalDeviceID` as a sentinel, so it may also diverge if the local device's entry in the store uses a different string representation than expected."
+    },
+    {
+      "id": "feat-8f292affac49",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "device param type mismatch: DeviceID vs \u0026str",
+      "location": "syncthing-rs/src/db.rs:203",
+      "message": "Go `CountLocal` accepts `device protocol.DeviceID` which is a `[32]byte` fixed-size typed wrapper with built-in validation, canonical string encoding (luhn-checked base32), and binary identity semantics. The Rust `count_local` accepts `device: \u0026str`, a plain UTF-8 string with no compile-time or runtime enforcement of valid device identity format. This permits callers to pass malformed or non-canonical device identifiers that Go would reject at the type boundary, risking silent lookup misses (no matching device rows) or inconsistent key construction in the storage layer, which would cause divergent results between the Go and Rust implementations for the same logical device."
+    },
+    {
+      "id": "feat-909eb03487ab",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "device param type mismatch",
+      "location": "syncthing-rs/src/db.rs:141",
+      "message": "Go `GetDeviceFile` accepts `device protocol.DeviceID`, a strongly-typed 32-byte identifier with specific encoding, comparison, and marshaling semantics, but Rust `get_device_file` accepts `device: \u0026str`, a plain string reference. The Rust codebase already defines a `DeviceId` type used in return positions (e.g., lines 144, 199), so the input parameter should be `\u0026DeviceId` rather than `\u0026str` to preserve type safety and ensure binary-safe device identity comparison; accepting an arbitrary `\u0026str` risks encoding mismatches and bypasses validation that `protocol.DeviceID` enforces in Go."
+    },
+    {
+      "id": "feat-90fbf7f225fe",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "device param type mismatch",
+      "location": "syncthing-rs/src/db.rs:188",
+      "message": "Go `DropDevice` accepts `protocol.DeviceID`, a structured validated type (typically a fixed-size byte array with Luhn-check encoding), but Rust `drop_device` accepts `\u0026str`. The Rust codebase already defines a `DeviceId` type (used in return positions at lines 199 and 200), yet the input parameter here is a bare string. This breaks type-level validation: callers can pass malformed or empty strings that Go would reject at compile time, and key-encoding in the storage layer may silently produce wrong keys if the string is not in the canonical DeviceID format."
+    },
+    {
+      "id": "feat-950476b0768e",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "DeviceID downgraded to plain string",
+      "location": "syncthing-rs/src/db.rs:153",
+      "message": "Go's AllLocalFiles accepts protocol.DeviceID (a strongly-typed 32-byte binary identifier with its own marshaling, validation, and equality semantics) at interface.go:39. Rust accepts \u0026str at db.rs:153, losing binary type fidelity, compile-time type safety, and any validation that DeviceID construction enforces. Callers can pass arbitrary strings that would be rejected by the Go type system, and wire/schema compatibility with the Syncthing BEP protocol is broken because DeviceID is a fixed-size binary value, not a variable-length UTF-8 string."
+    },
+    {
+      "id": "feat-950476b0768e",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Lazy iterator replaced with eager Vec",
+      "location": "syncthing-rs/src/db.rs:153",
+      "message": "Go returns (iter.Seq[protocol.FileInfo], func() error) at interface.go:39, providing a lazy pull-based iterator that streams FileInfo values one at a time and a separate closure to retrieve any error that occurred during iteration. Rust returns Result\u003cVec\u003cFileInfo\u003e, String\u003e at db.rs:153, which eagerly materializes the entire result set into memory before returning. This breaks streaming semantics, changes memory profile (directly relevant to the scenario/memory-cap-50mb parity test), and alters error observability: Go callers can consume partial results before discovering a mid-iteration error via the closure, whereas Rust callers receive either all results or an error atomically with no partial-consumption path."
+    },
+    {
+      "id": "feat-b4f8008a7b4b",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Deferred error callback lost",
+      "location": "syncthing-rs/src/db.rs:185",
+      "message": "Go's second return value `func() error` is a deferred error reporter: iteration can begin successfully and the error surfaces only after the iterator is drained or abandoned, allowing partial consumption of valid results before an I/O error is detected. Rust's `Result\u003cVec\u003cBlockMapEntry\u003e, String\u003e` is fail-fast — any storage error prevents returning any entries at all. This changes observable behavior in crash-recovery and WAL-free-durability scenarios where a partial read is valid and expected, and means callers cannot distinguish \"zero results, no error\" from \"error before any results\" in the same way the Go API does."
+    },
+    {
+      "id": "feat-b4f8008a7b4b",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Eager Vec replaces lazy iterator",
+      "location": "syncthing-rs/src/db.rs:185",
+      "message": "Go returns `(iter.Seq[BlockMapEntry], func() error)` — a lazy, streaming iterator that yields entries on demand without materializing all results in memory. Rust returns `Result\u003cVec\u003cBlockMapEntry\u003e, String\u003e`, which eagerly collects every matching block-map entry into a single allocation before the caller sees any data. This breaks streaming/early-termination semantics and violates the memory-cap-50mb parity scenario: a folder with millions of blocks sharing a hash will OOM in Rust where Go would stream them incrementally."
+    },
+    {
+      "id": "feat-c33e4161dc66",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Lazy iterator replaced with eager Vec",
+      "location": "syncthing-rs/src/db.rs:172",
+      "message": "Go returns `(iter.Seq[FileMetadata], func() error)` — a lazy, streaming iterator plus a deferred error-check closure — while Rust returns `Result\u003cVec\u003cFileMetadata\u003e, String\u003e`, eagerly collecting all matching rows into memory before returning. This breaks streaming semantics: callers that short-circuit iteration in Go never materialize the full result set, but every Rust caller pays for full materialization. This is a direct conflict with the `scenario/memory-cap-50mb` parity test, where large folders with many block-hash matches could exceed the memory budget that the Go version respects via lazy evaluation."
+    },
+    {
+      "id": "feat-d5211ea19875",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Clone semantics break shared-mutation contract",
+      "location": "syncthing-rs/src/bep_compat.rs:234",
+      "message": "Go returns a slice header referencing the same underlying array of `*Folder` pointers, so callers that mutate a returned Folder element see the change reflected in the owning ClusterConfig. The Rust implementation calls `self.Folders.clone()`, producing a fully independent deep copy; any mutation by the caller is silently discarded and never propagates back to the source ClusterConfig, violating semantic equivalence for any code path that relies on in-place modification of the returned folders (relevant to scenario/protocol-state-transition and scenario/crash-recovery where folder state is updated through returned references)."
+    },
+    {
+      "id": "feat-e03a3eb8083c",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Lazy iterator replaced with eager Vec",
+      "location": "syncthing-rs/src/db.rs:148-152",
+      "message": "Go returns (iter.Seq[FileMetadata], func() error) at internal/db/interface.go:38, providing a lazy pull-based iterator that streams results one at a time and a deferred error-closure that reports errors encountered during iteration. Rust returns Result\u003cVec\u003cFileMetadata\u003e, String\u003e at syncthing-rs/src/db.rs:152, which eagerly materializes all matching records into memory before returning and collapses the two-phase error model (upfront Result vs deferred iteration errors) into a single upfront check. This breaks streaming consumption, prevents early termination from saving work, risks violating the memory-cap-50mb parity test on large folder sets, and loses the ability to surface errors that occur mid-iteration (e.g., corrupted records after the first N valid ones)."
+    },
+    {
+      "id": "feat-ff81b14e58b0",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "DeviceID type downgraded to plain string",
+      "location": "syncthing-rs/src/db.rs:140",
+      "message": "Go `Update` accepts `device protocol.DeviceID`, a 32-byte structured type with checksum validation and a canonical string encoding (Luhn-based). The Rust port declares `device: \u0026str`, losing compile-time type safety and allowing any arbitrary string to be passed without validation. If any implementation compares device identifiers byte-for-byte or uses them as map keys, a non-canonical string representation will silently fail to match, causing silent data loss or phantom device entries. Every other method that accepts `DeviceID` in Go (`drop_all_files`, `drop_device`, `get_device_sequence`, etc.) has the same demotion, but `update` is the most critical because it writes file records keyed by device."
+    },
+    {
+      "id": "feat-ff81b14e58b0",
+      "tier": "T1",
+      "priority": "P1",
+      "title": "Lazy iterator to eager Vec changes memory and error semantics",
+      "location": "syncthing-rs/src/db.rs:152-190",
+      "message": "Go iterator-returning methods (e.g., `AllGlobalFiles`) return `(iter.Seq[T], func() error)` providing lazy, streaming evaluation with a deferred error callback. Rust replaces all of these with `Result\u003cVec\u003cT\u003e, String\u003e`, which eagerly materializes the entire result set into memory before returning. This breaks behavioral equivalence under the `scenario/memory-cap-50mb` parity test because a large folder will allocate unbounded memory in the Rust port, whereas Go streams rows one at a time. It also changes error observability: Go surfaces iteration errors only when the deferred `func() error` is called after iteration completes, while Rust surfaces errors before any element is seen."
+    },
+    {
+      "id": "feat-347032328f00",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Clear-before-persist split-brain on error",
+      "location": "syncthing-rs/src/db.rs:1092",
+      "message": "In the Rust implementation, `self.index_ids.clear()` (line 1092) irrevocably empties the in-memory map before `self.persist_runtime_metadata()` (line 1093) attempts the disk write. If persistence fails, the caller receives an error yet all subsequent in-memory reads via `get_index_id` will return 0, while the on-disk `runtime-meta.json` still contains the old index IDs — a restart would silently restore them. The Go implementation (`internal/db/sqlite/folderdb_indexid.go:87`) uses a single SQL `DELETE FROM indexids` statement which is atomically committed by SQLite; a failure leaves both the query path and the on-disk state unchanged. This split-brain violates the crash-recovery parity requirement and can cause the Rust port to silently skip a full re-index after a failed drop followed by a restart."
+    },
+    {
+      "id": "feat-34938ed53bc1",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Return-type mismatch: void vs bool",
+      "location": "syncthing-rs/src/bep_compat.rs:31",
+      "message": "The Go method `ProtoMessage()` is a no-op marker with no return value (signature `func (*Hello) ProtoMessage() {}`), used solely to satisfy the `proto.Message` interface. The Rust port changes the signature to return `bool` (always `true`). This is a type-fidelity violation: the canonical protobuf marker method is unit-returning, and introducing a `bool` return creates an API surface that does not exist in Go, meaning any Rust caller branching on the return value has no behavioral counterpart and any automated signature-compatibility check (e.g., trait conformance mirroring `proto.Message`) will disagree on the return type."
+    },
+    {
+      "id": "feat-43a42b165b98",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Receiver semantics divergence: enum-level vs instance-level",
+      "location": "syncthing-rs/src/bep_compat.rs:27",
+      "message": "The Go Descriptor is defined on the enum type itself (func (MessageType) Descriptor(), bep.pb.go:70) with a value receiver, meaning it does not use the receiver value and always returns the single canonical descriptor for the enum type. The Rust version takes \u0026self (bep_compat.rs:27) and passes $name into a helper, making the return value potentially vary per-instance depending on how the macro is instantiated. If the descriptor() helper is keyed on a per-variant name rather than the enum-level type name, different enum variants could return different descriptor strings, which is incorrect — Go always returns the same file_bep_bep_proto_enumTypes[0] descriptor regardless of variant."
+    },
+    {
+      "id": "feat-43a42b165b98",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "delegate target opacity: file-registered descriptor vs freestanding helper",
+      "location": "syncthing-rs/src/bep_compat.rs:28",
+      "message": "Go's implementation delegates to file_bep_bep_proto_enumTypes[0].Descriptor() (bep.pb.go:71), which is a file-level registry entry populated at init time from the raw proto file descriptor bytes, guaranteeing the returned descriptor is identical to the schema embedded in the binary. The Rust version calls descriptor($name) (bep_compat.rs:28) whose provenance is unverified in this snippet; if descriptor() constructs or looks up metadata by string name rather than from the compiled proto file descriptor, the result can drift from the canonical schema, causing crash-recovery and memory-cap-50mb scenarios to observe inconsistent metadata."
+    },
+    {
+      "id": "feat-548fbf6dbdba",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "DeviceID downgraded to plain string",
+      "location": "syncthing-rs/src/db.rs:176",
+      "message": "Go's `device` parameter is `protocol.DeviceID`, a fixed-size 32-byte array with built-in validation, formatting, and binary-safe comparison. Rust accepts `\u0026str`, a variable-length UTF-8 string with no compile-time size or format guarantee. This loses type-level validation, may produce different ordering/comparison semantics for device identifiers, and risks wire/schema incompatibility if the string encoding does not exactly match the canonical Luhn-checksummed base32 representation expected elsewhere."
+    },
+    {
+      "id": "feat-5b37bb298002",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "deferred vs immediate error model",
+      "location": "syncthing-rs/src/db.rs:161",
+      "message": "Go's `func() error` return allows the caller to iterate over available results and then check for an error that occurred during iteration (partial success is observable). Rust's `Result\u003cVec\u003cFileInfo\u003e, String\u003e` is all-or-nothing: callers receive either the complete set or an error, with no partial-result path. This is a missing behavior branch that affects crash-recovery and index-sequence-behavior scenarios where partial iteration followed by error inspection is meaningful."
+    },
+    {
+      "id": "feat-5b37bb298002",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "device parameter type fidelity",
+      "location": "syncthing-rs/src/db.rs:158",
+      "message": "Go uses `protocol.DeviceID` (a structured type, typically a 32-byte array with specific binary encoding and validation) for the `device` parameter. Rust uses `\u0026str`, a plain UTF-8 string with no structural validation. This loses type-level guarantees around device identity encoding and could cause wire/schema incompatibility if DeviceID's binary representation does not round-trip cleanly through a string encoding."
+    },
+    {
+      "id": "feat-5f8adcf77c68",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Deferred error callback collapsed into Result",
+      "location": "syncthing-rs/src/db.rs:154",
+      "message": "Go's second return value func() error (interface.go:40) is called after the iterator is drained, reporting errors that occurred during iteration (e.g., corrupt key decoding mid-scan). Rust's Result\u003cVec\u003cFileInfo\u003e, String\u003e conflates iteration errors with initialization errors and cannot represent partial success — if an error occurs after N items are decoded, Go surfaces those N items plus the error, while Rust surfaces only the error. This is a missing behavior path (Check 4) that affects crash-recovery and index-sequence-behavior scenarios."
+    },
+    {
+      "id": "feat-64a410fa1be9",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "device param type mismatch",
+      "location": "syncthing-rs/src/db.rs:197",
+      "message": "Go `GetDeviceSequence` accepts `device protocol.DeviceID` (a strongly-typed 32-byte identifier with defined marshalling, comparison, and validation semantics), but the Rust `get_device_sequence` accepts `device: \u0026str`, a plain string with no compile-time type safety. Other methods in the same Rust trait (e.g. `list_devices_for_folder` at line 199, `remote_sequences` at line 200) correctly use the `DeviceId` type for device identifiers. This inconsistency means callers can pass arbitrary strings without validation, and if the underlying implementation constructs database keys from the device value, a string-encoded device ID may produce different key bytes than the Go binary `DeviceID` representation, causing lookup misses or data isolation failures across the two implementations."
+    },
+    {
+      "id": "feat-722588d75244",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Device parameter loses DeviceID type safety",
+      "location": "syncthing-rs/src/db.rs:165",
+      "message": "Go declares the device parameter as `protocol.DeviceID`, a strongly-typed 32-byte identifier with its own marshaling, validation, and `String()` representation. Rust accepts a plain `\u0026str`, deferring all validation to the implementation and permitting malformed device identifiers to reach the storage layer. Other methods in the same Rust trait (e.g. `list_devices_for_folder` at line 199) already use `DeviceId` as a return type, so the input parameter should also use `DeviceId` (or `\u0026DeviceId`) for consistency and to prevent encoding mismatches on the key path."
+    },
+    {
+      "id": "feat-722588d75244",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Error type downgraded from interface to String",
+      "location": "syncthing-rs/src/db.rs:167",
+      "message": "Go's `func() error` returns a value satisfying the `error` interface, which in practice carries structured context (e.g., `*os.PathError`, wrapped sentinel errors queryable with `errors.Is`/`errors.As`). Rust uses `String`, which discards error classification and makes it impossible for callers to programmatically distinguish I/O errors from not-found or corruption errors — a behavioral difference relevant to the `scenario/crash-recovery` and `scenario/wal-free-durability` tests that may need to branch on error kind."
+    },
+    {
+      "id": "feat-7239b98a92db",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Nil-receiver branch absent",
+      "location": "syncthing-rs/src/bep_compat.rs:35",
+      "message": "Go lines 462-469 handle a nil receiver: when `x == nil`, the method returns `mi.MessageOf(x)`, yielding a valid type-level reflection message that carries the `MessageDescriptor` without instance data. This is used by protobuf internals and user code to obtain type metadata from a nil typed pointer (e.g., `(*ClusterConfig)(nil).ProtoReflect().Descriptor()`). The Rust signature `\u0026self` makes this path unreachable; there is no equivalent way to obtain the message descriptor without a live instance, so any Go call site that invokes `ProtoReflect` on a nil pointer to extract type-level metadata has no Rust counterpart."
+    },
+    {
+      "id": "feat-8613abc9d7df",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Missing nil-receiver guard",
+      "location": "syncthing-rs/src/bep_compat.rs:237",
+      "message": "The Go method (bep.pb.go:612) contains an explicit nil-receiver check that returns the zero value `false` when `x` is nil, which is idiomatic for protobuf-generated Go getters and is relied upon by callers that may hold a nil `*ClusterConfig`. The Rust implementation takes `\u0026self`, which cannot be called on a None value, but provides no companion free-function or `Option`-aware wrapper that replicates the nil-returns-false semantics. If any call site in the ported code holds an `Option\u003cClusterConfig\u003e` and unconditionally invokes `GetSecondary` (mirroring Go's nil-safe call pattern), it will panic or fail to compile rather than silently returning `false`, diverging from the Go behavior."
+    },
+    {
+      "id": "feat-862f3970a59a",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Counts struct missing Sequence, DeviceID, LocalFlags metadata",
+      "location": "syncthing-rs/src/db.rs:81",
+      "message": "Go `Counts` at `internal/db/counts.go:16` carries `Sequence int64`, `DeviceID protocol.DeviceID`, and `LocalFlags protocol.FlagLocal` fields that are populated by `summarizeCounts` and consumed downstream (e.g., the `Add` method at line 27 merges `LocalFlags` via bitwise OR). Rust `Counts` omits all three fields, meaning any caller that depends on per-bucket metadata from `count_need` results—such as distinguishing counts by local-flag category—will receive incomplete data. The Rust struct also adds a `receive_only_changed usize` field with no Go counterpart, introducing schema drift."
+    },
+    {
+      "id": "feat-950476b0768e",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Two-phase error model collapsed to single Result",
+      "location": "syncthing-rs/src/db.rs:153",
+      "message": "Go's signature at interface.go:39 returns a func() error closure that is called after iteration completes to retrieve deferred errors (e.g., storage I/O errors encountered mid-scan). This allows callers to distinguish between \"no results because empty\" and \"no results because of error\" after partial consumption. Rust's Result\u003cVec\u003cFileInfo\u003e, String\u003e at db.rs:153 collapses this into a single up-front error check, eliminating the ability to handle late-arising errors distinctly from early ones and changing the observable error-handling contract that callers of the Go interface depend on."
+    },
+    {
+      "id": "feat-ba583c1ba9fb",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Error type loses structured error info",
+      "location": "syncthing-rs/src/db.rs:198",
+      "message": "Go `ListFolders` returns the `error` interface, which supports `errors.Is`/`errors.As` unwrapping and sentinel-error matching (e.g., database-closed or I/O errors). The Rust port uses `Result\u003cVec\u003cString\u003e, String\u003e`, collapsing all error information into an opaque string. Any caller that needs to branch on error kind (retry on transient failure, ignore on not-found, etc.) cannot do so, breaking behavioral equivalence for error-path handling."
+    },
+    {
+      "id": "feat-c33e4161dc66",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Deferred error closure collapsed into single Result",
+      "location": "syncthing-rs/src/db.rs:172",
+      "message": "Go's second return value `func() error` is a deferred error reporter: callers iterate over results and then call the closure to discover whether the underlying storage encountered an error mid-scan. Rust's `Result\u003cVec\u003cFileMetadata\u003e, String\u003e` conflates iteration and error reporting into a single call — a storage error during scan either aborts the entire call (returning Err, yielding zero results) or is unreportable (if partial results were already buffered). This changes observable behavior for any caller that processes partial results before checking the error, and means crash-recovery scenarios (`scenario/crash-recovery`) where a read fails mid-iteration will surface differently: Go callers see partial data plus a deferred error, Rust callers see either all data or no data."
+    },
+    {
+      "id": "feat-d5211ea19875",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Nil-slice vs empty-Vec distinction collapsed",
+      "location": "syncthing-rs/src/bep_compat.rs:234",
+      "message": "Go distinguishes between a nil Folders field (returns nil, which serializes to JSON `null` and can be detected via `== nil`) and a zero-length initialized slice (returns `[]`, serializable as `[]`). The Rust `.clone()` on an empty `Vec\u003cFolder\u003e` always yields an empty Vec, collapsing this distinction. Any downstream logic or serialization path that branches on nil-vs-empty (e.g., deciding whether ClusterConfig has been populated at all vs explicitly set to no folders) will diverge, which may affect scenario/index-sequence-behavior where unset-vs-empty drives first-sync logic."
+    },
+    {
+      "id": "feat-d5211ea19875",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Owned values instead of pointer-level indirection",
+      "location": "syncthing-rs/src/bep_compat.rs:233",
+      "message": "Go returns `[]*Folder` (slice of pointers), giving callers reference semantics per element; two callers obtaining the same slice share identical `*Folder` pointers. Rust returns `Vec\u003cFolder\u003e` (owned values), so each call site gets independent copies with no aliasing. This affects identity-equality checks and any scenario where two components are expected to observe the same Folder instance (e.g., scenario/memory-cap-50mb, where duplicate pointer-based sharing keeps memory bounded but cloning duplicates the data on every access)."
+    },
+    {
+      "id": "feat-ff81b14e58b0",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "Signed-to-unsigned limit/offset prevents negative sentinels",
+      "location": "syncthing-rs/src/db.rs:165-184",
+      "message": "Go declares `limit int` and `offset int` as signed integers in `AllLocalFilesBySequence` and `AllNeededGlobalFiles`. Rust uses `usize` (unsigned). Go implementations commonly accept negative values (e.g., `limit = -1` meaning \"no limit\") as a sentinel; `usize` makes this impossible, silently changing the semantics of the \"unlimited\" case and potentially panicking on conversion if a caller attempts to pass a negative value through an `as usize` cast."
+    },
+    {
+      "id": "feat-ff81b14e58b0",
+      "tier": "T1",
+      "priority": "P2",
+      "title": "get_mtime error contract and type diverge from Go",
+      "location": "syncthing-rs/src/db.rs:217",
+      "message": "Go's `GetMtime` returns `(ondisk, virtual time.Time)` with no error return, meaning it is contractually infallible. Rust's `get_mtime` returns `Result\u003c(i64, i64), String\u003e`, adding a failure path that Go callers never expect. Additionally, `time.Time` carries nanosecond precision, monotonic clock reading, and timezone metadata; replacing it with bare `i64` (presumably epoch nanoseconds) loses timezone and monotonic information, which can cause drift in mtime comparison logic if any consumer relies on `time.Time.Equal()` semantics rather than raw wall-clock comparison."
+    }
+  ],
+  "results": [
+    {
+      "id": "feat-1ccb621f2319",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.SetIndexID",
+      "rust_symbol": "set_index_id",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-1ccb621f2319.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-1ccb621f2319.txt",
+      "duration_ms": 31176,
+      "finding_count": 1
+    },
+    {
+      "id": "feat-347032328f00",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.DropAllIndexIDs",
+      "rust_symbol": "drop_all_index_ids",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-347032328f00.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-347032328f00.txt",
+      "duration_ms": 261388,
+      "finding_count": 1
+    },
+    {
+      "id": "feat-34938ed53bc1",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "ClusterConfig.ProtoMessage",
+      "rust_symbol": "ProtoMessage",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-34938ed53bc1.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-34938ed53bc1.txt",
+      "duration_ms": 21193,
+      "finding_count": 1
+    },
+    {
+      "id": "feat-43a42b165b98",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "ClusterConfig.Descriptor",
+      "rust_symbol": "Descriptor",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-43a42b165b98.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-43a42b165b98.txt",
+      "duration_ms": 30106,
+      "finding_count": 3
+    },
+    {
+      "id": "feat-44b57231bd5e",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.RemoteSequences",
+      "rust_symbol": "remote_sequences",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-44b57231bd5e.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-44b57231bd5e.txt",
+      "duration_ms": 91520,
+      "finding_count": 2
+    },
+    {
+      "id": "feat-548fbf6dbdba",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.AllNeededGlobalFiles",
+      "rust_symbol": "all_needed_global_files",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-548fbf6dbdba.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-548fbf6dbdba.txt",
+      "duration_ms": 32040,
+      "finding_count": 3
+    },
+    {
+      "id": "feat-5b37bb298002",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.AllLocalFilesBySequence",
+      "rust_symbol": "all_local_files_by_sequence",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-5b37bb298002.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-5b37bb298002.txt",
+      "duration_ms": 34330,
+      "finding_count": 4
+    },
+    {
+      "id": "feat-5f8adcf77c68",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.AllLocalFilesOrdered",
+      "rust_symbol": "all_local_files_ordered",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-5f8adcf77c68.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-5f8adcf77c68.txt",
+      "duration_ms": 37544,
+      "finding_count": 3
+    },
+    {
+      "id": "feat-5fe7c2c71ed7",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.GetGlobalFile",
+      "rust_symbol": "get_global_file",
+      "status": "error",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-5fe7c2c71ed7.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-5fe7c2c71ed7.txt",
+      "duration_ms": 371741,
+      "finding_count": 0,
+      "error": "unparseable line (missing FINDING prefix): \"Now let me look at how Go computes the global winner during updates to compare with Rust's `prefer_global`:\""
+    },
+    {
+      "id": "feat-64a410fa1be9",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.GetDeviceSequence",
+      "rust_symbol": "get_device_sequence",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-64a410fa1be9.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-64a410fa1be9.txt",
+      "duration_ms": 32233,
+      "finding_count": 1
+    },
+    {
+      "id": "feat-67c9d53075f2",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.GetIndexID",
+      "rust_symbol": "get_index_id",
+      "status": "error",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-67c9d53075f2.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-67c9d53075f2.txt",
+      "duration_ms": 221540,
+      "finding_count": 0,
+      "error": "unparseable line (missing FINDING prefix): \"I'll examine both the interface signatures and implementations to identify concrete discrepancies. Let me gather the necessary context.\""
+    },
+    {
+      "id": "feat-6b78b71f22e8",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.ListDevicesForFolder",
+      "rust_symbol": "list_devices_for_folder",
+      "status": "error",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-6b78b71f22e8.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-6b78b71f22e8.txt",
+      "duration_ms": 257186,
+      "finding_count": 0,
+      "error": "unparseable line (missing FINDING prefix): \"I need to examine the actual implementations of both the Go and Rust versions to find behavioral discrepancies, not just the interface/trait signatures. Let me look at the implementation files.\""
+    },
+    {
+      "id": "feat-722588d75244",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.AllLocalFilesWithPrefix",
+      "rust_symbol": "all_local_files_with_prefix",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-722588d75244.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-722588d75244.txt",
+      "duration_ms": 35705,
+      "finding_count": 3
+    },
+    {
+      "id": "feat-7239b98a92db",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "ClusterConfig.ProtoReflect",
+      "rust_symbol": "ProtoReflect",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-7239b98a92db.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-7239b98a92db.txt",
+      "duration_ms": 32983,
+      "finding_count": 2
+    },
+    {
+      "id": "feat-8613abc9d7df",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "ClusterConfig.GetSecondary",
+      "rust_symbol": "GetSecondary",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-8613abc9d7df.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-8613abc9d7df.txt",
+      "duration_ms": 23282,
+      "finding_count": 1
+    },
+    {
+      "id": "feat-862f3970a59a",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.CountNeed",
+      "rust_symbol": "count_need",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-862f3970a59a.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-862f3970a59a.txt",
+      "duration_ms": 288881,
+      "finding_count": 4
+    },
+    {
+      "id": "feat-8f292affac49",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.CountLocal",
+      "rust_symbol": "count_local",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-8f292affac49.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-8f292affac49.txt",
+      "duration_ms": 26321,
+      "finding_count": 1
+    },
+    {
+      "id": "feat-909eb03487ab",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.GetDeviceFile",
+      "rust_symbol": "get_device_file",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-909eb03487ab.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-909eb03487ab.txt",
+      "duration_ms": 34666,
+      "finding_count": 1
+    },
+    {
+      "id": "feat-90fbf7f225fe",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.DropDevice",
+      "rust_symbol": "drop_device",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-90fbf7f225fe.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-90fbf7f225fe.txt",
+      "duration_ms": 31603,
+      "finding_count": 1
+    },
+    {
+      "id": "feat-950476b0768e",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.AllLocalFiles",
+      "rust_symbol": "all_local_files",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-950476b0768e.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-950476b0768e.txt",
+      "duration_ms": 38364,
+      "finding_count": 3
+    },
+    {
+      "id": "feat-b4f8008a7b4b",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.AllLocalBlocksWithHash",
+      "rust_symbol": "all_local_blocks_with_hash",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-b4f8008a7b4b.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-b4f8008a7b4b.txt",
+      "duration_ms": 30150,
+      "finding_count": 2
+    },
+    {
+      "id": "feat-b6fe9d63330b",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.DropFolder",
+      "rust_symbol": "drop_folder",
+      "status": "error",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-b6fe9d63330b.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-b6fe9d63330b.txt",
+      "duration_ms": 359348,
+      "finding_count": 0,
+      "error": "unparseable line (missing FINDING prefix): \"I need to review the `DropFolder`/`drop_folder` mapping for behavioral equivalence. The provided snippets only show interface/trait signatures. Let me find the implementations to do a proper review.\""
+    },
+    {
+      "id": "feat-ba583c1ba9fb",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.ListFolders",
+      "rust_symbol": "list_folders",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-ba583c1ba9fb.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-ba583c1ba9fb.txt",
+      "duration_ms": 37888,
+      "finding_count": 1
+    },
+    {
+      "id": "feat-bbb7778cf615",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.CountGlobal",
+      "rust_symbol": "count_global",
+      "status": "error",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-bbb7778cf615.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-bbb7778cf615.txt",
+      "duration_ms": 182786,
+      "finding_count": 0,
+      "error": "unparseable line (missing FINDING prefix): \"I need to examine the actual implementations and the `Counts` types to verify behavioral equivalence. Let me search the codebase.\""
+    },
+    {
+      "id": "feat-bd7c4406ffe1",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.AllGlobalFiles",
+      "rust_symbol": "all_global_files",
+      "status": "error",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-bd7c4406ffe1.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-bd7c4406ffe1.txt",
+      "duration_ms": 639354,
+      "finding_count": 0,
+      "error": "unparseable line (missing FINDING prefix): \"I need to examine the actual implementations and surrounding types to make a thorough comparison. Let me gather context from both sides.\""
+    },
+    {
+      "id": "feat-c33e4161dc66",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.AllLocalFilesWithBlocksHash",
+      "rust_symbol": "all_local_files_with_blocks_hash",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-c33e4161dc66.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-c33e4161dc66.txt",
+      "duration_ms": 27829,
+      "finding_count": 2
+    },
+    {
+      "id": "feat-d5211ea19875",
+      "tier": "T1",
+      "kind": "method",
+      "symbol": "ClusterConfig.GetFolders",
+      "rust_symbol": "GetFolders",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-d5211ea19875.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-d5211ea19875.txt",
+      "duration_ms": 41333,
+      "finding_count": 3
+    },
+    {
+      "id": "feat-dc53fca4b7ec",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.GetGlobalAvailability",
+      "rust_symbol": "get_global_availability",
+      "status": "error",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-dc53fca4b7ec.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-dc53fca4b7ec.txt",
+      "duration_ms": 152122,
+      "finding_count": 0,
+      "error": "unparseable line (missing FINDING prefix): \"I'll examine both the interface signatures and the actual implementations to find concrete behavioral discrepancies. Let me look at the implementation files.\""
+    },
+    {
+      "id": "feat-e03a3eb8083c",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.AllGlobalFilesPrefix",
+      "rust_symbol": "all_global_files_prefix",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-e03a3eb8083c.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-e03a3eb8083c.txt",
+      "duration_ms": 35283,
+      "finding_count": 1
+    },
+    {
+      "id": "feat-ff81b14e58b0",
+      "tier": "T1",
+      "kind": "interface_method",
+      "symbol": "DB.Update",
+      "rust_symbol": "update",
+      "status": "findings",
+      "raw_path": "parity/diff-reports/function-pair-raw/feat-ff81b14e58b0.txt",
+      "prompt_path": "parity/diff-reports/function-pair-prompts/feat-ff81b14e58b0.txt",
+      "duration_ms": 55875,
+      "finding_count": 4
+    }
+  ]
+}

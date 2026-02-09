@@ -193,8 +193,18 @@ impl Store {
         for segment in &manifest.segments {
             let path = config.root.join(segment);
             if !path.exists() {
-                let file = File::create(&path)?;
-                file.sync_all()?;
+                if segment == &manifest.active_segment
+                    && segment == JOURNAL_FILE_NAME
+                    && manifest.segments.len() == 1
+                {
+                    let file = File::create(&path)?;
+                    file.sync_all()?;
+                } else {
+                    return Err(io::Error::new(
+                        ErrorKind::NotFound,
+                        format!("manifest segment missing: {}", path.display()),
+                    ));
+                }
             }
         }
         sync_dir(&config.root)?;
@@ -211,6 +221,7 @@ impl Store {
         let (flat_files, deleted_tombstones, approx_memory_bytes) = Self::load_from_segments(
             &config.root,
             &manifest.segments,
+            &manifest.active_segment,
             &block_blob_path,
             config.max_deleted_tombstones,
         )?;
@@ -655,6 +666,7 @@ impl Store {
     fn load_from_segments(
         root: &Path,
         segments: &[String],
+        active_segment: &str,
         block_blob_path: &Path,
         max_tombstones: usize,
     ) -> io::Result<(
@@ -672,6 +684,7 @@ impl Store {
         let mut payload_buf: Vec<u8> = Vec::new();
 
         for segment in segments {
+            let is_active_segment = segment == active_segment;
             let path = root.join(segment);
             if !path.exists() {
                 return Err(io::Error::new(
@@ -679,7 +692,7 @@ impl Store {
                     format!("manifest segment missing: {}", path.display()),
                 ));
             }
-            let file = File::open(path)?;
+            let file = File::open(&path)?;
             let mut reader = BufReader::new(file);
 
             loop {
@@ -694,23 +707,57 @@ impl Store {
                 let expected_checksum = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
 
                 if len == 0 || len > LOG_RECORD_MAX_BYTES {
-                    break;
+                    if is_active_segment {
+                        break;
+                    }
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!(
+                            "invalid record length in archived segment {}",
+                            path.display()
+                        ),
+                    ));
                 }
 
                 payload_buf.resize(len as usize, 0);
                 match reader.read_exact(&mut payload_buf) {
                     Ok(()) => {}
-                    Err(err) if err.kind() == ErrorKind::UnexpectedEof => break,
+                    Err(err) if err.kind() == ErrorKind::UnexpectedEof => {
+                        if is_active_segment {
+                            break;
+                        }
+                        return Err(io::Error::new(
+                            ErrorKind::InvalidData,
+                            format!("truncated record in archived segment {}", path.display()),
+                        ));
+                    }
                     Err(err) => return Err(err),
                 }
 
                 if checksum(&payload_buf) != expected_checksum {
-                    break;
+                    if is_active_segment {
+                        break;
+                    }
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!("checksum mismatch in archived segment {}", path.display()),
+                    ));
                 }
 
                 let op = match decode_op(&payload_buf) {
                     Some(op) => op,
-                    None => break,
+                    None => {
+                        if is_active_segment {
+                            break;
+                        }
+                        return Err(io::Error::new(
+                            ErrorKind::InvalidData,
+                            format!(
+                                "invalid record payload in archived segment {}",
+                                path.display()
+                            ),
+                        ));
+                    }
                 };
                 apply_op(
                     &mut files,
@@ -1871,6 +1918,94 @@ mod tests {
         );
         assert_eq!(store.file_count(), 1);
         assert!(store.get_file("alpha", "local", "a.txt").is_some());
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn open_fails_when_manifest_segment_missing() {
+        let root = temp_root("manifest-segment-missing");
+        let cfg = StoreConfig::new(&root).with_memory_cap_mb(256);
+        {
+            let mut store = Store::open(cfg.clone()).expect("open");
+            let long_path_tail = "x".repeat(40_000);
+            for i in 0_u64..512 {
+                let path = format!("bulk/{i:04}-{long_path_tail}.bin");
+                store
+                    .upsert_file(meta("alpha", &path, i + 1))
+                    .expect("upsert");
+                if store
+                    .journal_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().starts_with(COMMIT_SEGMENT_PREFIX))
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+            }
+        }
+
+        let manifest = read_manifest(&root);
+        assert!(manifest.segments.len() >= 2, "must have archived segment");
+        let archived = manifest
+            .segments
+            .iter()
+            .find(|segment| *segment != &manifest.active_segment)
+            .expect("archived segment")
+            .clone();
+        fs::remove_file(root.join(&archived)).expect("remove archived segment");
+
+        let err = Store::open(cfg).expect_err("must fail when manifest segment is missing");
+        assert!(err.to_string().contains("manifest segment missing"));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn open_fails_on_corruption_in_non_active_segment() {
+        let root = temp_root("archived-segment-corrupt");
+        let cfg = StoreConfig::new(&root).with_memory_cap_mb(256);
+        {
+            let mut store = Store::open(cfg.clone()).expect("open");
+            let long_path_tail = "y".repeat(40_000);
+            for i in 0_u64..512 {
+                let path = format!("bulk/{i:04}-{long_path_tail}.bin");
+                store
+                    .upsert_file(meta("alpha", &path, i + 1))
+                    .expect("upsert");
+                if store
+                    .journal_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().starts_with(COMMIT_SEGMENT_PREFIX))
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+            }
+        }
+
+        let manifest = read_manifest(&root);
+        let archived = manifest
+            .segments
+            .iter()
+            .find(|segment| *segment != &manifest.active_segment)
+            .expect("archived segment")
+            .clone();
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(root.join(&archived))
+            .expect("open archived segment");
+        file.write_all(&0_u32.to_le_bytes())
+            .expect("write bad length");
+        file.write_all(&0_u32.to_le_bytes())
+            .expect("write bad checksum");
+        file.sync_all().expect("sync");
+
+        let err = Store::open(cfg).expect_err("must fail on archived segment corruption");
+        assert!(
+            err.to_string().contains("invalid record length")
+                || err.to_string().contains("invalid record")
+        );
 
         fs::remove_dir_all(root).expect("cleanup");
     }

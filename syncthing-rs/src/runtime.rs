@@ -1400,6 +1400,14 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         );
     }
 
+    if path.starts_with("/rest/") && !path.starts_with("/rest/noauth/") {
+        match is_authenticated_request(&params, runtime) {
+            Ok(true) => {}
+            Ok(false) => return make_api_error(401, "authentication required"),
+            Err(err) => return make_api_error(500, &err),
+        }
+    }
+
     match path {
         "/rest/system/ping" => {
             if method != &Method::Get && method != &Method::Post {
@@ -1421,10 +1429,29 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 .get("user")
                 .cloned()
                 .unwrap_or_else(|| "anonymous".to_string());
+            let provided_password = params.get("password").cloned().unwrap_or_default();
             let mut state = match runtime.state.write() {
                 Ok(guard) => guard,
                 Err(_) => return make_api_error(500, "api state lock poisoned"),
             };
+            let expected_user = state
+                .gui
+                .get("user")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let expected_password = state
+                .gui
+                .get("password")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if !expected_user.is_empty() || !expected_password.is_empty() {
+                if user != expected_user || provided_password != expected_password {
+                    return make_api_error(401, "invalid credentials");
+                }
+            }
             state.active_auth_users.insert(user.clone());
             ApiReply::json(200, json!({"authenticated": true, "user": user}))
         }
@@ -2924,6 +2951,38 @@ fn parse_limit(
 
 fn bool_param(params: &BTreeMap<String, String>, key: &str) -> Option<bool> {
     params.get(key).map(|v| parse_xml_bool(v))
+}
+
+fn auth_required(state: &ApiRuntimeState) -> bool {
+    let user = state
+        .gui
+        .get("user")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let password = state
+        .gui
+        .get("password")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    !user.is_empty() || !password.is_empty()
+}
+
+fn is_authenticated_request(
+    params: &BTreeMap<String, String>,
+    runtime: &DaemonApiRuntime,
+) -> Result<bool, String> {
+    let state = runtime
+        .state
+        .read()
+        .map_err(|_| "api state lock poisoned".to_string())?;
+    if !auth_required(&state) {
+        return Ok(true);
+    }
+    let Some(user) = params.get("user") else {
+        return Ok(false);
+    };
+    Ok(state.active_auth_users.contains(user))
 }
 
 fn path_param<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
@@ -6254,6 +6313,37 @@ mod tests {
         assert_eq!(names, vec!["a.txt", "b.txt", "c.txt"]);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn api_requires_auth_when_gui_credentials_are_configured() {
+        let runtime = test_api_runtime(Arc::new(RwLock::new(NewModel())), Vec::new(), 0);
+        {
+            let mut state = runtime.state.write().expect("state lock");
+            state.gui["user"] = json!("alice");
+            state.gui["password"] = json!("secret");
+        }
+
+        let unauthorized = build_api_response(&Method::Get, "/rest/system/status", &runtime);
+        assert_eq!(unauthorized.status_code, StatusCode(401));
+
+        let wrong_login = build_api_response(
+            &Method::Post,
+            "/rest/noauth/auth/password?user=alice&password=wrong",
+            &runtime,
+        );
+        assert_eq!(wrong_login.status_code, StatusCode(401));
+
+        let login = build_api_response(
+            &Method::Post,
+            "/rest/noauth/auth/password?user=alice&password=secret",
+            &runtime,
+        );
+        assert_eq!(login.status_code, StatusCode(200));
+
+        let authorized =
+            build_api_response(&Method::Get, "/rest/system/status?user=alice", &runtime);
+        assert_eq!(authorized.status_code, StatusCode(200));
     }
 
     #[test]

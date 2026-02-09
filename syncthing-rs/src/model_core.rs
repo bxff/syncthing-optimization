@@ -40,6 +40,7 @@ pub(crate) static errNoVersioner: &str = "no versioner configured";
 pub(crate) static errStopped: &str = "model stopped";
 pub(crate) static folderFactories: &str = "folder_factories";
 pub(crate) static underscore_var: &str = "_";
+pub(crate) const MAX_BEP_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Availability {
@@ -941,20 +942,30 @@ impl model {
                 offset,
                 size,
                 hash: _,
-            } => match self.RequestData(folder, name, *offset, *size as usize) {
-                Ok(data) => Ok(Some(BepMessage::Response {
-                    id: *id,
-                    code: 0,
-                    data_len: data.len() as u32,
-                    data,
-                })),
-                Err(_) => Ok(Some(BepMessage::Response {
-                    id: *id,
-                    code: 1,
-                    data_len: 0,
-                    data: Vec::new(),
-                })),
-            },
+            } => {
+                if (*size as usize) > MAX_BEP_REQUEST_BYTES {
+                    return Ok(Some(BepMessage::Response {
+                        id: *id,
+                        code: 1,
+                        data_len: 0,
+                        data: Vec::new(),
+                    }));
+                }
+                match self.RequestData(folder, name, *offset, *size as usize) {
+                    Ok(data) => Ok(Some(BepMessage::Response {
+                        id: *id,
+                        code: 0,
+                        data_len: data.len() as u32,
+                        data,
+                    })),
+                    Err(_) => Ok(Some(BepMessage::Response {
+                        id: *id,
+                        code: 1,
+                        data_len: 0,
+                        data: Vec::new(),
+                    })),
+                }
+            }
             BepMessage::Response {
                 id: _,
                 code,
@@ -2175,6 +2186,34 @@ mod tests {
             response,
             Some(BepMessage::Response {
                 id: 7,
+                code: 1,
+                data_len: 0,
+                data: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn apply_bep_request_rejects_oversized_payload_request() {
+        let mut m = NewModel();
+        let response = m
+            .ApplyBepMessage(
+                "peer-a",
+                &BepMessage::Request {
+                    id: 9,
+                    folder: "default".to_string(),
+                    name: "a.txt".to_string(),
+                    offset: 0,
+                    size: (MAX_BEP_REQUEST_BYTES as u32) + 1,
+                    hash: "h".to_string(),
+                },
+            )
+            .expect("response generated");
+
+        assert_eq!(
+            response,
+            Some(BepMessage::Response {
+                id: 9,
                 code: 1,
                 data_len: 0,
                 data: Vec::new(),

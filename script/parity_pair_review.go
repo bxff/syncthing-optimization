@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -49,6 +50,13 @@ var (
 	todoFixmePattern            = regexp.MustCompile(`(?i)\b(TODO|FIXME)\b`)
 	syntheticPlaceholderPattern = regexp.MustCompile(`(?i)\b(synthetic|placeholder|stub)\b`)
 	numberedSnippetPattern      = regexp.MustCompile(`^\s*(\d+)\s+\|\s?(.*)$`)
+	goConstAssignPattern        = regexp.MustCompile(`^\s*(const|var)\s+([A-Za-z_]\w*)\b[^=]*=\s*(.+)$`)
+	rustConstAssignPattern      = regexp.MustCompile(`^\s*(?:pub(?:\([^)]+\))?\s+)?(?:const|static)\s+([A-Za-z_]\w*)\b[^=]*=\s*(.+);`)
+	goFuncSigPattern            = regexp.MustCompile(`^\s*func\s*(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*\(([^)]*)\)\s*(.*)$`)
+	rustFuncSigPattern          = regexp.MustCompile(`^\s*(?:pub(?:\([^)]+\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*(?:->\s*(.+?))?\s*\{?\s*$`)
+	goBranchTokenPattern        = regexp.MustCompile(`\b(if|switch|for|select)\b`)
+	rustBranchTokenPattern      = regexp.MustCompile(`\b(if|match|for|while|loop)\b`)
+	rustUnwrapPattern           = regexp.MustCompile(`\.(unwrap|expect)\s*\(`)
 )
 
 type parityMapping struct {
@@ -106,19 +114,20 @@ type reviewPlanItem struct {
 }
 
 type reviewReport struct {
-	SchemaVersion int                `json:"schema_version"`
-	GeneratedAt   string             `json:"generated_at"`
-	PlanPath      string             `json:"plan_path"`
-	Model         string             `json:"model"`
-	TotalItems    int                `json:"total_items"`
-	Completed     int                `json:"completed"`
-	NoFindings    int                `json:"no_findings"`
-	WithFindings  int                `json:"with_findings"`
-	Errors        int                `json:"errors"`
-	TierCounts    map[string]int     `json:"tier_counts"`
-	SeverityCount map[string]int     `json:"severity_count"`
-	Findings      []pairFinding      `json:"findings"`
-	Results       []pairReviewResult `json:"results"`
+	SchemaVersion    int                `json:"schema_version"`
+	GeneratedAt      string             `json:"generated_at"`
+	PlanPath         string             `json:"plan_path"`
+	Model            string             `json:"model"`
+	TotalItems       int                `json:"total_items"`
+	Completed        int                `json:"completed"`
+	NoFindings       int                `json:"no_findings"`
+	WithFindings     int                `json:"with_findings"`
+	AgentUnavailable int                `json:"agent_unavailable"`
+	Errors           int                `json:"errors"`
+	TierCounts       map[string]int     `json:"tier_counts"`
+	SeverityCount    map[string]int     `json:"severity_count"`
+	Findings         []pairFinding      `json:"findings"`
+	Results          []pairReviewResult `json:"results"`
 }
 
 type pairReviewResult struct {
@@ -156,35 +165,51 @@ type opencodeEvent struct {
 	} `json:"part"`
 }
 
+type opencodeErrorEvent struct {
+	Type  string `json:"type"`
+	Error struct {
+		Name string `json:"name"`
+		Data struct {
+			Message string `json:"message"`
+		} `json:"data"`
+	} `json:"error"`
+}
+
 type runConfig struct {
-	PlanPath          string
-	ReportPath        string
-	RawDir            string
-	PromptDir         string
-	RawJSONLPath      string
-	PromptJSONLPath   string
-	ArtifactMode      string
-	WriteRaw          bool
-	WritePrompts      bool
-	MaxArtifactBytes  int
-	CachePath         string
-	UseCache          bool
-	WriteRollups      bool
-	RollupDir         string
-	RollupMaxFindings int
-	OpencodeBin       string
-	Model             string
-	Workers           int
-	Timeout           time.Duration
-	MaxSnippetLines   int
-	MaxSnippetBytes   int
-	TierFilter        string
-	Limit             int
-	Offset            int
-	DryRun            bool
-	SkipAgentOnLocal  bool
-	cache             *reviewCacheStore
-	artifactMu        *sync.Mutex
+	PlanPath                  string
+	ReportPath                string
+	RawDir                    string
+	PromptDir                 string
+	RawJSONLPath              string
+	PromptJSONLPath           string
+	ArtifactMode              string
+	WriteRaw                  bool
+	WritePrompts              bool
+	MaxArtifactBytes          int
+	CachePath                 string
+	UseCache                  bool
+	WriteRollups              bool
+	RollupDir                 string
+	RollupMaxFindings         int
+	OpencodeBin               string
+	Model                     string
+	Workers                   int
+	Timeout                   time.Duration
+	MaxRetries                int
+	RetryDelay                time.Duration
+	MaxSnippetLines           int
+	MaxSnippetBytes           int
+	CheckpointEvery           int
+	TierFilter                string
+	Limit                     int
+	Offset                    int
+	DryRun                    bool
+	LocalOnly                 bool
+	SkipAgentOnLocal          bool
+	FallbackLocalOnInfraError bool
+	cache                     *reviewCacheStore
+	artifactMu                *sync.Mutex
+	agentState                *agentAvailabilityState
 }
 
 type reviewCacheFile struct {
@@ -220,10 +245,48 @@ type artifactRecord struct {
 	Truncated     bool   `json:"truncated"`
 }
 
+type agentAvailabilityState struct {
+	disabled atomic.Bool
+	mu       sync.RWMutex
+	reason   string
+}
+
 func newReviewCacheStore() *reviewCacheStore {
 	return &reviewCacheStore{
 		items: map[string]reviewCacheEntry{},
 	}
+}
+
+func newAgentAvailabilityState() *agentAvailabilityState {
+	return &agentAvailabilityState{}
+}
+
+func (s *agentAvailabilityState) IsDisabled() bool {
+	if s == nil {
+		return false
+	}
+	return s.disabled.Load()
+}
+
+func (s *agentAvailabilityState) Disable(reason string) {
+	if s == nil {
+		return
+	}
+	s.disabled.Store(true)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if strings.TrimSpace(reason) != "" {
+		s.reason = reason
+	}
+}
+
+func (s *agentAvailabilityState) Reason() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.reason
 }
 
 func (s *reviewCacheStore) Get(id string) (reviewCacheEntry, bool) {
@@ -357,13 +420,18 @@ func cmdRun(args []string) {
 	fs.StringVar(&cfg.Model, "model", defaultModel, "agent model for opencode run")
 	fs.IntVar(&cfg.Workers, "workers", 4, "number of concurrent agent reviews")
 	fs.DurationVar(&cfg.Timeout, "timeout", 15*time.Minute, "per-item agent review timeout")
+	fs.IntVar(&cfg.MaxRetries, "max-retries", 2, "max retry attempts for transient opencode errors")
+	fs.DurationVar(&cfg.RetryDelay, "retry-delay", 2*time.Second, "initial delay between opencode retries")
 	fs.IntVar(&cfg.MaxSnippetLines, "max-snippet-lines", 240, "max snippet lines per side")
 	fs.IntVar(&cfg.MaxSnippetBytes, "max-snippet-bytes", 24000, "max snippet bytes per side")
+	fs.IntVar(&cfg.CheckpointEvery, "checkpoint-every", 25, "persist progress report/cache every N completed reviews (0 disables)")
 	fs.StringVar(&cfg.TierFilter, "tier", "all", "tier filter: all|T1|T2|T3")
 	fs.IntVar(&cfg.Limit, "limit", 0, "maximum items to review (0 = all)")
 	fs.IntVar(&cfg.Offset, "offset", 0, "skip first N filtered items")
 	fs.BoolVar(&cfg.DryRun, "dry-run", false, "skip opencode calls; only emit prompts and report skeleton")
+	fs.BoolVar(&cfg.LocalOnly, "local-only", false, "run deterministic local checks only and skip opencode model calls")
 	fs.BoolVar(&cfg.SkipAgentOnLocal, "skip-agent-on-local-findings", true, "skip opencode call when local placeholder/findings are already detected")
+	fs.BoolVar(&cfg.FallbackLocalOnInfraError, "fallback-local-on-infra-error", true, "when opencode infra is unavailable, fallback to local checks without counting hard errors")
 	if err := fs.Parse(args); err != nil {
 		fatalf("parse flags: %v", err)
 	}
@@ -386,12 +454,22 @@ func cmdRun(args []string) {
 	if cfg.RollupMaxFindings <= 0 {
 		cfg.RollupMaxFindings = 12
 	}
+	if cfg.CheckpointEvery < 0 {
+		cfg.CheckpointEvery = 0
+	}
+	if cfg.MaxRetries < 0 {
+		cfg.MaxRetries = 0
+	}
+	if cfg.RetryDelay <= 0 {
+		cfg.RetryDelay = 2 * time.Second
+	}
 	rawArtifactMode := cfg.ArtifactMode
 	cfg.ArtifactMode = normalizeArtifactMode(cfg.ArtifactMode)
 	if cfg.ArtifactMode == "" {
 		fatalf("invalid --artifact-mode %q (expected jsonl|files|none)", strings.TrimSpace(rawArtifactMode))
 	}
 	cfg.artifactMu = &sync.Mutex{}
+	cfg.agentState = newAgentAvailabilityState()
 	if cfg.ArtifactMode == "none" {
 		cfg.WriteRaw = false
 		cfg.WritePrompts = false
@@ -460,10 +538,11 @@ func cmdRun(args []string) {
 		}
 	}
 	fmt.Printf(
-		"wrote report: %s (completed=%d findings=%d errors=%d)\n",
+		"wrote report: %s (completed=%d findings=%d agent_unavailable=%d errors=%d)\n",
 		cfg.ReportPath,
 		report.Completed,
 		len(report.Findings),
+		report.AgentUnavailable,
 		report.Errors,
 	)
 }
@@ -586,10 +665,12 @@ func runReview(plan reviewPlan, items []reviewPlanItem, cfg runConfig) reviewRep
 		switch res.Status {
 		case "findings", "cached-findings":
 			report.WithFindings++
-		case "no-findings", "dry-run", "cached-no-findings":
+		case "no-findings", "dry-run", "cached-no-findings", "local-no-findings":
 			report.NoFindings++
 		case "local-findings":
 			report.WithFindings++
+		case "agent-unavailable":
+			report.AgentUnavailable++
 		default:
 			report.Errors++
 		}
@@ -599,6 +680,24 @@ func runReview(plan reviewPlan, items []reviewPlanItem, cfg runConfig) reviewRep
 				report.SeverityCount[finding.Priority] = 0
 			}
 			report.SeverityCount[finding.Priority]++
+		}
+		if cfg.CheckpointEvery > 0 && report.Completed%cfg.CheckpointEvery == 0 {
+			if err := checkpointProgress(report, cfg); err != nil {
+				fmt.Fprintf(
+					os.Stderr,
+					"checkpoint failed at completed=%d: %v\n",
+					report.Completed,
+					err,
+				)
+			}
+			fmt.Printf(
+				"progress: completed=%d/%d findings=%d agent_unavailable=%d errors=%d\n",
+				report.Completed,
+				report.TotalItems,
+				len(report.Findings),
+				report.AgentUnavailable,
+				report.Errors,
+			)
 		}
 	}
 
@@ -613,6 +712,18 @@ func runReview(plan reviewPlan, items []reviewPlanItem, cfg runConfig) reviewRep
 		return report.Findings[i].Priority < report.Findings[j].Priority
 	})
 	return report
+}
+
+func checkpointProgress(report reviewReport, cfg runConfig) error {
+	if err := writeJSON(cfg.ReportPath, report); err != nil {
+		return err
+	}
+	if cfg.UseCache {
+		if err := saveReviewCache(cfg.CachePath, cfg.cache); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func executeReviewTask(item reviewPlanItem, cfg runConfig) reviewOutcome {
@@ -678,6 +789,27 @@ func executeReviewTask(item reviewPlanItem, cfg runConfig) reviewOutcome {
 		return reviewOutcome{Result: result, Findings: cloneFindings(localFindings)}
 	}
 
+	if cfg.LocalOnly {
+		if len(localFindings) > 0 {
+			result.Status = "local-findings"
+		} else {
+			result.Status = "local-no-findings"
+		}
+		result.FindingCount = len(localFindings)
+		if cfg.UseCache {
+			cfg.cache.Set(reviewCacheEntry{
+				ID:         item.ID,
+				Model:      cfg.Model,
+				GoHash:     goHash,
+				RustHash:   rustHash,
+				ReviewedAt: time.Now().UTC().Format(time.RFC3339),
+				Findings:   cloneFindings(localFindings),
+			})
+		}
+		result.DurationMS = time.Since(start).Milliseconds()
+		return reviewOutcome{Result: result, Findings: cloneFindings(localFindings)}
+	}
+
 	if cfg.SkipAgentOnLocal && len(localFindings) > 0 {
 		result.Status = "local-findings"
 		result.FindingCount = len(localFindings)
@@ -695,8 +827,57 @@ func executeReviewTask(item reviewPlanItem, cfg runConfig) reviewOutcome {
 		return reviewOutcome{Result: result, Findings: cloneFindings(localFindings)}
 	}
 
-	rawText, err := runOpencode(cfg.OpencodeBin, cfg.Model, cfg.Timeout, prompt)
+	if cfg.agentState != nil && cfg.agentState.IsDisabled() {
+		if len(localFindings) > 0 {
+			result.Status = "local-findings"
+		} else {
+			result.Status = "local-no-findings"
+		}
+		result.Error = cfg.agentState.Reason()
+		result.FindingCount = len(localFindings)
+		if cfg.UseCache {
+			cfg.cache.Set(reviewCacheEntry{
+				ID:         item.ID,
+				Model:      cfg.Model,
+				GoHash:     goHash,
+				RustHash:   rustHash,
+				ReviewedAt: time.Now().UTC().Format(time.RFC3339),
+				Findings:   cloneFindings(localFindings),
+			})
+		}
+		result.DurationMS = time.Since(start).Milliseconds()
+		return reviewOutcome{Result: result, Findings: cloneFindings(localFindings)}
+	}
+
+	rawText, err := runOpencodeWithRetry(cfg, prompt)
 	if err != nil {
+		if cfg.FallbackLocalOnInfraError && isInfraOpencodeError(err) {
+			if cfg.agentState != nil {
+				cfg.agentState.Disable(err.Error())
+			}
+			if len(localFindings) > 0 {
+				result.Status = "local-findings"
+			} else {
+				result.Status = "local-no-findings"
+			}
+			result.Error = err.Error()
+			result.FindingCount = len(localFindings)
+			if cfg.UseCache {
+				cfg.cache.Set(reviewCacheEntry{
+					ID:         item.ID,
+					Model:      cfg.Model,
+					GoHash:     goHash,
+					RustHash:   rustHash,
+					ReviewedAt: time.Now().UTC().Format(time.RFC3339),
+					Findings:   cloneFindings(localFindings),
+				})
+			}
+			result.DurationMS = time.Since(start).Milliseconds()
+			if cfg.WriteRaw {
+				_ = persistArtifact(cfg, item, "raw", rawPath, rawText)
+			}
+			return reviewOutcome{Result: result, Findings: cloneFindings(localFindings)}
+		}
 		result.Status = "error"
 		result.Error = err.Error()
 		result.DurationMS = time.Since(start).Milliseconds()
@@ -932,6 +1113,65 @@ func collectLocalFindings(item reviewPlanItem, goSnippet, rustSnippet string, go
 			appendFinding("P1", "TODO/FIXME marker in parity path", location, "Rust parity path still contains TODO/FIXME markers; this often indicates incomplete or deferred behavior.")
 		case syntheticPlaceholderPattern.MatchString(text):
 			appendFinding("P1", "Synthetic/placeholder marker in parity path", location, "Rust parity path uses synthetic/placeholder/stub language, which may indicate non-production behavior.")
+		case item.Tier == "T1" && rustUnwrapPattern.MatchString(text):
+			appendFinding("P2", "Unchecked unwrap/expect in T1 parity path", location, "Rust logic uses unwrap/expect in a T1 path; this may panic on inputs where Go returned an error.")
+		}
+	}
+
+	if goErr == nil && rustErr == nil {
+		goAssign, goAssignLine, goAssignOK := extractGoAssignment(goSnippet)
+		rustAssign, rustAssignLine, rustAssignOK := extractRustAssignment(rustSnippet)
+		if goAssignOK && rustAssignOK && looksLikeConstantComparison(item) {
+			goNorm := normalizeAssignedValue(goAssign)
+			rustNorm := normalizeAssignedValue(rustAssign)
+			if goNorm != "" && rustNorm != "" && goNorm != rustNorm {
+				priority := "P1"
+				title := "Constant/value drift between Go and Rust"
+				if isStringLiteral(goAssign) && isStringLiteral(rustAssign) {
+					title = "String sentinel/value drift between Go and Rust"
+					if strings.Contains(strings.ToLower(item.Symbol), "err") || strings.Contains(strings.ToLower(item.RustSymbol), "err") {
+						priority = "P0"
+					}
+				}
+				appendFinding(
+					priority,
+					title,
+					fmt.Sprintf("%s:%d | %s:%d", item.Source, goAssignLine, item.RustPath, rustAssignLine),
+					fmt.Sprintf("Go assignment value `%s` differs from Rust value `%s`; this can change compatibility/behavior.", strings.TrimSpace(goAssign), strings.TrimSpace(rustAssign)),
+				)
+			}
+		}
+
+		goSig, goSigLine, goSigOK := extractGoFunctionSignature(goSnippet)
+		rustSig, rustSigLine, rustSigOK := extractRustFunctionSignature(rustSnippet)
+		if goSigOK && rustSigOK && looksLikeFunctionComparison(item) {
+			if goSig.ParamCount != rustSig.ParamCount {
+				appendFinding(
+					"P1",
+					"Function parameter count drift",
+					fmt.Sprintf("%s:%d | %s:%d", item.Source, goSigLine, item.RustPath, rustSigLine),
+					fmt.Sprintf("Go signature exposes %d params while Rust exposes %d params; this often indicates dropped or added behavior.", goSig.ParamCount, rustSig.ParamCount),
+				)
+			}
+			if goSig.ReturnsError && !rustSig.ReturnsResult {
+				appendFinding(
+					"P1",
+					"Error-return contract drift",
+					fmt.Sprintf("%s:%d", item.RustPath, rustSigLine),
+					"Go signature returns `error` but Rust signature does not return a `Result`, which can hide failure paths.",
+				)
+			}
+		}
+
+		goBranches := len(goBranchTokenPattern.FindAllString(goSnippet, -1))
+		rustBranches := len(rustBranchTokenPattern.FindAllString(rustSnippet, -1))
+		if looksLikeFunctionComparison(item) && goBranches >= 3 && rustBranches == 0 {
+			appendFinding(
+				"P1",
+				"Potential missing branch logic in Rust",
+				fmt.Sprintf("%s:%d", item.RustPath, 1),
+				fmt.Sprintf("Go snippet includes %d control-flow branches while Rust snippet includes %d; verify no branch paths were dropped.", goBranches, rustBranches),
+			)
 		}
 	}
 
@@ -959,6 +1199,200 @@ func parseNumberedSnippetLines(snippet string) []snippetLine {
 		})
 	}
 	return out
+}
+
+type functionSignature struct {
+	ParamCount    int
+	ReturnsError  bool
+	ReturnsResult bool
+}
+
+func extractGoAssignment(snippet string) (value string, line int, ok bool) {
+	lines := parseNumberedSnippetLines(snippet)
+	if len(lines) == 0 {
+		return "", 0, false
+	}
+	for _, line := range lines {
+		text := strings.TrimSpace(stripInlineComment(line.Text))
+		m := goConstAssignPattern.FindStringSubmatch(text)
+		if len(m) != 4 {
+			continue
+		}
+		value = strings.TrimSpace(m[3])
+		if value == "" {
+			continue
+		}
+		return value, max(line.Number, 1), true
+	}
+	return "", 0, false
+}
+
+func extractRustAssignment(snippet string) (value string, line int, ok bool) {
+	lines := parseNumberedSnippetLines(snippet)
+	if len(lines) == 0 {
+		return "", 0, false
+	}
+	for _, line := range lines {
+		text := strings.TrimSpace(stripInlineComment(line.Text))
+		m := rustConstAssignPattern.FindStringSubmatch(text)
+		if len(m) != 3 {
+			continue
+		}
+		value = strings.TrimSpace(m[2])
+		if value == "" {
+			continue
+		}
+		return value, max(line.Number, 1), true
+	}
+	return "", 0, false
+}
+
+func extractGoFunctionSignature(snippet string) (functionSignature, int, bool) {
+	lines := parseNumberedSnippetLines(snippet)
+	for _, line := range lines {
+		text := strings.TrimSpace(line.Text)
+		m := goFuncSigPattern.FindStringSubmatch(text)
+		if len(m) != 4 {
+			continue
+		}
+		params := splitTopLevelComma(strings.TrimSpace(m[2]))
+		paramCount := len(params)
+		returnText := strings.TrimSpace(m[3])
+		return functionSignature{
+			ParamCount:   paramCount,
+			ReturnsError: strings.Contains(returnText, "error"),
+		}, max(line.Number, 1), true
+	}
+	return functionSignature{}, 0, false
+}
+
+func extractRustFunctionSignature(snippet string) (functionSignature, int, bool) {
+	lines := parseNumberedSnippetLines(snippet)
+	for _, line := range lines {
+		text := strings.TrimSpace(line.Text)
+		m := rustFuncSigPattern.FindStringSubmatch(text)
+		if len(m) != 4 {
+			continue
+		}
+		params := splitTopLevelComma(strings.TrimSpace(m[2]))
+		paramCount := 0
+		for _, p := range params {
+			trimmed := strings.TrimSpace(p)
+			if trimmed == "" {
+				continue
+			}
+			if trimmed == "self" || trimmed == "&self" || trimmed == "&mut self" {
+				continue
+			}
+			paramCount++
+		}
+		returnText := strings.TrimSpace(m[3])
+		return functionSignature{
+			ParamCount:    paramCount,
+			ReturnsResult: strings.Contains(returnText, "Result<") || strings.Contains(returnText, "Result <"),
+		}, max(line.Number, 1), true
+	}
+	return functionSignature{}, 0, false
+}
+
+func splitTopLevelComma(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	out := make([]string, 0, 4)
+	start := 0
+	angle, paren, bracket, brace := 0, 0, 0, 0
+	for i, r := range value {
+		switch r {
+		case '<':
+			angle++
+		case '>':
+			if angle > 0 {
+				angle--
+			}
+		case '(':
+			paren++
+		case ')':
+			if paren > 0 {
+				paren--
+			}
+		case '[':
+			bracket++
+		case ']':
+			if bracket > 0 {
+				bracket--
+			}
+		case '{':
+			brace++
+		case '}':
+			if brace > 0 {
+				brace--
+			}
+		case ',':
+			if angle == 0 && paren == 0 && bracket == 0 && brace == 0 {
+				segment := strings.TrimSpace(value[start:i])
+				if segment != "" {
+					out = append(out, segment)
+				}
+				start = i + 1
+			}
+		}
+	}
+	if start < len(value) {
+		segment := strings.TrimSpace(value[start:])
+		if segment != "" {
+			out = append(out, segment)
+		}
+	}
+	return out
+}
+
+func looksLikeConstantComparison(item reviewPlanItem) bool {
+	kind := strings.ToLower(strings.TrimSpace(item.Kind))
+	if strings.Contains(kind, "const") || strings.Contains(kind, "var") || strings.Contains(kind, "value") {
+		return true
+	}
+	symbolToken, _ := splitSymbol(item.Symbol)
+	if symbolToken != "" && strings.ToUpper(symbolToken) == symbolToken {
+		return true
+	}
+	return false
+}
+
+func looksLikeFunctionComparison(item reviewPlanItem) bool {
+	kind := strings.ToLower(strings.TrimSpace(item.Kind))
+	return strings.Contains(kind, "func") || strings.Contains(kind, "method")
+}
+
+func normalizeAssignedValue(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.TrimSuffix(value, ";")
+	value = strings.TrimSpace(value)
+	value = strings.ReplaceAll(value, " ", "")
+	value = strings.ReplaceAll(value, "\t", "")
+	return value
+}
+
+func stripInlineComment(line string) string {
+	if idx := strings.Index(line, "//"); idx >= 0 {
+		return line[:idx]
+	}
+	return line
+}
+
+func isStringLiteral(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	if strings.HasPrefix(value, "\"") && strings.HasSuffix(value, "\"") {
+		return true
+	}
+	if strings.HasPrefix(value, "`") && strings.HasSuffix(value, "`") {
+		return true
+	}
+	return false
 }
 
 func mergeFindings(groups ...[]pairFinding) []pairFinding {
@@ -1111,9 +1545,186 @@ func parseReviewFindings(raw string, item reviewPlanItem) ([]pairFinding, error)
 		if sawNoFindings {
 			return []pairFinding{}, nil
 		}
+		if parsed, ok, err := parseFindingsJSON(raw, item); ok {
+			return parsed, err
+		}
 		return nil, errors.New("agent response did not contain parseable FINDING lines")
 	}
 	return out, nil
+}
+
+type findingsJSONRecord struct {
+	Priority string `json:"priority"`
+	Severity string `json:"severity"`
+	Title    string `json:"title"`
+	Location string `json:"location"`
+	Path     string `json:"path"`
+	Line     int    `json:"line"`
+	Message  string `json:"message"`
+	Body     string `json:"body"`
+}
+
+type findingsJSONEnvelope struct {
+	Findings []findingsJSONRecord `json:"findings"`
+}
+
+func parseFindingsJSON(raw string, item reviewPlanItem) ([]pairFinding, bool, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, false, nil
+	}
+
+	normalize := func(rec findingsJSONRecord) (pairFinding, bool, error) {
+		priority := strings.ToUpper(strings.TrimSpace(rec.Priority))
+		if priority == "" {
+			priority = strings.ToUpper(strings.TrimSpace(rec.Severity))
+		}
+		if priority == "" {
+			priority = "P2"
+		}
+		if priority != "P0" && priority != "P1" && priority != "P2" && priority != "P3" {
+			return pairFinding{}, false, fmt.Errorf("invalid finding priority %q", priority)
+		}
+		title := strings.TrimSpace(rec.Title)
+		if title == "" {
+			title = "Discrepancy"
+		}
+		location := strings.TrimSpace(rec.Location)
+		if location == "" && strings.TrimSpace(rec.Path) != "" {
+			if rec.Line > 0 {
+				location = fmt.Sprintf("%s:%d", strings.TrimSpace(rec.Path), rec.Line)
+			} else {
+				location = strings.TrimSpace(rec.Path)
+			}
+		}
+		if location == "" {
+			location = fmt.Sprintf("%s:1", item.RustPath)
+		}
+		message := strings.TrimSpace(rec.Message)
+		if message == "" {
+			message = strings.TrimSpace(rec.Body)
+		}
+		if message == "" {
+			return pairFinding{}, false, errors.New("finding message is empty")
+		}
+		return pairFinding{
+			ID:       item.ID,
+			Tier:     item.Tier,
+			Priority: priority,
+			Title:    title,
+			Location: location,
+			Message:  message,
+		}, true, nil
+	}
+
+	if strings.HasPrefix(trimmed, "{") {
+		var env findingsJSONEnvelope
+		if err := json.Unmarshal([]byte(trimmed), &env); err == nil {
+			if len(env.Findings) == 0 {
+				return []pairFinding{}, true, nil
+			}
+			out := make([]pairFinding, 0, len(env.Findings))
+			for _, rec := range env.Findings {
+				finding, ok, err := normalize(rec)
+				if err != nil {
+					return nil, true, err
+				}
+				if ok {
+					out = append(out, finding)
+				}
+			}
+			return out, true, nil
+		}
+	}
+
+	if strings.HasPrefix(trimmed, "[") {
+		var records []findingsJSONRecord
+		if err := json.Unmarshal([]byte(trimmed), &records); err == nil {
+			if len(records) == 0 {
+				return []pairFinding{}, true, nil
+			}
+			out := make([]pairFinding, 0, len(records))
+			for _, rec := range records {
+				finding, ok, err := normalize(rec)
+				if err != nil {
+					return nil, true, err
+				}
+				if ok {
+					out = append(out, finding)
+				}
+			}
+			return out, true, nil
+		}
+	}
+
+	return nil, false, nil
+}
+
+func isInfraOpencodeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	if msg == "" {
+		return false
+	}
+	needles := []string{
+		"all antigravity endpoints failed",
+		"rate-limited",
+		"quota protection",
+		"over 90% usage",
+		"soft_quota_threshold_percent",
+		"quota reset",
+		"quota resets",
+		"failed to fetch models.dev",
+		"unable to connect. is the computer able to access the url",
+		"unable to connect",
+		"eperm: operation not permitted",
+		"operation not permitted, open",
+		"unexpected error, check log file",
+		"timed out",
+		"deadline exceeded",
+		"connection reset",
+		"connection refused",
+		"temporarily unavailable",
+		"network error",
+		"tls handshake timeout",
+		"service unavailable",
+	}
+	for _, needle := range needles {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func runOpencodeWithRetry(cfg runConfig, prompt string) (string, error) {
+	attempts := cfg.MaxRetries + 1
+	if attempts < 1 {
+		attempts = 1
+	}
+	delay := cfg.RetryDelay
+	if delay <= 0 {
+		delay = 2 * time.Second
+	}
+
+	var raw string
+	var err error
+	for i := 0; i < attempts; i++ {
+		raw, err = runOpencode(cfg.OpencodeBin, cfg.Model, cfg.Timeout, prompt)
+		if err == nil {
+			return raw, nil
+		}
+		if !isInfraOpencodeError(err) || i == attempts-1 {
+			break
+		}
+		time.Sleep(delay)
+		if delay < 30*time.Second {
+			delay = time.Duration(float64(delay) * 1.8)
+		}
+	}
+	return raw, err
 }
 
 func runOpencode(bin, model string, timeout time.Duration, prompt string) (string, error) {
@@ -1136,6 +1747,9 @@ func runOpencode(bin, model string, timeout time.Duration, prompt string) (strin
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
+	if opErr := strings.TrimSpace(extractOpencodeError(stdout.Bytes())); opErr != "" {
+		return "", fmt.Errorf("opencode returned error event: %s", opErr)
+	}
 	raw := strings.TrimSpace(extractOpencodeText(stdout.Bytes()))
 	if raw == "" {
 		raw = strings.TrimSpace(stdout.String())
@@ -1174,6 +1788,33 @@ func extractOpencodeText(raw []byte) string {
 		out = append(out, text)
 	}
 	return strings.Join(out, "\n")
+}
+
+func extractOpencodeError(raw []byte) string {
+	scanner := bufio.NewScanner(bytes.NewReader(raw))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var ev opencodeErrorEvent
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(ev.Type), "error") {
+			continue
+		}
+		msg := strings.TrimSpace(ev.Error.Data.Message)
+		if msg != "" {
+			return msg
+		}
+		name := strings.TrimSpace(ev.Error.Name)
+		if name != "" {
+			return name
+		}
+		return "unknown opencode error"
+	}
+	return ""
 }
 
 func extractSymbolSnippet(path, kind, symbol string, rust bool, maxLines, maxBytes int) (string, lineRange, error) {
@@ -1286,18 +1927,42 @@ func findFunctionBlock(lines []string, name string, rust bool) (lineRange, bool)
 		pat = `^\s*func\s*(?:\([^)]*\)\s*)?` + regexp.QuoteMeta(name) + `(?:\[[^\]]+\])?\s*\(`
 	}
 	re := regexp.MustCompile(pat)
+	fallback := lineRange{}
+	hasFallback := false
 	for i, line := range lines {
 		if !re.MatchString(line) {
 			continue
 		}
 		start := i + 1
+		if rust && isRustFnDeclarationOnly(line) {
+			if !hasFallback {
+				hasFallback = true
+				fallback = lineRange{Start: start, End: min(len(lines), start+30)}
+			}
+			continue
+		}
 		if rg, ok := findBracedBlock(lines, start); ok {
 			return rg, true
 		}
-		end := min(len(lines), start+30)
-		return lineRange{Start: start, End: end}, true
+		if !hasFallback {
+			hasFallback = true
+			fallback = lineRange{Start: start, End: min(len(lines), start+30)}
+		}
+	}
+	if hasFallback {
+		return fallback, true
 	}
 	return lineRange{}, false
+}
+
+func isRustFnDeclarationOnly(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return false
+	}
+	hasBrace := strings.Contains(trimmed, "{")
+	hasSemi := strings.HasSuffix(trimmed, ";")
+	return hasSemi && !hasBrace
 }
 
 func findTypeBlock(lines []string, name string, rust bool) (lineRange, bool) {

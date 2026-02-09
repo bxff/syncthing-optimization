@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -104,6 +105,52 @@ func TestParseReviewFindingsIgnoresPreambleLines(t *testing.T) {
 	}
 }
 
+func TestParseReviewFindingsSupportsJSONEnvelope(t *testing.T) {
+	item := reviewPlanItem{ID: "feat-json", Tier: "T1", RustPath: "syncthing-rs/src/db.rs"}
+	raw := `{
+  "findings": [
+    {
+      "priority": "P1",
+      "title": "Missing error propagation",
+      "path": "syncthing-rs/src/db.rs",
+      "line": 42,
+      "message": "Rust path swallows a store read error."
+    }
+  ]
+}`
+	findings, err := parseReviewFindings(raw, item)
+	if err != nil {
+		t.Fatalf("parse json findings: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	if findings[0].Priority != "P1" {
+		t.Fatalf("unexpected priority: %s", findings[0].Priority)
+	}
+	if findings[0].Location != "syncthing-rs/src/db.rs:42" {
+		t.Fatalf("unexpected location: %s", findings[0].Location)
+	}
+}
+
+func TestIsInfraOpencodeError(t *testing.T) {
+	if !isInfraOpencodeError(errors.New("opencode returned error event: Error: All Antigravity endpoints failed")) {
+		t.Fatal("expected endpoints failure to be infra error")
+	}
+	if !isInfraOpencodeError(errors.New("Quota protection: All 1 account(s) are over 90% usage for gemini. Quota resets in 2h.")) {
+		t.Fatal("expected quota protection to be infra error")
+	}
+	if !isInfraOpencodeError(errors.New("opencode timed out after 2m0s")) {
+		t.Fatal("expected timeout to be infra error")
+	}
+	if !isInfraOpencodeError(errors.New("opencode run failed: exit status 1 (stderr=ERROR service=models.dev error=Unable to connect. Is the computer able to access the url? Failed to fetch models.dev)")) {
+		t.Fatal("expected models.dev connectivity failure to be infra error")
+	}
+	if isInfraOpencodeError(errors.New("agent response did not contain parseable FINDING lines")) {
+		t.Fatal("did not expect parse error to be infra error")
+	}
+}
+
 func TestRustComponentPath(t *testing.T) {
 	path, err := rustComponentPath("syncthing-rs/db")
 	if err != nil {
@@ -122,6 +169,48 @@ func TestExtractOpencodeText(t *testing.T) {
 	got := extractOpencodeText(raw)
 	if got != "NO_FINDINGS" {
 		t.Fatalf("extractOpencodeText=%q", got)
+	}
+}
+
+func TestExtractOpencodeError(t *testing.T) {
+	raw := []byte(`{"type":"step_start","part":{"text":""}}
+{"type":"error","error":{"name":"UnknownError","data":{"message":"rate limit"}}}
+{"type":"step_finish","part":{"text":""}}
+`)
+	got := extractOpencodeError(raw)
+	if got != "rate limit" {
+		t.Fatalf("extractOpencodeError=%q", got)
+	}
+}
+
+func TestExtractOpencodeErrorEmptyWhenNoErrorEvent(t *testing.T) {
+	raw := []byte(`{"type":"text","part":{"text":"NO_FINDINGS"}}`)
+	got := extractOpencodeError(raw)
+	if got != "" {
+		t.Fatalf("extractOpencodeError=%q want empty", got)
+	}
+}
+
+func TestFindFunctionBlockPrefersRustImplBodyOverTraitDecl(t *testing.T) {
+	lines := []string{
+		"pub(crate) trait Db {",
+		"    fn all_global_files(&self, folder: &str) -> Result<Vec<FileMetadata>, String>;",
+		"}",
+		"",
+		"impl Db for WalFreeDb {",
+		"    fn all_global_files(&self, folder: &str) -> Result<Vec<FileMetadata>, String> {",
+		"        self.ensure_open()?;",
+		"        Ok(Vec::new())",
+		"    }",
+		"}",
+	}
+	got, ok := findFunctionBlock(lines, "all_global_files", true)
+	if !ok {
+		t.Fatal("findFunctionBlock did not find method")
+	}
+	want := lineRange{Start: 6, End: 9}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("findFunctionBlock=%+v want=%+v", got, want)
 	}
 }
 
@@ -175,6 +264,68 @@ func TestCollectLocalFindingsDetectsMissingSnippetsAndPlaceholders(t *testing.T)
 	}
 	if !strings.Contains(joined, "todo! placeholder in Rust logic") {
 		t.Fatalf("missing Rust placeholder finding in %q", joined)
+	}
+}
+
+func TestCollectLocalFindingsDetectsConstantDrift(t *testing.T) {
+	item := reviewPlanItem{
+		ID:         "feat-const",
+		Tier:       "T1",
+		Kind:       "const",
+		Symbol:     "retainBits",
+		Source:     "lib/model/folder.go",
+		RustSymbol: "retain_bits",
+		RustPath:   "syncthing-rs/src/folder_core.rs",
+	}
+	goSnippet := "" +
+		"  100 | const retainBits = fs.ModeSetgid | fs.ModeSetuid | fs.ModeSticky\n"
+	rustSnippet := "" +
+		"  120 | pub(crate) const retain_bits: u32 = 0xFFFF;\n"
+
+	findings := collectLocalFindings(item, goSnippet, rustSnippet, nil, nil)
+	if len(findings) == 0 {
+		t.Fatal("expected local findings for constant drift")
+	}
+	foundConst := false
+	for _, finding := range findings {
+		if finding.Title == "Constant/value drift between Go and Rust" {
+			foundConst = true
+		}
+	}
+	if !foundConst {
+		t.Fatalf("expected constant drift finding, got %+v", findings)
+	}
+}
+
+func TestCollectLocalFindingsDetectsFunctionSignatureDrift(t *testing.T) {
+	item := reviewPlanItem{
+		ID:         "feat-func",
+		Tier:       "T1",
+		Kind:       "method",
+		Symbol:     "apply",
+		Source:     "lib/model/folder.go",
+		RustSymbol: "apply",
+		RustPath:   "syncthing-rs/src/folder_core.rs",
+	}
+	goSnippet := "" +
+		"  200 | func apply(a int, b int) error {\n" +
+		"  201 |     if a > 0 { return nil }\n" +
+		"  202 |     return nil\n" +
+		"  203 | }\n"
+	rustSnippet := "" +
+		"  220 | pub(crate) fn apply() {\n" +
+		"  221 | }\n"
+
+	findings := collectLocalFindings(item, goSnippet, rustSnippet, nil, nil)
+	foundSig := false
+	for _, finding := range findings {
+		if finding.Title == "Function parameter count drift" {
+			foundSig = true
+			break
+		}
+	}
+	if !foundSig {
+		t.Fatalf("expected signature drift finding, got %+v", findings)
 	}
 }
 

@@ -1429,7 +1429,7 @@ fn load_scoped_local_files(
     subdirs: &[String],
 ) -> Result<Vec<db::FileInfo>, String> {
     if subdirs.is_empty() {
-        return db.all_local_files_ordered(folder_id, LOCAL_DEVICE_ID);
+        return db::collect_stream(db.all_local_files_ordered(folder_id, LOCAL_DEVICE_ID)?);
     }
 
     let mut items = Vec::new();
@@ -1437,9 +1437,10 @@ fn load_scoped_local_files(
     for sub in subdirs {
         let prefix = sub.trim_matches('/');
         if prefix.is_empty() {
-            return db.all_local_files_ordered(folder_id, LOCAL_DEVICE_ID);
+            return db::collect_stream(db.all_local_files_ordered(folder_id, LOCAL_DEVICE_ID)?);
         }
-        let matches = db.all_local_files_with_prefix(folder_id, LOCAL_DEVICE_ID, prefix)?;
+        let matches =
+            db::collect_stream(db.all_local_files_with_prefix(folder_id, LOCAL_DEVICE_ID, prefix)?)?;
         for item in matches {
             if seen.insert(item.path.clone()) {
                 items.push(item);
@@ -2178,9 +2179,11 @@ impl receiveOnlyFolder {
             .get_device_sequence(&folder_id, LOCAL_DEVICE_ID)
             .map_err(|e| format!("load local sequence: {e}"))?
             .saturating_add(1);
-        let locals = db
-            .all_local_files_ordered(&folder_id, LOCAL_DEVICE_ID)
-            .map_err(|e| format!("load local files: {e}"))?;
+        let locals = db::collect_stream(
+            db.all_local_files_ordered(&folder_id, LOCAL_DEVICE_ID)
+                .map_err(|e| format!("load local files: {e}"))?,
+        )
+        .map_err(|e| format!("load local files: {e}"))?;
 
         let mut updates = Vec::new();
         for mut local in locals {
@@ -2244,9 +2247,11 @@ impl receiveEncryptedFolder {
             .get_device_sequence(&folder_id, LOCAL_DEVICE_ID)
             .map_err(|e| format!("load local sequence: {e}"))?
             .saturating_add(1);
-        let locals = db
-            .all_local_files_ordered(&folder_id, LOCAL_DEVICE_ID)
-            .map_err(|e| format!("load local files: {e}"))?;
+        let locals = db::collect_stream(
+            db.all_local_files_ordered(&folder_id, LOCAL_DEVICE_ID)
+                .map_err(|e| format!("load local files: {e}"))?,
+        )
+        .map_err(|e| format!("load local files: {e}"))?;
         let mut dirs = Vec::new();
         let mut files_to_delete = Vec::new();
         let mut updates = Vec::new();
@@ -3026,6 +3031,7 @@ mod tests {
             .read()
             .expect("db lock")
             .all_local_files_ordered("default", "local")
+            .and_then(db::collect_stream)
             .expect("all local ordered")
             .into_iter()
             .map(|fi| fi.path)

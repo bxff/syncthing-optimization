@@ -711,7 +711,11 @@ impl model {
         self.sdb
             .read()
             .ok()
-            .and_then(|db| db.all_local_files(folder_id, "local").ok())
+            .and_then(|db| {
+                db.all_local_files(folder_id, "local")
+                    .ok()
+                    .and_then(|stream| db::collect_stream(stream).ok())
+            })
             .unwrap_or_default()
     }
 
@@ -727,6 +731,7 @@ impl model {
             .and_then(|db| {
                 db.all_local_files_by_sequence(folder_id, "local", from, limit)
                     .ok()
+                    .and_then(|stream| db::collect_stream(stream).ok())
             })
             .unwrap_or_default()
     }
@@ -754,6 +759,7 @@ impl model {
             .read()
             .map_err(|_| "db lock poisoned".to_string())?
             .all_global_files(folder_id)
+            .and_then(db::collect_stream)
             .map_err(|e| format!("all global files query failed: {e}"))
     }
 
@@ -761,7 +767,11 @@ impl model {
         self.sdb
             .read()
             .ok()
-            .and_then(|db| db.all_local_files_with_blocks_hash(folder_id, hash).ok())
+            .and_then(|db| {
+                db.all_local_files_with_blocks_hash(folder_id, hash)
+                    .ok()
+                    .and_then(|stream| db::collect_stream(stream).ok())
+            })
             .unwrap_or_default()
     }
 
@@ -800,6 +810,7 @@ impl model {
             .and_then(|db| {
                 db.all_needed_global_files(folder_id, "local", db::PullOrder::Alphabetic, 10_000, 0)
                     .ok()
+                    .and_then(|stream| db::collect_stream(stream).ok())
             })
             .unwrap_or_default()
     }

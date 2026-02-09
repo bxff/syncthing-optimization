@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub(crate) type DeviceId = String;
 pub(crate) type IndexId = u64;
 pub(crate) type LocalFlags = u32;
+pub(crate) type DbStream<'a, T> = Box<dyn Iterator<Item = Result<T, String>> + 'a>;
 
 pub(crate) const FLAG_LOCAL_RECEIVE_ONLY: LocalFlags = 1 << 0;
 pub(crate) const FLAG_LOCAL_INVALID: LocalFlags = 1 << 1;
@@ -152,32 +153,36 @@ pub(crate) trait Db {
     fn get_global_availability(&self, folder: &str, file: &str) -> Result<Vec<DeviceId>, String>;
     fn get_global_file(&self, folder: &str, file: &str) -> Result<Option<FileInfo>, String>;
 
-    fn all_global_files(&self, folder: &str) -> Result<Vec<FileMetadata>, String>;
+    fn all_global_files(&self, folder: &str) -> Result<DbStream<'_, FileMetadata>, String>;
     fn all_global_files_prefix(
         &self,
         folder: &str,
         prefix: &str,
-    ) -> Result<Vec<FileMetadata>, String>;
-    fn all_local_files(&self, folder: &str, device: &str) -> Result<Vec<FileInfo>, String>;
-    fn all_local_files_ordered(&self, folder: &str, device: &str) -> Result<Vec<FileInfo>, String>;
+    ) -> Result<DbStream<'_, FileMetadata>, String>;
+    fn all_local_files(&self, folder: &str, device: &str) -> Result<DbStream<'_, FileInfo>, String>;
+    fn all_local_files_ordered(
+        &self,
+        folder: &str,
+        device: &str,
+    ) -> Result<DbStream<'_, FileInfo>, String>;
     fn all_local_files_by_sequence(
         &self,
         folder: &str,
         device: &str,
         start_seq: i64,
         limit: usize,
-    ) -> Result<Vec<FileInfo>, String>;
+    ) -> Result<DbStream<'_, FileInfo>, String>;
     fn all_local_files_with_prefix(
         &self,
         folder: &str,
         device: &str,
         prefix: &str,
-    ) -> Result<Vec<FileInfo>, String>;
+    ) -> Result<DbStream<'_, FileInfo>, String>;
     fn all_local_files_with_blocks_hash(
         &self,
         folder: &str,
         hash: &[u8],
-    ) -> Result<Vec<FileMetadata>, String>;
+    ) -> Result<DbStream<'_, FileMetadata>, String>;
     fn all_needed_global_files(
         &self,
         folder: &str,
@@ -185,12 +190,12 @@ pub(crate) trait Db {
         order: PullOrder,
         limit: usize,
         offset: usize,
-    ) -> Result<Vec<FileInfo>, String>;
+    ) -> Result<DbStream<'_, FileInfo>, String>;
     fn all_local_blocks_with_hash(
         &self,
         folder: &str,
         hash: &[u8],
-    ) -> Result<Vec<BlockMapEntry>, String>;
+    ) -> Result<DbStream<'_, BlockMapEntry>, String>;
 
     fn drop_all_files(&mut self, folder: &str, device: &str) -> Result<(), String>;
     fn drop_device(&mut self, device: &str) -> Result<(), String>;
@@ -233,6 +238,10 @@ pub(crate) trait Db {
     fn put_kv(&mut self, key: &str, val: &[u8]) -> Result<(), String>;
     fn delete_kv(&mut self, key: &str) -> Result<(), String>;
     fn prefix_kv(&self, prefix: &str) -> Result<Vec<KeyValue>, String>;
+}
+
+pub(crate) fn collect_stream<T>(stream: DbStream<'_, T>) -> Result<Vec<T>, String> {
+    stream.collect()
 }
 
 impl Kv for WalFreeDb {
@@ -724,51 +733,157 @@ impl Db for WalFreeDb {
         self.global_winner_for_path(folder, &normalized, true)
     }
 
-    fn all_global_files(&self, folder: &str) -> Result<Vec<FileMetadata>, String> {
+    fn all_global_files(&self, folder: &str) -> Result<DbStream<'_, FileMetadata>, String> {
         self.ensure_open()?;
-        let mut out = Vec::new();
-        self.for_each_global_winner(folder, false, |winner| {
-            out.push(file_metadata_from_info(winner));
-            Ok(true)
-        })?;
-        Ok(out)
+        let folder = folder.to_string();
+        let mut pagers: Vec<DevicePathPager> = self
+            .store
+            .devices_in_folder(&folder)
+            .into_iter()
+            .map(DevicePathPager::new)
+            .collect();
+
+        let iter = std::iter::from_fn(move || loop {
+            let mut min_path: Option<String> = None;
+            for pager in pagers.iter_mut() {
+                if let Some(meta) = pager.current(&self.store, &folder) {
+                    match min_path.as_ref() {
+                        Some(current)
+                            if crate::store::compare_path_order(&meta.path, current)
+                                != std::cmp::Ordering::Less => {}
+                        _ => min_path = Some(meta.path.clone()),
+                    }
+                }
+            }
+            let Some(path) = min_path else {
+                return None;
+            };
+
+            let mut candidates = Vec::new();
+            for pager in pagers.iter_mut() {
+                let matches_path = pager
+                    .current(&self.store, &folder)
+                    .map(|meta| meta.path == path)
+                    .unwrap_or(false);
+                if !matches_path {
+                    continue;
+                }
+                if let Some(meta) = pager.current(&self.store, &folder) {
+                    candidates.push(meta.clone());
+                }
+                pager.advance();
+            }
+
+            if let Some((_, winner)) = best_global_candidate(candidates.into_iter()) {
+                return Some(Ok(file_metadata_from_info(winner)));
+            }
+        });
+        Ok(Box::new(iter))
     }
 
     fn all_global_files_prefix(
         &self,
         folder: &str,
         prefix: &str,
-    ) -> Result<Vec<FileMetadata>, String> {
+    ) -> Result<DbStream<'_, FileMetadata>, String> {
         self.ensure_open()?;
-        let mut out = Vec::new();
-        self.for_each_global_winner(folder, false, |winner| {
-            if winner.path.starts_with(prefix) {
-                out.push(file_metadata_from_info(winner));
+        let prefix = prefix.to_string();
+        let mut base = self.all_global_files(folder)?;
+        let iter = std::iter::from_fn(move || loop {
+            let next = base.next()?;
+            match next {
+                Ok(file) => {
+                    if file.name.starts_with(&prefix) {
+                        return Some(Ok(file));
+                    }
+                }
+                Err(err) => return Some(Err(err)),
             }
-            Ok(true)
-        })?;
-        Ok(out)
+        });
+        Ok(Box::new(iter))
     }
 
-    fn all_local_files(&self, folder: &str, device: &str) -> Result<Vec<FileInfo>, String> {
+    fn all_local_files(&self, folder: &str, device: &str) -> Result<DbStream<'_, FileInfo>, String> {
         self.ensure_open()?;
-        self.all_files_for_folder_device_full(folder, device)
-    }
-
-    fn all_local_files_ordered(&self, folder: &str, device: &str) -> Result<Vec<FileInfo>, String> {
-        self.ensure_open()?;
-        let mut out = Vec::new();
+        let folder = folder.to_string();
+        let device = device.to_string();
         let mut cursor: Option<String> = None;
-        loop {
-            let page =
-                self.all_local_files_ordered_page(folder, device, cursor.as_deref(), 2048)?;
-            out.extend(page.items);
-            match page.next_cursor {
-                Some(next) => cursor = Some(next),
-                None => break,
+        let mut page: Vec<StoreFileMetadata> = Vec::new();
+        let mut idx = 0_usize;
+        let mut last_page = false;
+        let iter = std::iter::from_fn(move || loop {
+            if idx < page.len() {
+                let meta = page[idx].clone();
+                idx += 1;
+                let hashes = match self.store.resolve_file_block_hashes(&meta) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        return Some(Err(format!(
+                            "load block hashes for {}/{}: {err}",
+                            folder, meta.path
+                        )));
+                    }
+                };
+                let mut out = store_to_file_info_without_blocks(&meta);
+                out.block_hashes = hashes;
+                return Some(Ok(out));
             }
-        }
-        Ok(out)
+            if last_page {
+                return None;
+            }
+            let next_page = self.store.files_in_folder_device_ordered_page(
+                &folder,
+                &device,
+                cursor.as_deref(),
+                1024,
+            );
+            cursor = next_page.next_cursor.map(|next| next.path);
+            last_page = cursor.is_none();
+            page = next_page.items;
+            idx = 0;
+            if page.is_empty() {
+                return None;
+            }
+        });
+        Ok(Box::new(iter))
+    }
+
+    fn all_local_files_ordered(
+        &self,
+        folder: &str,
+        device: &str,
+    ) -> Result<DbStream<'_, FileInfo>, String> {
+        self.ensure_open()?;
+        let folder = folder.to_string();
+        let device = device.to_string();
+        let mut cursor: Option<String> = None;
+        let mut page: Vec<StoreFileMetadata> = Vec::new();
+        let mut idx = 0_usize;
+        let mut last_page = false;
+        let iter = std::iter::from_fn(move || loop {
+            if idx < page.len() {
+                let meta = page[idx].clone();
+                idx += 1;
+                return Some(Ok(store_to_file_info_without_blocks(&meta)));
+            }
+            if last_page {
+                return None;
+            }
+            let next_page = self.store.files_in_folder_device_ordered_page(
+                &folder,
+                &device,
+                cursor.as_deref(),
+                2048,
+            );
+            cursor = next_page.next_cursor.map(|next| next.path);
+            last_page = cursor.is_none();
+            page = next_page.items;
+            idx = 0;
+            if page.is_empty() {
+                return None;
+            }
+        });
+        Ok(Box::new(iter))
     }
 
     fn all_local_files_by_sequence(
@@ -777,7 +892,7 @@ impl Db for WalFreeDb {
         device: &str,
         start_seq: i64,
         limit: usize,
-    ) -> Result<Vec<FileInfo>, String> {
+    ) -> Result<DbStream<'_, FileInfo>, String> {
         self.ensure_open()?;
         let mut out = self
             .all_files_for_folder_device_light(folder, device)
@@ -792,7 +907,7 @@ impl Db for WalFreeDb {
         if limit > 0 && out.len() > limit {
             out.truncate(limit);
         }
-        Ok(out)
+        Ok(Box::new(out.into_iter().map(Ok)))
     }
 
     fn all_local_files_with_prefix(
@@ -800,66 +915,89 @@ impl Db for WalFreeDb {
         folder: &str,
         device: &str,
         prefix: &str,
-    ) -> Result<Vec<FileInfo>, String> {
+    ) -> Result<DbStream<'_, FileInfo>, String> {
         self.ensure_open()?;
-        let mut out = Vec::new();
+        let folder = folder.to_string();
+        let device = device.to_string();
+        let prefix = prefix.to_string();
         let mut cursor: Option<String> = None;
-        loop {
-            let page = self.store.files_in_folder_device_prefix_ordered_page(
-                folder,
-                device,
-                prefix,
+        let mut page: Vec<StoreFileMetadata> = Vec::new();
+        let mut idx = 0_usize;
+        let mut last_page = false;
+        let iter = std::iter::from_fn(move || loop {
+            if idx < page.len() {
+                let meta = page[idx].clone();
+                idx += 1;
+                return Some(Ok(store_to_file_info_without_blocks(&meta)));
+            }
+            if last_page {
+                return None;
+            }
+            let next_page = self.store.files_in_folder_device_prefix_ordered_page(
+                &folder,
+                &device,
+                &prefix,
                 cursor.as_deref(),
                 2048,
             );
-            if page.items.is_empty() {
-                break;
+            cursor = next_page.next_cursor.map(|next| next.path);
+            last_page = cursor.is_none();
+            page = next_page.items;
+            idx = 0;
+            if page.is_empty() {
+                return None;
             }
-            out.extend(
-                page.items
-                    .into_iter()
-                    .map(|meta| store_to_file_info_without_blocks(&meta)),
-            );
-            cursor = page.next_cursor.map(|next| next.path);
-            if cursor.is_none() {
-                break;
-            }
-        }
-        Ok(out)
+        });
+        Ok(Box::new(iter))
     }
 
     fn all_local_files_with_blocks_hash(
         &self,
         folder: &str,
         hash: &[u8],
-    ) -> Result<Vec<FileMetadata>, String> {
+    ) -> Result<DbStream<'_, FileMetadata>, String> {
         self.ensure_open()?;
         let target = String::from_utf8_lossy(hash).to_string();
-        let mut out = Vec::new();
-        let mut first_error: Option<String> = None;
-        self.store.for_each_file_in_folder(folder, |meta| {
-            let hashes = match self.store.resolve_file_block_hashes(&meta) {
-                Ok(v) => v,
-                Err(err) => {
-                    first_error = Some(format!(
-                        "load block hashes for {}/{}: {err}",
-                        folder, meta.path
-                    ));
-                    return false;
+        let folder = folder.to_string();
+        let mut cursor: Option<String> = None;
+        let mut page: Vec<StoreFileMetadata> = Vec::new();
+        let mut idx = 0_usize;
+        let mut last_page = false;
+        let iter = std::iter::from_fn(move || loop {
+            if idx < page.len() {
+                let meta = page[idx].clone();
+                idx += 1;
+                let hashes = match self.store.resolve_file_block_hashes(&meta) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        return Some(Err(format!(
+                            "load block hashes for {}/{}: {err}",
+                            folder, meta.path
+                        )));
+                    }
+                };
+                if hashes.iter().any(|h| h == &target) {
+                    return Some(Ok(file_metadata_from_info(store_to_file_info_without_blocks(
+                        &meta,
+                    ))));
                 }
-            };
-            if hashes.iter().any(|h| h == &target) {
-                out.push(file_metadata_from_info(store_to_file_info_without_blocks(
-                    &meta,
-                )));
+                continue;
             }
-            true
+            if last_page {
+                return None;
+            }
+            let next_page = self
+                .store
+                .files_in_folder_ordered_page(&folder, cursor.as_deref(), 2048);
+            cursor = next_page.next_cursor.map(|next| next.path);
+            last_page = cursor.is_none();
+            page = next_page.items;
+            idx = 0;
+            if page.is_empty() {
+                return None;
+            }
         });
-        if let Some(err) = first_error {
-            return Err(err);
-        }
-        out.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(out)
+        Ok(Box::new(iter))
     }
 
     fn all_needed_global_files(
@@ -869,39 +1007,53 @@ impl Db for WalFreeDb {
         order: PullOrder,
         limit: usize,
         offset: usize,
-    ) -> Result<Vec<FileInfo>, String> {
+    ) -> Result<DbStream<'_, FileInfo>, String> {
         self.ensure_open()?;
         if order == PullOrder::Alphabetic {
-            let mut out = Vec::new();
+            let folder = folder.to_string();
+            let device = device.to_string();
             let mut cursor: Option<String> = None;
+            let mut page: Vec<FileInfo> = Vec::new();
+            let mut idx = 0_usize;
+            let mut last_page = false;
             let mut skipped = 0_usize;
+            let mut emitted = 0_usize;
             let target = if limit == 0 { usize::MAX } else { limit };
-            loop {
-                let page = self.all_needed_global_files_ordered_page(
-                    folder,
-                    device,
-                    cursor.as_deref(),
-                    2048,
-                )?;
-                if page.items.is_empty() {
-                    break;
+            let iter = std::iter::from_fn(move || loop {
+                if emitted >= target {
+                    return None;
                 }
-                for file in page.items {
+                if idx < page.len() {
+                    let next = page[idx].clone();
+                    idx += 1;
                     if skipped < offset {
                         skipped += 1;
                         continue;
                     }
-                    if out.len() >= target {
-                        return Ok(out);
-                    }
-                    out.push(file);
+                    emitted += 1;
+                    return Some(Ok(next));
                 }
-                cursor = page.next_cursor;
-                if cursor.is_none() {
-                    break;
+                if last_page {
+                    return None;
                 }
-            }
-            return Ok(out);
+                let next_page = match self.all_needed_global_files_ordered_page(
+                    &folder,
+                    &device,
+                    cursor.as_deref(),
+                    2048,
+                ) {
+                    Ok(v) => v,
+                    Err(err) => return Some(Err(err)),
+                };
+                cursor = next_page.next_cursor;
+                last_page = cursor.is_none();
+                page = next_page.items;
+                idx = 0;
+                if page.is_empty() {
+                    return None;
+                }
+            });
+            return Ok(Box::new(iter));
         }
 
         let mut need = Vec::new();
@@ -918,50 +1070,76 @@ impl Db for WalFreeDb {
             .into_iter()
             .skip(offset)
             .take(if limit == 0 { usize::MAX } else { limit })
-            .collect();
-        Ok(sliced)
+            .map(Ok);
+        Ok(Box::new(sliced))
     }
 
     fn all_local_blocks_with_hash(
         &self,
         folder: &str,
         hash: &[u8],
-    ) -> Result<Vec<BlockMapEntry>, String> {
+    ) -> Result<DbStream<'_, BlockMapEntry>, String> {
         self.ensure_open()?;
         let target = String::from_utf8_lossy(hash).to_string();
-        let mut out = Vec::new();
-        let mut first_error: Option<String> = None;
-
-        self.store.for_each_file_in_folder(folder, |meta| {
-            let hashes = match self.store.resolve_file_block_hashes(&meta) {
-                Ok(v) => v,
-                Err(err) => {
-                    first_error = Some(format!(
-                        "load block hashes for {}/{}: {err}",
-                        folder, meta.path
-                    ));
-                    return false;
-                }
-            };
-            for (idx, block_hash) in hashes.iter().enumerate() {
-                if block_hash != &target {
-                    continue;
-                }
-                out.push(BlockMapEntry {
-                    blocklist_hash: target.as_bytes().to_vec(),
-                    offset: idx as i64 * 128 * 1024,
-                    block_index: idx as i32,
-                    size: 128 * 1024,
-                    file_name: meta.path.clone(),
-                });
+        let folder = folder.to_string();
+        let mut cursor: Option<String> = None;
+        let mut page: Vec<StoreFileMetadata> = Vec::new();
+        let mut idx = 0_usize;
+        let mut last_page = false;
+        let mut pending: Vec<BlockMapEntry> = Vec::new();
+        let mut pending_idx = 0_usize;
+        let iter = std::iter::from_fn(move || loop {
+            if pending_idx < pending.len() {
+                let next = pending[pending_idx].clone();
+                pending_idx += 1;
+                return Some(Ok(next));
             }
-            true
+            if idx < page.len() {
+                let meta = page[idx].clone();
+                idx += 1;
+                let hashes = match self.store.resolve_file_block_hashes(&meta) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        return Some(Err(format!(
+                            "load block hashes for {}/{}: {err}",
+                            folder, meta.path
+                        )));
+                    }
+                };
+                pending = hashes
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(block_idx, block_hash)| {
+                        if block_hash != &target {
+                            return None;
+                        }
+                        Some(BlockMapEntry {
+                            blocklist_hash: target.as_bytes().to_vec(),
+                            offset: block_idx as i64 * 128 * 1024,
+                            block_index: block_idx as i32,
+                            size: 128 * 1024,
+                            file_name: meta.path.clone(),
+                        })
+                    })
+                    .collect();
+                pending_idx = 0;
+                continue;
+            }
+            if last_page {
+                return None;
+            }
+            let next_page = self
+                .store
+                .files_in_folder_ordered_page(&folder, cursor.as_deref(), 2048);
+            cursor = next_page.next_cursor.map(|next| next.path);
+            last_page = cursor.is_none();
+            page = next_page.items;
+            idx = 0;
+            if page.is_empty() {
+                return None;
+            }
         });
-        if let Some(err) = first_error {
-            return Err(err);
-        }
-        out.sort_by(|a, b| a.file_name.cmp(&b.file_name));
-        Ok(out)
+        Ok(Box::new(iter))
     }
 
     fn drop_all_files(&mut self, folder: &str, device: &str) -> Result<(), String> {
@@ -1599,7 +1777,9 @@ mod tests {
             .expect("availability");
         assert_eq!(avail, vec!["dev-b".to_string()]);
 
-        let global_files = db.all_global_files("default").expect("all global");
+        let global_files =
+            collect_stream(db.all_global_files("default").expect("all global stream"))
+                .expect("all global");
         assert_eq!(global_files.len(), 3);
     }
 
@@ -1657,6 +1837,7 @@ mod tests {
 
         let need = db
             .all_needed_global_files("default", "dev-a", PullOrder::Alphabetic, 10, 0)
+            .and_then(collect_stream)
             .expect("need");
         let need_paths = need.into_iter().map(|f| f.path).collect::<Vec<_>>();
         assert_eq!(need_paths, vec!["a.txt", "c.txt"]);
@@ -1782,6 +1963,7 @@ mod tests {
 
         let names = db
             .all_local_files_with_prefix("default", "dev-a", "a/")
+            .and_then(collect_stream)
             .expect("prefix query")
             .into_iter()
             .map(|f| f.path)
@@ -1797,6 +1979,7 @@ mod tests {
 
         let global = db
             .all_global_files("default")
+            .and_then(collect_stream)
             .expect("global files")
             .into_iter()
             .next()
@@ -1809,6 +1992,7 @@ mod tests {
 
         let blocks = db
             .all_local_blocks_with_hash("default", b"h1")
+            .and_then(collect_stream)
             .expect("block query");
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].file_name, "a.txt");

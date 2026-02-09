@@ -22,3 +22,9 @@ benchmark-results
 /syncthing-rs/target
 /syncthing-rs/.syncthing-rs-db/
 /.gocache
+/.opencode-cache/
+/.opencode-config/
+/.opencode-data/
+/.opencode-home/
+/.opencode-state/
+/.tmp/

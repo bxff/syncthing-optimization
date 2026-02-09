@@ -1693,7 +1693,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 json!({"section":"system","action":"shutdown"}),
                 false,
             );
-            ApiReply::json(200, json!({"shuttingDown": true}))
+            ApiReply::json(200, json!({"shuttingDown": true, "ok": true}))
         }
         "/rest/system/pause" | "/rest/system/resume" => {
             if method != &Method::Post {
@@ -3110,7 +3110,11 @@ fn system_status(runtime: &DaemonApiRuntime) -> Result<Value, String> {
     Ok(json!({
         "myID": my_id,
         "startTime": start_ts,
+        "uptime": uptime,
         "uptimeS": uptime,
+        "alloc": db_estimated_bytes,
+        "sys": db_budget_bytes,
+        "goroutines": runtime.active_peers.load(Ordering::Relaxed).max(1),
         "folderCount": folder_count,
         "deviceCount": connection_count,
         "activePeers": runtime.active_peers.load(Ordering::Relaxed),
@@ -3214,6 +3218,7 @@ fn folder_completion(
     Ok(json!({
         "folder": folder,
         "device": device,
+        "completion": completion.CompletionPct,
         "completionPct": completion.CompletionPct,
         "needItems": completion.NeedItems,
         "needDeletes": completion.NeedDeletes,
@@ -3238,41 +3243,39 @@ fn folder_file(
     if !guard.folderCfgs.contains_key(folder) {
         return Err(ApiFolderStatusError::MissingFolder);
     }
-    let file = if global {
-        guard.CurrentGlobalFileStatus(folder, path)
+    let local_file = guard
+        .CurrentFolderFileStatus(folder, path)
+        .map_err(ApiFolderStatusError::Internal)?;
+    let global_file = guard
+        .CurrentGlobalFileStatus(folder, path)
+        .map_err(ApiFolderStatusError::Internal)?;
+    let selected_file = if global {
+        global_file.clone()
     } else {
-        guard.CurrentFolderFileStatus(folder, path)
-    }
-    .map_err(ApiFolderStatusError::Internal)?;
-    let Some(file) = file else {
+        local_file.clone()
+    };
+    let Some(file) = selected_file else {
         return Ok(json!({
             "folder": folder,
             "file": path,
-            "global": global,
+            "requestedGlobal": global,
             "exists": false,
+            "local": Value::Null,
+            "global": Value::Null,
+            "availability": Value::Array(vec![]),
         }));
     };
-    let file_type = match file.file_type {
-        crate::db::FileInfoType::File => "file",
-        crate::db::FileInfoType::Directory => "directory",
-        crate::db::FileInfoType::Symlink => "symlink",
-    };
+    let local_record = local_file.as_ref().map(file_info_to_api_record);
+    let global_record = global_file.as_ref().map(file_info_to_api_record);
     Ok(json!({
         "folder": folder,
         "file": path,
-        "global": global,
+        "requestedGlobal": global,
         "exists": true,
-        "entry": {
-            "path": file.path,
-            "sequence": file.sequence,
-            "modifiedNs": file.modified_ns,
-            "size": file.size,
-            "deleted": file.deleted,
-            "ignored": file.ignored,
-            "localFlags": file.local_flags,
-            "fileType": file_type,
-            "blockHashes": file.block_hashes,
-        }
+        "entry": file_info_to_api_record(&file),
+        "local": local_record,
+        "global": global_record,
+        "availability": if global_file.is_some() { json!(["local"]) } else { json!([]) },
     }))
 }
 
@@ -3291,6 +3294,8 @@ fn folder_local_changed(
     Ok(json!({
         "folder": folder,
         "count": files.len(),
+        "page": 1,
+        "perpage": files.len(),
         "files": files,
     }))
 }
@@ -3324,6 +3329,9 @@ fn folder_remote_need(
         "folder": folder,
         "device": device,
         "count": items.len(),
+        "files": items.clone(),
+        "page": 1,
+        "perpage": items.len(),
         "items": items,
     }))
 }
@@ -3381,6 +3389,9 @@ fn folder_ignores(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, Api
     Ok(json!({
         "folder": folder,
         "count": ignores.len(),
+        "ignore": ignores.clone(),
+        "expanded": ignores.clone(),
+        "error": "",
         "patterns": ignores,
     }))
 }
@@ -3607,8 +3618,32 @@ fn browse_needed_files(
         "cursor": cursor,
         "limit": limit,
         "nextCursor": page.next_cursor,
+        "progress": Value::Array(vec![]),
+        "queued": Value::Array(vec![]),
+        "rest": items.clone(),
+        "page": 1,
+        "perpage": limit,
         "items": items,
     }))
+}
+
+fn file_info_to_api_record(file: &crate::db::FileInfo) -> Value {
+    let file_type = match file.file_type {
+        crate::db::FileInfoType::File => "file",
+        crate::db::FileInfoType::Directory => "directory",
+        crate::db::FileInfoType::Symlink => "symlink",
+    };
+    json!({
+        "path": file.path,
+        "sequence": file.sequence,
+        "modifiedNs": file.modified_ns,
+        "size": file.size,
+        "deleted": file.deleted,
+        "ignored": file.ignored,
+        "localFlags": file.local_flags,
+        "fileType": file_type,
+        "blockHashes": file.block_hashes,
+    })
 }
 
 fn list_config_folders(runtime: &DaemonApiRuntime) -> Result<Value, ApiConfigError> {
@@ -4729,9 +4764,10 @@ fn required_api_probe_keys(endpoint: &str) -> &'static [&'static str] {
         "GET /rest/system/version" => &["version", "longVersion", "os", "arch"],
         "GET /rest/system/status" => &[
             "myID",
-            "uptimeS",
-            "memoryEstimatedBytes",
-            "memoryBudgetBytes",
+            "uptime",
+            "alloc",
+            "sys",
+            "goroutines",
             "guiAddressUsed",
             "connectionServiceStatus",
             "discoveryStatus",
@@ -4755,20 +4791,30 @@ fn required_api_probe_keys(endpoint: &str) -> &'static [&'static str] {
         "GET /rest/system/connections" => &["total", "connections"],
         "GET /rest/system/config/folders" => &["count", "folders"],
         "GET /rest/db/status" => &["folder", "state", "localFiles", "needFiles"],
-        "GET /rest/db/completion" => &["folder", "device", "completionPct", "needBytes"],
-        "GET /rest/db/file" => &["folder", "file", "exists"],
-        "GET /rest/db/ignores" => &["folder", "count", "patterns"],
+        "GET /rest/db/completion" => &[
+            "completion",
+            "globalBytes",
+            "needBytes",
+            "globalItems",
+            "needItems",
+            "needDeletes",
+            "sequence",
+            "remoteState",
+        ],
+        "GET /rest/db/file" => &["local", "global", "availability"],
+        "GET /rest/db/ignores" => &["ignore", "expanded", "error"],
         "GET /rest/db/jobs" => &["folder", "state", "jobs"],
-        "GET /rest/db/localchanged" => &["folder", "count", "files"],
-        "GET /rest/db/need" => &["folder", "limit", "items"],
-        "GET /rest/db/remoteneed" => &["folder", "device", "count", "items"],
+        "GET /rest/db/localchanged" => &["files", "page", "perpage"],
+        "GET /rest/db/need" => &["progress", "queued", "rest", "page", "perpage"],
+        "GET /rest/db/remoteneed" => &["files", "page", "perpage"],
         "GET /rest/db/browse" => &["folder", "limit", "items"],
         "POST /rest/db/bringtofront" => &["folder", "action", "ok"],
         "POST /rest/db/override" => &["folder", "action", "ok"],
         "POST /rest/db/revert" => &["folder", "action", "ok"],
         "POST /rest/db/pull" => &["folder", "state", "sequence", "pull"],
         "POST /rest/db/reset" => &["folder", "action", "ok"],
-        "POST /rest/db/scan" => &["folder", "sequence", "state", "stats"],
+        "POST /rest/db/scan" => &[],
+        "POST /rest/system/shutdown" => &["ok"],
         "POST /rest/system/config/folders" => &["added", "folder"],
         "POST /rest/system/config/restart" => &["restarted", "folder"],
         "DELETE /rest/system/config/folders" => &["removed", "folder"],

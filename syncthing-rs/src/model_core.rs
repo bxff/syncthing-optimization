@@ -1120,7 +1120,9 @@ impl model {
             .copied()
             .unwrap_or(false)
         {
-            return Err("cannot dismiss running folder".to_string());
+            // Dismissing a running folder is a no-op for compatibility with
+            // API callers that treat dismiss as idempotent.
+            return Ok(());
         }
         self.foldersRunning.remove(folder);
         self.folderCfgs.remove(folder);
@@ -1789,10 +1791,8 @@ mod tests {
         let cfg = newFolderConfiguration("running", "/tmp/running");
         m.newFolder(cfg);
 
-        let err = m
-            .DismissPendingFolder("peer-a", "running")
-            .expect_err("running folder must not be dismissed as pending");
-        assert!(err.contains("cannot dismiss running folder"));
+        m.DismissPendingFolder("peer-a", "running")
+            .expect("dismiss running should be no-op");
         assert!(m.foldersRunning.contains_key("running"));
 
         m.foldersRunning.insert("pending".to_string(), false);

@@ -2,6 +2,7 @@ use crate::bep::{decode_frame, encode_frame, BepMessage};
 use crate::config::{FolderConfiguration, FolderDeviceConfiguration, FolderType};
 use crate::db::Db;
 use crate::model_core::{model, newFolderConfiguration, NewModelWithRuntime};
+use crc32fast::Hasher;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -21,6 +22,10 @@ const MAX_FRAME_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_MAX_PEERS: usize = 32;
 const MAX_EVENT_LOG_ENTRIES: usize = 10_000;
 const PEER_IO_TIMEOUT_SECS: u64 = 30;
+const DEVICE_ID_GROUP_COUNT: usize = 8;
+const DEVICE_ID_GROUP_LEN: usize = 7;
+const DEVICE_ID_BODY_LEN: usize = DEVICE_ID_GROUP_COUNT * DEVICE_ID_GROUP_LEN;
+const DEVICE_ID_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct FolderSpec {
@@ -701,6 +706,31 @@ fn apply_syncthing_bootstrap_to_api_state(
             }),
         );
     }
+    if state
+        .default_device
+        .get("deviceID")
+        .and_then(Value::as_str)
+        .map(|id| id.trim().is_empty())
+        .unwrap_or(true)
+    {
+        state.default_device["deviceID"] = json!(local_device_id);
+    }
+    if state
+        .default_device
+        .get("name")
+        .and_then(Value::as_str)
+        .map(|name| name.trim().is_empty())
+        .unwrap_or(true)
+    {
+        let local_name = state
+            .device_configs
+            .get(local_device_id)
+            .and_then(|cfg| cfg.get("name"))
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("Local Device");
+        state.default_device["name"] = json!(local_name);
+    }
 
     ensure_api_options_defaults(&mut state.options);
     if !bootstrap.listen_addresses.is_empty() {
@@ -882,6 +912,85 @@ fn decode_xml_value(value: &str) -> String {
         .replace("&amp;", "&")
 }
 
+fn normalize_syncthing_device_id(candidate: &str) -> Option<String> {
+    let normalized = candidate.trim().to_ascii_uppercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    let mut parts = normalized.split('-');
+    for _ in 0..DEVICE_ID_GROUP_COUNT {
+        let Some(part) = parts.next() else {
+            return None;
+        };
+        if part.len() != DEVICE_ID_GROUP_LEN {
+            return None;
+        }
+        if !part
+            .as_bytes()
+            .iter()
+            .all(|b| matches!(b, b'A'..=b'Z' | b'2'..=b'7'))
+        {
+            return None;
+        }
+    }
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(normalized)
+}
+
+fn synthetic_syncthing_device_id(seed: &str) -> String {
+    let source = seed.trim();
+    let source = if source.is_empty() {
+        "unknown-peer"
+    } else {
+        source
+    };
+    let mut hasher = Hasher::new();
+    hasher.update(source.as_bytes());
+    let mut state = hasher.finalize();
+    let mut body = String::with_capacity(DEVICE_ID_BODY_LEN);
+    for _ in 0..DEVICE_ID_BODY_LEN {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let idx = ((state >> 27) & 0x1f) as usize;
+        body.push(DEVICE_ID_ALPHABET[idx] as char);
+    }
+    let mut out = String::with_capacity(DEVICE_ID_BODY_LEN + DEVICE_ID_GROUP_COUNT - 1);
+    for group in 0..DEVICE_ID_GROUP_COUNT {
+        if group > 0 {
+            out.push('-');
+        }
+        let start = group * DEVICE_ID_GROUP_LEN;
+        let end = start + DEVICE_ID_GROUP_LEN;
+        out.push_str(&body[start..end]);
+    }
+    out
+}
+
+fn canonical_peer_device_id(
+    peer_hint: &str,
+    hello_device_name: &str,
+    peer_hint_is_transport: bool,
+) -> String {
+    if let Some(id) = normalize_syncthing_device_id(peer_hint) {
+        return id;
+    }
+    if let Some(id) = normalize_syncthing_device_id(hello_device_name) {
+        return id;
+    }
+    let trimmed_peer = peer_hint.trim();
+    if !peer_hint_is_transport && !trimmed_peer.is_empty() {
+        return trimmed_peer.to_string();
+    }
+    let trimmed_hello = hello_device_name.trim();
+    let seed = if trimmed_peer.is_empty() {
+        trimmed_hello
+    } else {
+        trimmed_peer
+    };
+    synthetic_syncthing_device_id(seed)
+}
+
 #[derive(Clone)]
 struct DaemonApiRuntime {
     model: Arc<RwLock<model>>,
@@ -970,8 +1079,8 @@ impl ApiRuntimeState {
             }),
             default_folder,
             default_device: json!({
-                "deviceID": "",
-                "name": "",
+                "deviceID": local_device,
+                "name": "Local Device",
                 "addresses": ["dynamic"],
                 "paused": false,
                 "compression": "metadata",
@@ -1853,7 +1962,9 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "model lock poisoned"),
                 };
-                guard.DismissPendingDevice(device);
+                if let Err(err) = guard.DismissPendingDevice(device) {
+                    return make_api_error(400, err);
+                }
                 ApiReply::json(200, json!({"dismissed": true, "device": device}))
             }
             _ => make_api_error(405, "method not allowed"),
@@ -1883,7 +1994,9 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "model lock poisoned"),
                 };
-                guard.DismissPendingFolder(folder);
+                if let Err(err) = guard.DismissPendingFolder(None, folder) {
+                    return make_api_error(400, err);
+                }
                 ApiReply::json(200, json!({"dismissed": true, "folder": folder}))
             }
             _ => make_api_error(405, "method not allowed"),
@@ -3027,7 +3140,9 @@ fn folder_completion(
     if !guard.folderCfgs.contains_key(folder) {
         return Err(ApiFolderStatusError::MissingFolder);
     }
-    let completion = guard.Completion(folder, device);
+    let completion = guard
+        .Completion(device, folder)
+        .map_err(ApiFolderStatusError::Internal)?;
     Ok(json!({
         "folder": folder,
         "device": device,
@@ -3056,10 +3171,11 @@ fn folder_file(
         return Err(ApiFolderStatusError::MissingFolder);
     }
     let file = if global {
-        guard.CurrentGlobalFile(folder, path)
+        guard.CurrentGlobalFileStatus(folder, path)
     } else {
-        guard.CurrentFolderFile(folder, path)
-    };
+        guard.CurrentFolderFileStatus(folder, path)
+    }
+    .map_err(ApiFolderStatusError::Internal)?;
     let Some(file) = file else {
         return Ok(json!({
             "folder": folder,
@@ -3624,10 +3740,7 @@ pub(crate) fn handle_peer_connection(
         .map_err(|err| format!("set write timeout: {err}"))?;
     let peer_id_looks_transport = peer_id.contains(':') || peer_id.contains('#');
     let mut seen_hello = false;
-    let mut logical_peer_id = peer_id.trim().to_string();
-    if logical_peer_id.is_empty() {
-        logical_peer_id = "unknown-device".to_string();
-    }
+    let mut logical_peer_id = canonical_peer_device_id(peer_id, "", peer_id_looks_transport);
     loop {
         let frame = match read_frame(stream)? {
             Some(frame) => frame,
@@ -3639,12 +3752,8 @@ pub(crate) fn handle_peer_connection(
                 return Err("expected hello as first message".to_string());
             }
             if let BepMessage::Hello { device_name, .. } = &inbound {
-                let hello_device = device_name.trim();
-                if !hello_device.is_empty()
-                    && (peer_id_looks_transport || logical_peer_id == "unknown-device")
-                {
-                    logical_peer_id = hello_device.to_string();
-                }
+                logical_peer_id =
+                    canonical_peer_device_id(peer_id, device_name, peer_id_looks_transport);
             }
             seen_hello = true;
         } else if matches!(inbound, BepMessage::Hello { .. }) {
@@ -5263,6 +5372,10 @@ mod tests {
         assert!(config_payload["gui"]["theme"].is_string());
         assert!(config_payload["gui"]["useTLS"].is_boolean());
         assert!(config_payload["defaults"]["ignores"]["lines"].is_array());
+        assert!(config_payload["defaults"]["device"]["deviceID"]
+            .as_str()
+            .map(|id| !id.trim().is_empty())
+            .unwrap_or(false));
         assert!(config_payload["remoteIgnoredDevices"].is_array());
         assert!(config_payload["folders"][0]["devices"]
             .as_array()
@@ -6073,7 +6186,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_peer_connection_prefers_hello_device_name() {
+    fn handle_peer_connection_prefers_valid_hello_device_id_for_transport_peer() {
         let model = Arc::new(RwLock::new(NewModel()));
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
@@ -6087,7 +6200,8 @@ mod tests {
         write_frame(
             &mut client,
             &BepMessage::Hello {
-                device_name: "REAL-DEVICE-ID".to_string(),
+                device_name: "AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG-HHHHHHH"
+                    .to_string(),
                 client_name: "syncthing-rs-test".to_string(),
             },
         )
@@ -6096,8 +6210,41 @@ mod tests {
         server.join().expect("join server");
 
         let guard = model.read().expect("lock");
-        assert!(guard.helloMessages.contains_key("REAL-DEVICE-ID"));
+        assert!(guard
+            .helloMessages
+            .contains_key("AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG-HHHHHHH"));
         assert!(!guard.helloMessages.contains_key("127.0.0.1:22000#1"));
+    }
+
+    #[test]
+    fn handle_peer_connection_synthesizes_transport_peer_id_when_hello_name_is_not_device_id() {
+        let model = Arc::new(RwLock::new(NewModel()));
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server_model = model.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            handle_peer_connection(&mut stream, "127.0.0.1:22000#2", &server_model).expect("handle")
+        });
+
+        let mut client = TcpStream::connect(addr).expect("connect");
+        write_frame(
+            &mut client,
+            &BepMessage::Hello {
+                device_name: "peer-a".to_string(),
+                client_name: "syncthing-rs-test".to_string(),
+            },
+        )
+        .expect("write hello");
+        client.shutdown(Shutdown::Write).expect("shutdown write");
+        server.join().expect("join server");
+
+        let guard = model.read().expect("lock");
+        assert_eq!(guard.helloMessages.len(), 1);
+        let device_id = guard.helloMessages.keys().next().expect("device key");
+        assert!(normalize_syncthing_device_id(device_id).is_some());
+        assert!(!device_id.contains(':'));
+        assert!(!device_id.contains('#'));
     }
 
     #[test]

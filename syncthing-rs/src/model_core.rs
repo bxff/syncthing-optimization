@@ -867,6 +867,10 @@ impl model {
         device: &str,
         message: &BepMessage,
     ) -> Result<Option<BepMessage>, String> {
+        let device = device.trim();
+        if device.is_empty() {
+            return Err("device id is required".to_string());
+        }
         match message {
             BepMessage::Hello {
                 device_name: _,
@@ -2037,5 +2041,19 @@ mod tests {
                 data: Vec::new(),
             })
         );
+    }
+
+    #[test]
+    fn apply_bep_message_rejects_empty_device_id() {
+        let mut m = NewModel();
+        let err = m
+            .ApplyBepMessage(
+                "   ",
+                &BepMessage::Ping {
+                    timestamp_ms: 1,
+                },
+            )
+            .expect_err("empty device id must be rejected");
+        assert!(err.contains("device id is required"));
     }
 }

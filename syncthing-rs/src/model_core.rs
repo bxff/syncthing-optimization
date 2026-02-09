@@ -293,6 +293,7 @@ pub(crate) struct model {
     pub(crate) deviceDownloads: BTreeMap<String, Vec<String>>,
     pub(crate) deviceStatRefs: BTreeMap<String, BTreeMap<String, i64>>,
     pub(crate) remoteFolderStates: BTreeMap<String, String>,
+    pub(crate) pendingFolderOffers: BTreeMap<String, BTreeSet<String>>,
     pub(crate) protectedFiles: BTreeSet<String>,
     pub(crate) observed: deviceIDSet,
     pub(crate) helloMessages: BTreeMap<String, String>,
@@ -343,6 +344,7 @@ fn model_with_runtime(db_root: PathBuf, db_memory_cap_mb: usize) -> model {
         deviceDownloads: BTreeMap::new(),
         deviceStatRefs: BTreeMap::new(),
         remoteFolderStates: BTreeMap::new(),
+        pendingFolderOffers: BTreeMap::new(),
         protectedFiles: BTreeSet::new(),
         observed: deviceIDSet::default(),
         helloMessages: BTreeMap::new(),
@@ -889,8 +891,18 @@ impl model {
             }
             BepMessage::ClusterConfig { folders } => {
                 for folder_id in folders {
+                    let folder_id = folder_id.trim();
+                    if folder_id.is_empty() {
+                        continue;
+                    }
                     self.remoteFolderStates
-                        .insert(folder_id.clone(), "cluster_configured".to_string());
+                        .insert(folder_id.to_string(), "cluster_configured".to_string());
+                    if !self.folderCfgs.contains_key(folder_id) {
+                        self.pendingFolderOffers
+                            .entry(folder_id.to_string())
+                            .or_default()
+                            .insert(device.to_string());
+                    }
                 }
                 Ok(None)
             }
@@ -1089,10 +1101,24 @@ impl model {
     }
 
     pub(crate) fn PendingFolders(&self) -> Vec<String> {
-        self.foldersRunning
-            .iter()
-            .filter_map(|(id, running)| (!running).then_some(id.clone()))
-            .collect()
+        self.pendingFolderOffers.keys().cloned().collect()
+    }
+
+    pub(crate) fn PendingFolderOffers(&self) -> BTreeMap<String, Vec<String>> {
+        let mut out = BTreeMap::new();
+        for (folder, devices) in &self.pendingFolderOffers {
+            let mut listed = devices
+                .iter()
+                .map(|device| device.trim().to_string())
+                .filter(|device| !device.is_empty())
+                .collect::<Vec<_>>();
+            listed.sort();
+            listed.dedup();
+            if !listed.is_empty() {
+                out.insert(folder.clone(), listed);
+            }
+        }
+        out
     }
 
     pub(crate) fn DismissPendingDevice(&mut self, device: &str) -> Result<(), String> {
@@ -1114,18 +1140,23 @@ impl model {
         if folder.trim().is_empty() {
             return Err("folder id is required".to_string());
         }
-        if self
-            .foldersRunning
-            .get(folder)
-            .copied()
-            .unwrap_or(false)
+        if self.folderCfgs.contains_key(folder)
+            || self
+                .foldersRunning
+                .get(folder)
+                .copied()
+                .unwrap_or(false)
         {
-            // Dismissing a running folder is a no-op for compatibility with
-            // API callers that treat dismiss as idempotent.
+            // Dismissing a configured/running folder is a no-op for compatibility with
+            // API callers that treat dismiss as idempotent and only use pending offers.
             return Ok(());
         }
-        self.foldersRunning.remove(folder);
-        self.folderCfgs.remove(folder);
+        if let Some(devices) = self.pendingFolderOffers.get_mut(folder) {
+            devices.remove(device);
+            if devices.is_empty() {
+                self.pendingFolderOffers.remove(folder);
+            }
+        }
         Ok(())
     }
 
@@ -1230,6 +1261,7 @@ impl model {
         ignores: Vec<String>,
     ) {
         let id = cfg.id.clone();
+        self.pendingFolderOffers.remove(&id);
         self.folderCfgs.insert(id.clone(), cfg.clone());
         self.folderIgnores.insert(id.clone(), ignores);
         self.folderRunners
@@ -1290,6 +1322,7 @@ impl model {
 
     pub(crate) fn cleanPending(&mut self, folder_id: &str) {
         self.remoteFolderStates.remove(folder_id);
+        self.pendingFolderOffers.remove(folder_id);
     }
 
     pub(crate) fn cleanupFolderLocked(&mut self, folder_id: &str) {
@@ -1786,7 +1819,7 @@ mod tests {
     }
 
     #[test]
-    fn dismiss_pending_folder_rejects_running_and_removes_pending() {
+    fn dismiss_pending_folder_is_noop_for_running_and_removes_offer_only() {
         let mut m = NewModel();
         let cfg = newFolderConfiguration("running", "/tmp/running");
         m.newFolder(cfg);
@@ -1795,13 +1828,49 @@ mod tests {
             .expect("dismiss running should be no-op");
         assert!(m.foldersRunning.contains_key("running"));
 
-        m.foldersRunning.insert("pending".to_string(), false);
-        m.folderCfgs
-            .insert("pending".to_string(), newFolderConfiguration("pending", "/tmp/pending"));
+        m.pendingFolderOffers
+            .entry("pending".to_string())
+            .or_default()
+            .insert("peer-a".to_string());
+        m.pendingFolderOffers
+            .entry("pending".to_string())
+            .or_default()
+            .insert("peer-b".to_string());
         m.DismissPendingFolder("peer-a", "pending")
             .expect("dismiss pending folder");
-        assert!(!m.foldersRunning.contains_key("pending"));
-        assert!(!m.folderCfgs.contains_key("pending"));
+        assert_eq!(m.PendingFolders(), vec!["pending".to_string()]);
+        assert_eq!(
+            m.PendingFolderOffers()["pending"],
+            vec!["peer-b".to_string()]
+        );
+        m.DismissPendingFolder("peer-b", "pending")
+            .expect("dismiss last offer");
+        assert!(m.PendingFolders().is_empty());
+    }
+
+    #[test]
+    fn cluster_config_tracks_pending_folder_offers_for_unknown_folders() {
+        let mut m = NewModel();
+        m.newFolder(newFolderConfiguration("known", "/tmp/known"));
+
+        m.ApplyBepMessage(
+            "peer-a",
+            &BepMessage::ClusterConfig {
+                folders: vec![
+                    "known".to_string(),
+                    " ".to_string(),
+                    "pending".to_string(),
+                ],
+            },
+        )
+        .expect("cluster config");
+
+        assert!(m.PendingFolders().contains(&"pending".to_string()));
+        assert_eq!(
+            m.PendingFolderOffers()["pending"],
+            vec!["peer-a".to_string()]
+        );
+        assert!(!m.PendingFolders().contains(&"known".to_string()));
     }
 
     #[test]

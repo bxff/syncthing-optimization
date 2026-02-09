@@ -2043,14 +2043,33 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "model lock poisoned"),
                 };
-                let pending = guard.PendingFolders();
+                let pending = guard.PendingFolderOffers();
+                let now_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
                 let mut payload = serde_json::Map::new();
-                for folder_id in pending
-                    .into_iter()
-                    .map(|id| id.trim().to_string())
-                    .filter(|id| !id.is_empty())
-                {
-                    payload.insert(folder_id, json!({"offeredBy": {}}));
+                for (folder_id, offered_by_devices) in pending {
+                    let folder_id = folder_id.trim().to_string();
+                    if folder_id.is_empty() {
+                        continue;
+                    }
+                    let mut offered_by = serde_json::Map::new();
+                    for device_id in offered_by_devices
+                        .into_iter()
+                        .map(|id| id.trim().to_string())
+                        .filter(|id| !id.is_empty())
+                    {
+                        offered_by.insert(
+                            device_id.clone(),
+                            json!({
+                                "name": device_id,
+                                "address": "unknown",
+                                "time": now_ms,
+                            }),
+                        );
+                    }
+                    payload.insert(folder_id, json!({"offeredBy": offered_by}));
                 }
                 ApiReply::json(200, Value::Object(payload))
             }
@@ -5418,6 +5437,14 @@ mod tests {
                     ..Default::default()
                 },
             );
+            guard
+                .ApplyBepMessage(
+                    "PEER-A",
+                    &BepMessage::ClusterConfig {
+                        folders: vec!["incoming".to_string(), "default".to_string()],
+                    },
+                )
+                .expect("apply cluster config");
         }
         let runtime = test_api_runtime(model, Vec::new(), 0);
         append_event(
@@ -5483,7 +5510,16 @@ mod tests {
         assert!(pending_folders_payload.is_object());
         assert!(pending_folders_payload.get("count").is_none());
         assert!(pending_folders_payload.get("folders").is_none());
-        assert!(pending_folders_payload["default"]["offeredBy"].is_object());
+        assert!(pending_folders_payload.get("default").is_none());
+        assert_eq!(
+            pending_folders_payload["incoming"]["offeredBy"]["PEER-A"]["name"].as_str(),
+            Some("PEER-A")
+        );
+        assert!(
+            pending_folders_payload["incoming"]["offeredBy"]["PEER-A"]["time"]
+                .as_u64()
+                .is_some()
+        );
 
         let _ = fs::remove_dir_all(root);
     }

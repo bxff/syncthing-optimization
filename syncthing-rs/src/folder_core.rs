@@ -1005,11 +1005,7 @@ impl folder {
         &mut self,
         subdirs: &[String],
     ) -> Result<usize, String> {
-        if subdirs.is_empty() {
-            self.forcedRescanPaths.clear();
-            return Ok(0);
-        }
-        let mut removed = 0_usize;
+        let mut removed_pending = 0_usize;
         let mut keep = BTreeSet::new();
         for pending in &self.forcedRescanPaths {
             let covered = subdirs.iter().any(|sub| {
@@ -1020,13 +1016,54 @@ impl folder {
                 }
             });
             if covered {
-                removed = removed.saturating_add(1);
+                removed_pending = removed_pending.saturating_add(1);
             } else {
                 keep.insert(pending.clone());
             }
         }
         self.forcedRescanPaths = keep;
-        Ok(removed)
+
+        let mut db = self
+            .db
+            .write()
+            .map_err(|_| "db lock poisoned".to_string())?;
+        let mut sequence = db
+            .get_device_sequence(&self.config.id, LOCAL_DEVICE_ID)
+            .map_err(|e| format!("scan phase2 sequence lookup: {e}"))?
+            .saturating_add(1);
+
+        let locals = load_scoped_local_files(&db, &self.config.id, subdirs)?;
+        let mut updates = Vec::new();
+        for mut local in locals {
+            if !path_in_scopes(&local.path, subdirs) {
+                continue;
+            }
+            let mut changed = false;
+            if local.local_flags & db::FLAG_LOCAL_MUST_RESCAN != 0 {
+                local.local_flags &= !db::FLAG_LOCAL_MUST_RESCAN;
+                changed = true;
+            }
+
+            if should_skip_scan_path(&local.path) && !local.deleted && !local.ignored {
+                // Internal/temporary files are tracked as ignored, not deleted.
+                local.ignored = true;
+                local.block_hashes.clear();
+                changed = true;
+            }
+
+            if changed {
+                local.sequence = sequence;
+                sequence = sequence.saturating_add(1);
+                updates.push(local);
+            }
+        }
+        let updates_len = updates.len();
+        if updates_len > 0 {
+            db.update(&self.config.id, LOCAL_DEVICE_ID, updates)
+                .map_err(|e| format!("scan phase2 update: {e}"))?;
+        }
+
+        Ok(removed_pending.saturating_add(updates_len))
     }
 
     fn scan_filesystem_deterministic(
@@ -1386,6 +1423,33 @@ fn path_in_scopes(path: &str, subdirs: &[String]) -> bool {
     })
 }
 
+fn load_scoped_local_files(
+    db: &db::WalFreeDb,
+    folder_id: &str,
+    subdirs: &[String],
+) -> Result<Vec<db::FileInfo>, String> {
+    if subdirs.is_empty() {
+        return db.all_local_files_ordered(folder_id, LOCAL_DEVICE_ID);
+    }
+
+    let mut items = Vec::new();
+    let mut seen = BTreeSet::new();
+    for sub in subdirs {
+        let prefix = sub.trim_matches('/');
+        if prefix.is_empty() {
+            return db.all_local_files_ordered(folder_id, LOCAL_DEVICE_ID);
+        }
+        let matches = db.all_local_files_with_prefix(folder_id, LOCAL_DEVICE_ID, prefix)?;
+        for item in matches {
+            if seen.insert(item.path.clone()) {
+                items.push(item);
+            }
+        }
+    }
+    items.sort_by(|a, b| compare_path_order(&a.path, &b.path));
+    Ok(items)
+}
+
 fn should_skip_scan_path(path: &str) -> bool {
     path.starts_with(".stfolder/")
         || path == ".stfolder"
@@ -1410,9 +1474,10 @@ fn process_scanned_file(
     stats: &mut ScanExecutionStats,
 ) -> Result<(), String> {
     let relative_path = relative_path.trim_matches('/').to_string();
-    if relative_path.is_empty() || should_skip_scan_path(&relative_path) {
+    if relative_path.is_empty() {
         return Ok(());
     }
+    let skip_path = should_skip_scan_path(&relative_path);
 
     while let Some(existing) = current_local.clone() {
         if !path_in_scopes(&existing.path, scoped_subdirs) {
@@ -1431,6 +1496,36 @@ fn process_scanned_file(
         }
     }
 
+    if skip_path {
+        if let Some(existing) = current_local.clone() {
+            if existing.path == relative_path {
+                let mut tracked = existing;
+                let mut changed = false;
+                if tracked.local_flags & db::FLAG_LOCAL_MUST_RESCAN != 0 {
+                    tracked.local_flags &= !db::FLAG_LOCAL_MUST_RESCAN;
+                    changed = true;
+                }
+                if tracked.deleted {
+                    tracked.deleted = false;
+                    changed = true;
+                }
+                if !tracked.ignored {
+                    tracked.ignored = true;
+                    tracked.block_hashes.clear();
+                    changed = true;
+                }
+                if changed {
+                    tracked.sequence = *next_sequence;
+                    *next_sequence = next_sequence.saturating_add(1);
+                    updates.push(tracked);
+                    stats.files_updated = stats.files_updated.saturating_add(1);
+                }
+                *current_local = cursor.next(db, folder_id, LOCAL_DEVICE_ID)?;
+            }
+        }
+        return Ok(());
+    }
+
     let abs = root.join(&relative_path);
     let metadata =
         fs::symlink_metadata(&abs).map_err(|e| format!("stat {}: {e}", abs.display()))?;
@@ -1447,6 +1542,7 @@ fn process_scanned_file(
         if existing.path == relative_path
             && !existing.deleted
             && !existing.ignored
+            && existing.local_flags & db::FLAG_LOCAL_MUST_RESCAN == 0
             && existing.file_type == db::FileInfoType::File
             && existing.modified_ns == modified_ns
             && existing.size == size
@@ -2965,6 +3061,84 @@ mod tests {
             .expect("lookup")
             .expect("file record");
         assert!(!fi.deleted);
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(db_root);
+    }
+
+    #[test]
+    fn forced_rescan_reindexes_unchanged_file_and_clears_rescan_flag() {
+        let root = temp_root("forced-rescan-unchanged");
+        fs::write(root.join("a.txt"), b"same").expect("write a");
+
+        let db_root = temp_root("forced-rescan-unchanged-db");
+        let db = Arc::new(RwLock::new(
+            db::WalFreeDb::open_runtime(&db_root, 50).expect("open runtime db"),
+        ));
+        let mut f = newFolder(scan_cfg(&root), db.clone());
+        f.Scan(&[]).expect("initial scan");
+
+        let before = db
+            .read()
+            .expect("db lock")
+            .get_device_file("default", "local", "a.txt")
+            .expect("lookup before")
+            .expect("before file");
+
+        f.ScheduleForceRescan(&[String::from("a.txt")]);
+        f.handleForcedRescans().expect("forced rescan");
+
+        let after = db
+            .read()
+            .expect("db lock")
+            .get_device_file("default", "local", "a.txt")
+            .expect("lookup after")
+            .expect("after file");
+
+        assert!(
+            after.sequence > before.sequence,
+            "forced rescan should refresh sequence even when mtime/size is unchanged"
+        );
+        assert_eq!(
+            after.local_flags & db::FLAG_LOCAL_MUST_RESCAN,
+            0,
+            "forced rescan marker must be cleared after scan"
+        );
+        assert!(!after.deleted);
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(db_root);
+    }
+
+    #[test]
+    fn scan_marks_skipped_internal_temp_files_as_ignored_not_deleted() {
+        let root = temp_root("scan-skip-temp-file");
+        let temp_path = ".syncthing.cache.tmp";
+        fs::write(root.join(temp_path), b"x").expect("write temp");
+
+        let db_root = temp_root("scan-skip-temp-file-db");
+        let db = Arc::new(RwLock::new(
+            db::WalFreeDb::open_runtime(&db_root, 50).expect("open runtime db"),
+        ));
+        db.write()
+            .expect("db lock")
+            .update("default", "local", vec![file(temp_path, 1, &["h0"])])
+            .expect("seed temp file");
+
+        let mut f = newFolder(scan_cfg(&root), db.clone());
+        f.Scan(&[]).expect("scan");
+
+        let tracked = db
+            .read()
+            .expect("db lock")
+            .get_device_file("default", "local", temp_path)
+            .expect("lookup")
+            .expect("tracked temp file");
+        assert!(
+            tracked.ignored,
+            "internal temp files should be ignored instead of treated as deletes"
+        );
+        assert!(!tracked.deleted);
 
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(db_root);

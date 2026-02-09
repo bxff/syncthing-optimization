@@ -1,9 +1,12 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -120,6 +123,116 @@ func TestExtractOpencodeText(t *testing.T) {
 	if got != "NO_FINDINGS" {
 		t.Fatalf("extractOpencodeText=%q", got)
 	}
+}
+
+func TestNormalizeArtifactMode(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{in: "", want: "jsonl"},
+		{in: "jsonl", want: "jsonl"},
+		{in: "bundle", want: "jsonl"},
+		{in: "files", want: "files"},
+		{in: "per-item", want: "files"},
+		{in: "none", want: "none"},
+		{in: "OFF", want: "none"},
+		{in: "unknown", want: ""},
+	}
+	for _, tt := range tests {
+		if got := normalizeArtifactMode(tt.in); got != tt.want {
+			t.Fatalf("normalizeArtifactMode(%q)=%q want=%q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestCollectLocalFindingsDetectsMissingSnippetsAndPlaceholders(t *testing.T) {
+	item := reviewPlanItem{
+		ID:         "feat-1",
+		Tier:       "T1",
+		Symbol:     "GoSymbol",
+		Source:     "lib/model/folder.go",
+		RustSymbol: "rust_symbol",
+		RustPath:   "syncthing-rs/src/folder_core.rs",
+	}
+	rustSnippet := "" +
+		"   40 | pub fn apply() {\n" +
+		"   41 |     // TODO: finish this behavior\n" +
+		"   42 |     todo!(\"later\");\n" +
+		"   43 | }\n"
+
+	findings := collectLocalFindings(item, "", rustSnippet, errors.New("go not found"), nil)
+	if len(findings) < 2 {
+		t.Fatalf("expected at least 2 findings, got %d", len(findings))
+	}
+	titles := make([]string, 0, len(findings))
+	for _, finding := range findings {
+		titles = append(titles, finding.Title)
+	}
+	joined := strings.Join(titles, " | ")
+	if !strings.Contains(joined, "Go symbol snippet missing") {
+		t.Fatalf("missing Go snippet finding in %q", joined)
+	}
+	if !strings.Contains(joined, "todo! placeholder in Rust logic") {
+		t.Fatalf("missing Rust placeholder finding in %q", joined)
+	}
+}
+
+func TestPersistArtifactJSONLWritesSingleFile(t *testing.T) {
+	dir := t.TempDir()
+	promptPath := filepath.Join(dir, "prompt.jsonl")
+	rawPath := filepath.Join(dir, "raw.jsonl")
+	if err := initializeArtifactJSONL(promptPath); err != nil {
+		t.Fatalf("initialize prompt jsonl: %v", err)
+	}
+	if err := initializeArtifactJSONL(rawPath); err != nil {
+		t.Fatalf("initialize raw jsonl: %v", err)
+	}
+
+	cfg := runConfig{
+		ArtifactMode:     "jsonl",
+		PromptJSONLPath:  promptPath,
+		RawJSONLPath:     rawPath,
+		MaxArtifactBytes: 16,
+		artifactMu:       &sync.Mutex{},
+	}
+	item := reviewPlanItem{
+		ID:         "feat-1",
+		Tier:       "T1",
+		Kind:       "method",
+		Symbol:     "model.Apply",
+		RustSymbol: "apply",
+	}
+	if err := persistArtifact(cfg, item, "prompt", "", strings.Repeat("x", 64)); err != nil {
+		t.Fatalf("persist prompt artifact: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(mustReadFile(t, promptPath))), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 jsonl record, got %d", len(lines))
+	}
+	var record artifactRecord
+	if err := json.Unmarshal([]byte(lines[0]), &record); err != nil {
+		t.Fatalf("unmarshal jsonl record: %v", err)
+	}
+	if record.Artifact != "prompt" {
+		t.Fatalf("unexpected artifact kind: %s", record.Artifact)
+	}
+	if record.ID != item.ID {
+		t.Fatalf("unexpected artifact id: %s", record.ID)
+	}
+	if !record.Truncated {
+		t.Fatalf("expected truncated artifact content")
+	}
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	bs, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file %s: %v", path, err)
+	}
+	return bs
 }
 
 func TestWriteReviewRollupsPartialRunPreservesUntouchedFiles(t *testing.T) {

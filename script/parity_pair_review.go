@@ -35,14 +35,20 @@ const (
 	defaultReportPath       = "parity/diff-reports/function-pair-discrepancy-report.json"
 	defaultRawDir           = "parity/diff-reports/function-pair-raw"
 	defaultPromptDir        = "parity/diff-reports/function-pair-prompts"
+	defaultRawJSONLPath     = "parity/diff-reports/function-pair-raw.jsonl"
+	defaultPromptJSONLPath  = "parity/diff-reports/function-pair-prompts.jsonl"
 	defaultCachePath        = "parity/diff-reports/function-pair-cache.json"
 	defaultRollupDir        = "parity/diff-reports/function-pair-rollups"
 	defaultModel            = "google/antigravity-claude-opus-4-6-thinking"
 )
 
 var (
-	logicNamePattern     = regexp.MustCompile(`(?i)(scan|index|update|need|global|local|override|revert|pull|conflict|sync|status|state|sequence|recover|durab|manifest|compact|browse|completion|pending|connect|request|response|serve|cluster|folder|device)`)
-	criticalLogicPattern = regexp.MustCompile(`(?i)(scan|index|update|need|revert|override|completion|browse|pending|availability|global|local|sequence|manifest|compact|recover|durab|version|config)`)
+	logicNamePattern            = regexp.MustCompile(`(?i)(scan|index|update|need|global|local|override|revert|pull|conflict|sync|status|state|sequence|recover|durab|manifest|compact|browse|completion|pending|connect|request|response|serve|cluster|folder|device)`)
+	criticalLogicPattern        = regexp.MustCompile(`(?i)(scan|index|update|need|revert|override|completion|browse|pending|availability|global|local|sequence|manifest|compact|recover|durab|version|config)`)
+	panicPlaceholderPattern     = regexp.MustCompile(`(?i)\bpanic!\s*\(\s*"(todo|not implemented|unimplemented|placeholder)`)
+	todoFixmePattern            = regexp.MustCompile(`(?i)\b(TODO|FIXME)\b`)
+	syntheticPlaceholderPattern = regexp.MustCompile(`(?i)\b(synthetic|placeholder|stub)\b`)
+	numberedSnippetPattern      = regexp.MustCompile(`^\s*(\d+)\s+\|\s?(.*)$`)
 )
 
 type parityMapping struct {
@@ -155,6 +161,9 @@ type runConfig struct {
 	ReportPath        string
 	RawDir            string
 	PromptDir         string
+	RawJSONLPath      string
+	PromptJSONLPath   string
+	ArtifactMode      string
 	WriteRaw          bool
 	WritePrompts      bool
 	MaxArtifactBytes  int
@@ -173,7 +182,9 @@ type runConfig struct {
 	Limit             int
 	Offset            int
 	DryRun            bool
+	SkipAgentOnLocal  bool
 	cache             *reviewCacheStore
+	artifactMu        *sync.Mutex
 }
 
 type reviewCacheFile struct {
@@ -194,6 +205,19 @@ type reviewCacheEntry struct {
 type reviewCacheStore struct {
 	mu    sync.RWMutex
 	items map[string]reviewCacheEntry
+}
+
+type artifactRecord struct {
+	SchemaVersion int    `json:"schema_version"`
+	GeneratedAt   string `json:"generated_at"`
+	Kind          string `json:"kind"`
+	ID            string `json:"id"`
+	Tier          string `json:"tier"`
+	Symbol        string `json:"symbol"`
+	RustSymbol    string `json:"rust_symbol"`
+	Artifact      string `json:"artifact"`
+	Content       string `json:"content"`
+	Truncated     bool   `json:"truncated"`
 }
 
 func newReviewCacheStore() *reviewCacheStore {
@@ -318,6 +342,9 @@ func cmdRun(args []string) {
 	fs.StringVar(&cfg.ReportPath, "out", defaultReportPath, "output discrepancy report path")
 	fs.StringVar(&cfg.RawDir, "raw-dir", defaultRawDir, "directory for raw agent responses")
 	fs.StringVar(&cfg.PromptDir, "prompt-dir", defaultPromptDir, "directory for prompt artifacts")
+	fs.StringVar(&cfg.RawJSONLPath, "raw-jsonl", defaultRawJSONLPath, "jsonl file for raw agent responses when --artifact-mode=jsonl")
+	fs.StringVar(&cfg.PromptJSONLPath, "prompt-jsonl", defaultPromptJSONLPath, "jsonl file for prompt artifacts when --artifact-mode=jsonl")
+	fs.StringVar(&cfg.ArtifactMode, "artifact-mode", "jsonl", "artifact persistence mode when write flags are enabled: jsonl|files|none")
 	fs.BoolVar(&cfg.WriteRaw, "write-raw", false, "persist per-item raw agent output artifacts")
 	fs.BoolVar(&cfg.WritePrompts, "write-prompts", false, "persist per-item prompt artifacts")
 	fs.IntVar(&cfg.MaxArtifactBytes, "max-artifact-bytes", 8*1024, "max bytes to persist per artifact (0 = unlimited)")
@@ -336,6 +363,7 @@ func cmdRun(args []string) {
 	fs.IntVar(&cfg.Limit, "limit", 0, "maximum items to review (0 = all)")
 	fs.IntVar(&cfg.Offset, "offset", 0, "skip first N filtered items")
 	fs.BoolVar(&cfg.DryRun, "dry-run", false, "skip opencode calls; only emit prompts and report skeleton")
+	fs.BoolVar(&cfg.SkipAgentOnLocal, "skip-agent-on-local-findings", true, "skip opencode call when local placeholder/findings are already detected")
 	if err := fs.Parse(args); err != nil {
 		fatalf("parse flags: %v", err)
 	}
@@ -358,6 +386,16 @@ func cmdRun(args []string) {
 	if cfg.RollupMaxFindings <= 0 {
 		cfg.RollupMaxFindings = 12
 	}
+	rawArtifactMode := cfg.ArtifactMode
+	cfg.ArtifactMode = normalizeArtifactMode(cfg.ArtifactMode)
+	if cfg.ArtifactMode == "" {
+		fatalf("invalid --artifact-mode %q (expected jsonl|files|none)", strings.TrimSpace(rawArtifactMode))
+	}
+	cfg.artifactMu = &sync.Mutex{}
+	if cfg.ArtifactMode == "none" {
+		cfg.WriteRaw = false
+		cfg.WritePrompts = false
+	}
 
 	plan := reviewPlan{}
 	if err := readJSON(cfg.PlanPath, &plan); err != nil {
@@ -378,13 +416,27 @@ func cmdRun(args []string) {
 	}
 
 	if cfg.WriteRaw {
-		if err := os.MkdirAll(cfg.RawDir, 0o755); err != nil {
-			fatalf("create raw dir: %v", err)
+		switch cfg.ArtifactMode {
+		case "files":
+			if err := os.MkdirAll(cfg.RawDir, 0o755); err != nil {
+				fatalf("create raw dir: %v", err)
+			}
+		case "jsonl":
+			if err := initializeArtifactJSONL(cfg.RawJSONLPath); err != nil {
+				fatalf("initialize raw jsonl: %v", err)
+			}
 		}
 	}
 	if cfg.WritePrompts {
-		if err := os.MkdirAll(cfg.PromptDir, 0o755); err != nil {
-			fatalf("create prompt dir: %v", err)
+		switch cfg.ArtifactMode {
+		case "files":
+			if err := os.MkdirAll(cfg.PromptDir, 0o755); err != nil {
+				fatalf("create prompt dir: %v", err)
+			}
+		case "jsonl":
+			if err := initializeArtifactJSONL(cfg.PromptJSONLPath); err != nil {
+				fatalf("initialize prompt jsonl: %v", err)
+			}
 		}
 	}
 	if cfg.WriteRollups {
@@ -536,6 +588,8 @@ func runReview(plan reviewPlan, items []reviewPlanItem, cfg runConfig) reviewRep
 			report.WithFindings++
 		case "no-findings", "dry-run", "cached-no-findings":
 			report.NoFindings++
+		case "local-findings":
+			report.WithFindings++
 		default:
 			report.Errors++
 		}
@@ -571,21 +625,23 @@ func executeReviewTask(item reviewPlanItem, cfg runConfig) reviewOutcome {
 		RustSymbol: item.RustSymbol,
 	}
 
-	promptPath := filepath.Join(cfg.PromptDir, safeID(item.ID)+".txt")
-	rawPath := filepath.Join(cfg.RawDir, safeID(item.ID)+".txt")
+	safeItemID := safeID(item.ID)
+	promptPath := filepath.Join(cfg.PromptDir, safeItemID+".txt")
+	rawPath := filepath.Join(cfg.RawDir, safeItemID+".txt")
 	if cfg.WritePrompts {
-		result.PromptPath = filepath.ToSlash(promptPath)
+		result.PromptPath = artifactReferencePath(cfg, "prompt", promptPath, safeItemID)
 	}
 	if cfg.WriteRaw {
-		result.RawPath = filepath.ToSlash(rawPath)
+		result.RawPath = artifactReferencePath(cfg, "raw", rawPath, safeItemID)
 	}
 
 	goSnippet, goRange, goErr := extractSymbolSnippet(item.Source, item.Kind, item.Symbol, false, cfg.MaxSnippetLines, cfg.MaxSnippetBytes)
 	rustSnippet, rustRange, rustErr := extractSymbolSnippet(item.RustPath, item.Kind, item.RustSymbol, true, cfg.MaxSnippetLines, cfg.MaxSnippetBytes)
+	localFindings := collectLocalFindings(item, goSnippet, rustSnippet, goErr, rustErr)
 	goHash := hashSnippet(goSnippet, goErr)
 	rustHash := hashSnippet(rustSnippet, rustErr)
 
-	if cfg.UseCache && !cfg.DryRun {
+	if cfg.UseCache && !cfg.DryRun && len(localFindings) == 0 {
 		if cached, ok := cfg.cache.Get(item.ID); ok &&
 			cached.Model == cfg.Model &&
 			cached.GoHash == goHash &&
@@ -603,7 +659,7 @@ func executeReviewTask(item reviewPlanItem, cfg runConfig) reviewOutcome {
 
 	prompt := buildReviewPrompt(item, goSnippet, rustSnippet, goRange, rustRange, goErr, rustErr)
 	if cfg.WritePrompts {
-		if err := writeArtifact(promptPath, prompt, cfg.MaxArtifactBytes); err != nil {
+		if err := persistArtifact(cfg, item, "prompt", promptPath, prompt); err != nil {
 			result.Status = "error"
 			result.Error = fmt.Sprintf("write prompt: %v", err)
 			result.DurationMS = time.Since(start).Milliseconds()
@@ -612,9 +668,31 @@ func executeReviewTask(item reviewPlanItem, cfg runConfig) reviewOutcome {
 	}
 
 	if cfg.DryRun {
-		result.Status = "dry-run"
+		if len(localFindings) > 0 {
+			result.Status = "local-findings"
+		} else {
+			result.Status = "dry-run"
+		}
+		result.FindingCount = len(localFindings)
 		result.DurationMS = time.Since(start).Milliseconds()
-		return reviewOutcome{Result: result}
+		return reviewOutcome{Result: result, Findings: cloneFindings(localFindings)}
+	}
+
+	if cfg.SkipAgentOnLocal && len(localFindings) > 0 {
+		result.Status = "local-findings"
+		result.FindingCount = len(localFindings)
+		if cfg.UseCache {
+			cfg.cache.Set(reviewCacheEntry{
+				ID:         item.ID,
+				Model:      cfg.Model,
+				GoHash:     goHash,
+				RustHash:   rustHash,
+				ReviewedAt: time.Now().UTC().Format(time.RFC3339),
+				Findings:   cloneFindings(localFindings),
+			})
+		}
+		result.DurationMS = time.Since(start).Milliseconds()
+		return reviewOutcome{Result: result, Findings: cloneFindings(localFindings)}
 	}
 
 	rawText, err := runOpencode(cfg.OpencodeBin, cfg.Model, cfg.Timeout, prompt)
@@ -623,23 +701,25 @@ func executeReviewTask(item reviewPlanItem, cfg runConfig) reviewOutcome {
 		result.Error = err.Error()
 		result.DurationMS = time.Since(start).Milliseconds()
 		if cfg.WriteRaw {
-			_ = writeArtifact(rawPath, rawText, cfg.MaxArtifactBytes)
+			_ = persistArtifact(cfg, item, "raw", rawPath, rawText)
 		}
-		return reviewOutcome{Result: result}
+		return reviewOutcome{Result: result, Findings: cloneFindings(localFindings)}
 	}
 	if cfg.WriteRaw {
-		_ = writeArtifact(rawPath, rawText, cfg.MaxArtifactBytes)
+		_ = persistArtifact(cfg, item, "raw", rawPath, rawText)
 	}
 
 	findings, parseErr := parseReviewFindings(rawText, item)
 	if parseErr != nil {
 		result.Status = "error"
 		result.Error = parseErr.Error()
+		result.FindingCount = len(localFindings)
 		result.DurationMS = time.Since(start).Milliseconds()
-		return reviewOutcome{Result: result}
+		return reviewOutcome{Result: result, Findings: cloneFindings(localFindings)}
 	}
-	result.FindingCount = len(findings)
-	if len(findings) == 0 {
+	mergedFindings := mergeFindings(localFindings, findings)
+	result.FindingCount = len(mergedFindings)
+	if len(mergedFindings) == 0 {
 		result.Status = "no-findings"
 	} else {
 		result.Status = "findings"
@@ -651,24 +731,264 @@ func executeReviewTask(item reviewPlanItem, cfg runConfig) reviewOutcome {
 			GoHash:     goHash,
 			RustHash:   rustHash,
 			ReviewedAt: time.Now().UTC().Format(time.RFC3339),
-			Findings:   cloneFindings(findings),
+			Findings:   cloneFindings(mergedFindings),
 		})
 	}
 	result.DurationMS = time.Since(start).Milliseconds()
-	return reviewOutcome{Result: result, Findings: findings}
+	return reviewOutcome{Result: result, Findings: mergedFindings}
 }
 
 func writeArtifact(path, text string, maxBytes int) error {
-	content := []byte(text)
-	if maxBytes > 0 && len(content) > maxBytes {
-		suffix := []byte("\n...[truncated]\n")
-		trimTo := maxBytes
-		if trimTo > len(content) {
-			trimTo = len(content)
-		}
-		content = append(content[:trimTo], suffix...)
+	content, _ := trimArtifactContent(text, maxBytes)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
 	}
-	return os.WriteFile(path, content, 0o644)
+	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+func persistArtifact(cfg runConfig, item reviewPlanItem, artifact, filePath, text string) error {
+	switch cfg.ArtifactMode {
+	case "none":
+		return nil
+	case "files":
+		return writeArtifact(filePath, text, cfg.MaxArtifactBytes)
+	case "jsonl":
+		var jsonlPath string
+		switch artifact {
+		case "prompt":
+			jsonlPath = strings.TrimSpace(cfg.PromptJSONLPath)
+		case "raw":
+			jsonlPath = strings.TrimSpace(cfg.RawJSONLPath)
+		default:
+			return fmt.Errorf("unknown artifact kind %q", artifact)
+		}
+		if jsonlPath == "" {
+			return fmt.Errorf("empty jsonl path for %s artifacts", artifact)
+		}
+		content, truncated := trimArtifactContent(text, cfg.MaxArtifactBytes)
+		record := artifactRecord{
+			SchemaVersion: pairReviewSchemaVersion,
+			GeneratedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+			Kind:          item.Kind,
+			ID:            item.ID,
+			Tier:          item.Tier,
+			Symbol:        item.Symbol,
+			RustSymbol:    item.RustSymbol,
+			Artifact:      artifact,
+			Content:       content,
+			Truncated:     truncated,
+		}
+		return appendArtifactJSONL(jsonlPath, record, cfg.artifactMu)
+	default:
+		return fmt.Errorf("unsupported artifact mode %q", cfg.ArtifactMode)
+	}
+}
+
+func artifactReferencePath(cfg runConfig, artifact, filePath, safeItemID string) string {
+	switch cfg.ArtifactMode {
+	case "none":
+		return ""
+	case "files":
+		return filepath.ToSlash(filePath)
+	case "jsonl":
+		switch artifact {
+		case "prompt":
+			return filepath.ToSlash(strings.TrimSpace(cfg.PromptJSONLPath)) + "#" + safeItemID
+		case "raw":
+			return filepath.ToSlash(strings.TrimSpace(cfg.RawJSONLPath)) + "#" + safeItemID
+		default:
+			return ""
+		}
+	default:
+		return ""
+	}
+}
+
+func trimArtifactContent(text string, maxBytes int) (string, bool) {
+	content := []byte(text)
+	if maxBytes <= 0 || len(content) <= maxBytes {
+		return text, false
+	}
+	trimTo := maxBytes
+	if trimTo > len(content) {
+		trimTo = len(content)
+	}
+	trimmed := append([]byte{}, content[:trimTo]...)
+	if len(trimmed) == 0 || trimmed[len(trimmed)-1] != '\n' {
+		trimmed = append(trimmed, '\n')
+	}
+	trimmed = append(trimmed, []byte("...[truncated]\n")...)
+	return string(trimmed), true
+}
+
+func initializeArtifactJSONL(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return errors.New("jsonl path is empty")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte{}, 0o644)
+}
+
+func appendArtifactJSONL(path string, record artifactRecord, mu *sync.Mutex) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return errors.New("jsonl path is empty")
+	}
+	bs, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	if mu != nil {
+		mu.Lock()
+		defer mu.Unlock()
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.Write(append(bs, '\n')); err != nil {
+		return err
+	}
+	return nil
+}
+
+func normalizeArtifactMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "jsonl", "bundle":
+		return "jsonl"
+	case "files", "file", "per-item":
+		return "files"
+	case "none", "off", "disabled":
+		return "none"
+	default:
+		return ""
+	}
+}
+
+func collectLocalFindings(item reviewPlanItem, goSnippet, rustSnippet string, goErr, rustErr error) []pairFinding {
+	out := make([]pairFinding, 0, 4)
+	seen := map[string]struct{}{}
+	appendFinding := func(priority, title, location, message string) {
+		priority = strings.ToUpper(strings.TrimSpace(priority))
+		if priority == "" {
+			priority = "P2"
+		}
+		location = strings.TrimSpace(location)
+		if location == "" {
+			location = fmt.Sprintf("%s:%d", item.RustPath, 1)
+		}
+		message = strings.TrimSpace(message)
+		if message == "" {
+			return
+		}
+		key := strings.Join([]string{priority, title, location, message}, "|")
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, pairFinding{
+			ID:       item.ID,
+			Tier:     item.Tier,
+			Priority: priority,
+			Title:    strings.TrimSpace(title),
+			Location: location,
+			Message:  message,
+		})
+	}
+
+	if goErr != nil {
+		appendFinding(
+			"P0",
+			"Go symbol snippet missing",
+			fmt.Sprintf("%s:%d", item.Source, 1),
+			fmt.Sprintf("Failed to extract Go symbol %q from %s: %v", item.Symbol, item.Source, goErr),
+		)
+	}
+	if rustErr != nil {
+		appendFinding(
+			"P0",
+			"Rust symbol snippet missing",
+			fmt.Sprintf("%s:%d", item.RustPath, 1),
+			fmt.Sprintf("Failed to extract Rust symbol %q from %s: %v", item.RustSymbol, item.RustPath, rustErr),
+		)
+	}
+
+	lines := parseNumberedSnippetLines(rustSnippet)
+	for _, line := range lines {
+		text := strings.TrimSpace(line.Text)
+		location := fmt.Sprintf("%s:%d", item.RustPath, max(line.Number, 1))
+		switch {
+		case strings.Contains(text, "todo!("):
+			appendFinding("P0", "todo! placeholder in Rust logic", location, "Rust implementation contains `todo!`, which means the behavior is not fully implemented.")
+		case strings.Contains(text, "unimplemented!("):
+			appendFinding("P0", "unimplemented! placeholder in Rust logic", location, "Rust implementation contains `unimplemented!`, so parity for this path cannot be verified.")
+		case panicPlaceholderPattern.MatchString(text):
+			appendFinding("P0", "panic placeholder in Rust logic", location, "Rust implementation panics with a placeholder/not-implemented message in a mapped parity path.")
+		case todoFixmePattern.MatchString(text):
+			appendFinding("P1", "TODO/FIXME marker in parity path", location, "Rust parity path still contains TODO/FIXME markers; this often indicates incomplete or deferred behavior.")
+		case syntheticPlaceholderPattern.MatchString(text):
+			appendFinding("P1", "Synthetic/placeholder marker in parity path", location, "Rust parity path uses synthetic/placeholder/stub language, which may indicate non-production behavior.")
+		}
+	}
+
+	return out
+}
+
+func parseNumberedSnippetLines(snippet string) []snippetLine {
+	if strings.TrimSpace(snippet) == "" {
+		return nil
+	}
+	lines := strings.Split(snippet, "\n")
+	out := make([]snippetLine, 0, len(lines))
+	for _, raw := range lines {
+		matches := numberedSnippetPattern.FindStringSubmatch(raw)
+		if len(matches) != 3 {
+			continue
+		}
+		number, err := strconv.Atoi(matches[1])
+		if err != nil {
+			continue
+		}
+		out = append(out, snippetLine{
+			Number: number,
+			Text:   matches[2],
+		})
+	}
+	return out
+}
+
+func mergeFindings(groups ...[]pairFinding) []pairFinding {
+	if len(groups) == 0 {
+		return nil
+	}
+	merged := make([]pairFinding, 0, 8)
+	seen := map[string]struct{}{}
+	for _, findings := range groups {
+		for _, finding := range findings {
+			key := strings.Join([]string{
+				finding.ID,
+				strings.ToUpper(strings.TrimSpace(finding.Priority)),
+				strings.TrimSpace(finding.Title),
+				strings.TrimSpace(finding.Location),
+				strings.TrimSpace(finding.Message),
+			}, "|")
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			merged = append(merged, finding)
+		}
+	}
+	return merged
+}
+
+type snippetLine struct {
+	Number int
+	Text   string
 }
 
 func hashSnippet(snippet string, err error) string {

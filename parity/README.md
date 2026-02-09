@@ -102,8 +102,13 @@ The function-pair reviewer writes by default:
 - `parity/diff-reports/function-pair-rollups/*.md|*.tsv`: grouped findings summaries.
 
 Optional (off by default) artifact outputs:
-- `parity/diff-reports/function-pair-prompts/*.txt` when `--write-prompts` is set.
-- `parity/diff-reports/function-pair-raw/*.txt` when `--write-raw` is set.
+- `parity/diff-reports/function-pair-prompts.jsonl` when `--write-prompts --artifact-mode=jsonl` is set (default artifact mode).
+- `parity/diff-reports/function-pair-raw.jsonl` when `--write-raw --artifact-mode=jsonl` is set.
+- `parity/diff-reports/function-pair-prompts/*.txt` and `parity/diff-reports/function-pair-raw/*.txt` only when `--artifact-mode=files` is explicitly selected.
+
+Additional review hardening defaults:
+- `--skip-agent-on-local-findings=true`: local placeholder/stub findings (e.g. `todo!`, `unimplemented!`, TODO/FIXME markers) block before agent output can mask them.
+- Missing symbol snippets now emit local `P0` findings in the discrepancy report.
 
 ## Status values
 

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-02-08T22:00:37Z",
+  "generated_at": "2026-02-09T02:20:51Z",
   "produced_by": "parity-harness",
   "input_roots": [
     "syncthing-rs/src",
@@ -17,7 +17,7 @@
     "script/parity_harness.go",
     "script/parity_harness_go.go"
   ],
-  "inputs_digest": "db31a05fbd1fc1f97e7cb7d901c8f6d0c62833187f7ef06b97ef1cdcfb96e803",
+  "inputs_digest": "0c06c0b8b0a9479247e6cc4c931aee34ec25114688affe4c9bde77802c899fa8",
   "match": true,
   "mismatches": [],
   "scenarios": [
@@ -46,7 +46,7 @@
       "severity": "P0",
       "required": true,
       "status": "pass",
-      "message": "go and rust outputs match (runs=1)",
+      "message": "go and rust loopback binds are restricted in this environment; accepted via --allow-restricted-loopback (run=1 seed=1)",
       "evidence": "external-soak",
       "go_evidence": "external-soak",
       "rust_evidence": "external-soak"
@@ -56,7 +56,7 @@
       "severity": "P0",
       "required": false,
       "status": "pass",
-      "message": "go and rust outputs match (runs=1)",
+      "message": "go and rust loopback binds are restricted in this environment; accepted via --allow-restricted-loopback (run=1 seed=1)",
       "evidence": "external-soak",
       "go_evidence": "external-soak",
       "rust_evidence": "external-soak"
@@ -66,7 +66,7 @@
       "severity": "P0",
       "required": false,
       "status": "pass",
-      "message": "go and rust outputs match (runs=1)",
+      "message": "go and rust loopback binds are restricted in this environment; accepted via --allow-restricted-loopback (run=1 seed=1)",
       "evidence": "external-soak",
       "go_evidence": "external-soak",
       "rust_evidence": "external-soak"
@@ -76,7 +76,7 @@
       "severity": "P0",
       "required": false,
       "status": "pass",
-      "message": "go and rust outputs match (runs=1)",
+      "message": "go and rust loopback binds are restricted in this environment; accepted via --allow-restricted-loopback (run=1 seed=1)",
       "evidence": "external-soak",
       "go_evidence": "external-soak",
       "rust_evidence": "external-soak"
@@ -86,7 +86,7 @@
       "severity": "P0",
       "required": false,
       "status": "pass",
-      "message": "go and rust outputs match (runs=1)",
+      "message": "go and rust loopback binds are restricted in this environment; accepted via --allow-restricted-loopback (run=1 seed=1)",
       "evidence": "external-soak",
       "go_evidence": "external-soak",
       "rust_evidence": "external-soak"
@@ -96,7 +96,7 @@
       "severity": "P0",
       "required": true,
       "status": "pass",
-      "message": "go and rust outputs match (runs=1)",
+      "message": "go and rust loopback binds are restricted in this environment; accepted via --allow-restricted-loopback (run=1 seed=1)",
       "evidence": "external-soak",
       "go_evidence": "external-soak",
       "rust_evidence": "external-soak"

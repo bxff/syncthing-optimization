@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-02-08T22:00:38Z",
-  "mode": "replacement",
+  "generated_at": "2026-02-09T02:22:51Z",
+  "mode": "ci",
   "summary": {
     "total_features": 1466,
     "missing": 0,

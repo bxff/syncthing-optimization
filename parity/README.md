@@ -33,6 +33,12 @@ GOCACHE=/tmp/go-cache go run ./script/parity_harness.go run \
   --profile-mb 50
 ```
 
+If loopback socket bind is restricted in your environment, add:
+
+```bash
+  --allow-restricted-loopback
+```
+
 Run guardrails in CI mode:
 
 ```bash
@@ -109,6 +115,7 @@ Optional (off by default) artifact outputs:
 Additional review hardening defaults:
 - `--skip-agent-on-local-findings=true`: local placeholder/stub findings (e.g. `todo!`, `unimplemented!`, TODO/FIXME markers) block before agent output can mask them.
 - Missing symbol snippets now emit local `P0` findings in the discrepancy report.
+- `parity_harness.go run` now defaults `--required-evidence-min=synthetic`; replacement evidence minimums are enforced by `parity/replacement-gates.json`.
 
 ## Status values
 

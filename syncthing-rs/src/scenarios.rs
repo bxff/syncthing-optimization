@@ -289,7 +289,7 @@ fn scenario_protocol_state_transition() -> Result<Value, String> {
     let device_downloads = model.DownloadProgress("peer-a");
     let remote_sequence = model
         .RemoteSequences("default")
-        .get("remote")
+        .get("peer-a")
         .copied()
         .unwrap_or_default();
     cleanup(req_root);

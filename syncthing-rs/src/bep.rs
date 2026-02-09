@@ -172,9 +172,27 @@ pub(crate) fn decode_frame(frame: &[u8]) -> Result<BepMessage, String> {
 
     let payload = &frame[message_start..];
     let decoded_payload = match header.Compression {
-        MessageCompression_MESSAGE_COMPRESSION_NONE => payload.to_vec(),
-        MessageCompression_MESSAGE_COMPRESSION_LZ4 => decompress_size_prepended(payload)
-            .map_err(|err| format!("lz4 decompress payload: {err}"))?,
+        MessageCompression_MESSAGE_COMPRESSION_NONE => {
+            if payload.len() > MAX_DECODED_PAYLOAD_BYTES {
+                return Err(format!(
+                    "payload too large: {} > {}",
+                    payload.len(),
+                    MAX_DECODED_PAYLOAD_BYTES
+                ));
+            }
+            payload.to_vec()
+        }
+        MessageCompression_MESSAGE_COMPRESSION_LZ4 => {
+            let declared = lz4_declared_size(payload)?;
+            if declared > MAX_DECODED_PAYLOAD_BYTES {
+                return Err(format!(
+                    "declared decompressed payload too large: {} > {}",
+                    declared, MAX_DECODED_PAYLOAD_BYTES
+                ));
+            }
+            decompress_size_prepended(payload)
+                .map_err(|err| format!("lz4 decompress payload: {err}"))?
+        }
         other => return Err(format!("unknown message compression {other}")),
     };
     if decoded_payload.len() > MAX_DECODED_PAYLOAD_BYTES {
@@ -196,6 +214,13 @@ pub(crate) fn decode_frame(frame: &[u8]) -> Result<BepMessage, String> {
     }
 
     Ok(message)
+}
+
+fn lz4_declared_size(payload: &[u8]) -> Result<usize, String> {
+    if payload.len() < 4 {
+        return Err("lz4 payload too short for size prefix".to_string());
+    }
+    Ok(u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize)
 }
 
 pub(crate) fn default_exchange() -> Vec<BepMessage> {
@@ -371,7 +396,46 @@ mod tests {
         frame.extend_from_slice(&compressed);
 
         let err = decode_frame(&frame).expect_err("must reject oversized decompressed payload");
-        assert!(err.contains("decompressed payload too large"));
+        assert!(
+            err.contains("decompressed payload too large")
+                || err.contains("declared decompressed payload too large")
+        );
+    }
+
+    #[test]
+    fn rejects_lz4_payload_without_size_prefix() {
+        let header = Header {
+            Type: MessageType_MESSAGE_TYPE_PING,
+            Compression: MessageCompression_MESSAGE_COMPRESSION_LZ4,
+        };
+        let header_bytes = serde_json::to_vec(&header).expect("encode header");
+        let payload = vec![1_u8, 2_u8, 3_u8];
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&(header_bytes.len() as u16).to_be_bytes());
+        frame.extend_from_slice(&header_bytes);
+        frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&payload);
+
+        let err = decode_frame(&frame).expect_err("must reject missing lz4 size prefix");
+        assert!(err.contains("lz4 payload too short"));
+    }
+
+    #[test]
+    fn rejects_oversized_uncompressed_payload_before_decode() {
+        let header = Header {
+            Type: MessageType_MESSAGE_TYPE_PING,
+            Compression: MessageCompression_MESSAGE_COMPRESSION_NONE,
+        };
+        let header_bytes = serde_json::to_vec(&header).expect("encode header");
+        let payload = vec![0_u8; MAX_DECODED_PAYLOAD_BYTES + 1];
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&(header_bytes.len() as u16).to_be_bytes());
+        frame.extend_from_slice(&header_bytes);
+        frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&payload);
+
+        let err = decode_frame(&frame).expect_err("must reject oversized payload");
+        assert!(err.contains("payload too large"));
     }
 
     #[test]

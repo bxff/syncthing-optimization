@@ -521,8 +521,8 @@ impl folder {
             return;
         }
         self.scanScheduled = true;
-        self.scanDelayUntil = Instant::now()
-            .checked_add(Duration::from_secs(self.config.rescan_interval_s as u64));
+        self.scanDelayUntil =
+            Instant::now().checked_add(Duration::from_secs(self.config.rescan_interval_s as u64));
     }
 
     pub(crate) fn Scan(&mut self, subdirs: &[String]) -> Result<(), String> {
@@ -567,7 +567,9 @@ impl folder {
             }
         }
         if self.pullScheduled {
-            let _ = self.pull();
+            if let Err(err) = self.pull() {
+                self.newScanError(&self.config.path.clone(), &format!("pull: {err}"));
+            }
         }
     }
 
@@ -586,15 +588,8 @@ impl folder {
             && !self.scanScheduled
     }
 
-    pub(crate) fn emitDiskChangeEvents(
-        &self,
-        paths: &[String],
-        event_type: &str,
-    ) -> Vec<String> {
-        paths
-            .iter()
-            .map(|p| format!("{event_type}:{p}"))
-            .collect()
+    pub(crate) fn emitDiskChangeEvents(&self, paths: &[String], event_type: &str) -> Vec<String> {
+        paths.iter().map(|p| format!("{event_type}:{p}")).collect()
     }
 
     pub(crate) fn findRename(&self, old_name: &str, new_name: &str) -> Option<(String, String)> {
@@ -665,6 +660,9 @@ impl folder {
         }
 
         if let Some(err) = mark_err {
+            for path in drained {
+                self.forcedRescanPaths.insert(path);
+            }
             let scan_path = self.config.path.clone();
             self.newScanError(&scan_path, &err);
             return Err(err);
@@ -1218,7 +1216,10 @@ impl folder {
         Ok(())
     }
 
-    pub(crate) fn updateLocalsFromPulling(&mut self, pulled: &[db::FileInfo]) -> Result<(), String> {
+    pub(crate) fn updateLocalsFromPulling(
+        &mut self,
+        pulled: &[db::FileInfo],
+    ) -> Result<(), String> {
         self.updateLocals(pulled)?;
         let paths = pulled
             .iter()
@@ -1229,7 +1230,10 @@ impl folder {
         Ok(())
     }
 
-    pub(crate) fn updateLocalsFromScanning(&mut self, scanned: &[db::FileInfo]) -> Result<(), String> {
+    pub(crate) fn updateLocalsFromScanning(
+        &mut self,
+        scanned: &[db::FileInfo],
+    ) -> Result<(), String> {
         self.updateLocals(scanned)?;
         let paths = scanned
             .iter()
@@ -1385,7 +1389,7 @@ fn resolve_scan_scopes(root: &Path, subdirs: &[String]) -> Result<Vec<ScanScope>
 
     let mut scopes = Vec::new();
     for sub in subdirs {
-        let abs = root.join(sub);
+        let abs = safe_join_relative_path(root, sub)?;
         match fs::metadata(&abs) {
             Ok(meta) if meta.is_dir() => scopes.push(ScanScope {
                 prefix: sub.clone(),
@@ -1439,8 +1443,11 @@ fn load_scoped_local_files(
         if prefix.is_empty() {
             return db::collect_stream(db.all_local_files_ordered(folder_id, LOCAL_DEVICE_ID)?);
         }
-        let matches =
-            db::collect_stream(db.all_local_files_with_prefix(folder_id, LOCAL_DEVICE_ID, prefix)?)?;
+        let matches = db::collect_stream(db.all_local_files_with_prefix(
+            folder_id,
+            LOCAL_DEVICE_ID,
+            prefix,
+        )?)?;
         for item in matches {
             if seen.insert(item.path.clone()) {
                 items.push(item);
@@ -2025,14 +2032,26 @@ impl sendReceiveFolder {
             .count()
     }
 
-    pub(crate) fn processNeeded(&mut self, paths: &[String]) -> usize {
+    pub(crate) fn processNeeded(&mut self, paths: &[String]) -> Result<usize, String> {
         let mut processed = 0;
+        let mut failures = Vec::new();
         for p in paths {
-            if self.handleFile(p).is_ok() {
-                processed += 1;
+            match self.handleFile(p) {
+                Ok(()) => {
+                    processed += 1;
+                }
+                Err(err) => failures.push(format!("{p}: {err}")),
             }
         }
-        processed
+        if failures.is_empty() {
+            Ok(processed)
+        } else {
+            Err(format!(
+                "processNeeded failed for {} path(s): {}",
+                failures.len(),
+                failures.join("; ")
+            ))
+        }
     }
 
     pub(crate) fn pull(&mut self) -> Result<usize, String> {
@@ -2069,19 +2088,40 @@ impl sendReceiveFolder {
         Ok(total)
     }
 
-    pub(crate) fn renameFile(&self, old_name: &str, new_name: &str) -> Option<(String, String)> {
-        let renamed = self.folder.findRename(old_name, new_name)?;
-        let old_abs = self.resolve_abs_path(&renamed.0).ok().flatten();
-        let new_abs = self.resolve_abs_path(&renamed.1).ok().flatten();
-        if let (Some(old_abs), Some(new_abs)) = (old_abs, new_abs) {
-            if let Some(parent) = new_abs.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            if old_abs.exists() {
-                let _ = fs::rename(old_abs, new_abs);
-            }
+    pub(crate) fn renameFile(
+        &self,
+        old_name: &str,
+        new_name: &str,
+    ) -> Result<(String, String), String> {
+        let renamed = self
+            .folder
+            .findRename(old_name, new_name)
+            .ok_or_else(|| "rename source not found".to_string())?;
+        let old_abs = self
+            .resolve_abs_path(&renamed.0)?
+            .ok_or_else(|| format!("source path escapes folder root: {}", renamed.0))?;
+        let new_abs = self
+            .resolve_abs_path(&renamed.1)?
+            .ok_or_else(|| format!("target path escapes folder root: {}", renamed.1))?;
+
+        if let Some(parent) = new_abs.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("create rename target dir {}: {e}", parent.display()))?;
         }
-        Some(renamed)
+        if !old_abs.exists() {
+            return Err(format!(
+                "rename source does not exist: {}",
+                old_abs.display()
+            ));
+        }
+        fs::rename(&old_abs, &new_abs).map_err(|e| {
+            format!(
+                "rename {} -> {} failed: {e}",
+                old_abs.display(),
+                new_abs.display()
+            )
+        })?;
+        Ok(renamed)
     }
 
     pub(crate) fn reuseBlocks(&mut self, candidate: &str) -> bool {
@@ -2548,13 +2588,56 @@ mod tests {
 
         f.scanTimerFired().expect("scan timer");
 
-        assert!(f.initialScanCompleted, "first scan should mark initial scan done");
-        assert!(f.scanScheduled, "scan should be rescheduled for next interval");
+        assert!(
+            f.initialScanCompleted,
+            "first scan should mark initial scan done"
+        );
+        assert!(
+            f.scanScheduled,
+            "scan should be rescheduled for next interval"
+        );
         assert!(f.scanDelayUntil.is_some(), "next scan delay must be set");
         assert!(
             !f.pullScheduled,
             "rescheduling the scan must not force a pull by default"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scan_rejects_parent_escape_in_subdir_scope() {
+        let root = temp_root("scan-parent-escape");
+        let db = Arc::new(RwLock::new(db::WalFreeDb::default()));
+        let mut f = newFolder(scan_cfg(&root), db);
+
+        let err = f
+            .Scan(&["../outside".to_string()])
+            .expect_err("must reject parent escape");
+        assert!(err.contains("invalid relative path"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn forced_rescan_paths_are_not_lost_on_mark_error() {
+        let root = temp_root("forced-rescan-retry");
+        let db = Arc::new(RwLock::new(db::WalFreeDb::default()));
+        {
+            let db_for_panic = db.clone();
+            let _ = std::panic::catch_unwind(move || {
+                let _guard = db_for_panic.write().expect("db write lock");
+                panic!("poison db lock");
+            });
+        }
+
+        let mut f = newFolder(scan_cfg(&root), db);
+        f.forcedRescanPaths.insert("a.txt".to_string());
+        let err = f
+            .handleForcedRescans()
+            .expect_err("must fail with poisoned db");
+        assert!(err.contains("db lock poisoned"));
+        assert!(f.forcedRescanPaths.contains("a.txt"));
+
         let _ = fs::remove_dir_all(root);
     }
 

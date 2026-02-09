@@ -495,7 +495,7 @@ impl FileInfo {
     }
 
     pub(crate) fn IsEquivalentOptional(&self, other: &Self, cmp: &FileInfoComparison) -> bool {
-        if !cmp.IgnorePerms && self.Permissions != other.Permissions {
+        if !cmp.IgnorePerms && !PermsEqual(self, other) {
             return false;
         }
         if !cmp.IgnoreFlags && self.LocalFlags != other.LocalFlags {
@@ -691,7 +691,7 @@ impl Hello {
     }
 
     pub(crate) fn Magic(&self) -> u32 {
-        if self.ClientVersion.starts_with("1.3") {
+        if is_legacy_hello_13(&self.ClientVersion) {
             Version13HelloMagic
         } else {
             HelloMessageMagic
@@ -701,6 +701,11 @@ impl Hello {
     pub(crate) fn toWire(&self) -> Value {
         as_value(self)
     }
+}
+
+fn is_legacy_hello_13(client_version: &str) -> bool {
+    let mut parts = client_version.split('.');
+    matches!((parts.next(), parts.next()), (Some("1"), Some("3")))
 }
 
 impl Index {
@@ -1381,5 +1386,36 @@ mod tests {
         assert_eq!(BlockSizes[0], 128);
         assert!(TestOldHelloMsgs());
         assert!(TestVersion14Hello());
+    }
+
+    #[test]
+    fn is_equivalent_optional_respects_no_permissions_semantics() {
+        let a = FileInfo {
+            Name: "a.txt".to_string(),
+            Permissions: 0o600,
+            NoPermissions: true,
+            ModifiedS: 10,
+            ModifiedNs: 0,
+            ..Default::default()
+        };
+        let b = FileInfo {
+            Name: "a.txt".to_string(),
+            Permissions: 0o644,
+            NoPermissions: false,
+            ModifiedS: 10,
+            ModifiedNs: 0,
+            ..Default::default()
+        };
+
+        assert!(a.IsEquivalentOptional(&b, &FileInfoComparison::default()));
+    }
+
+    #[test]
+    fn hello_magic_does_not_treat_1_30_as_legacy_1_3() {
+        let h = Hello {
+            ClientVersion: "1.30.0".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(h.Magic(), HelloMessageMagic);
     }
 }

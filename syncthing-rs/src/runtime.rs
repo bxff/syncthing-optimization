@@ -1532,6 +1532,12 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     }));
                 }
             }
+            entries.sort_by(|a, b| {
+                a["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(b["name"].as_str().unwrap_or_default())
+            });
             ApiReply::json(200, json!({ "current": current, "entries": entries }))
         }
         "/rest/system/error" => match method {
@@ -1575,7 +1581,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             state.system_errors.clear();
             ApiReply::json(200, json!({"cleared": true}))
         }
-        "/rest/system/log" | "/rest/system/log.txt" => {
+        "/rest/system/log" => {
             if method != &Method::Get {
                 return make_api_error(405, "method not allowed");
             }
@@ -1590,6 +1596,20 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     "lines": lines,
                     "text": lines.join("\n"),
                 }),
+            )
+        }
+        "/rest/system/log.txt" => {
+            if method != &Method::Get {
+                return make_api_error(405, "method not allowed");
+            }
+            let state = match runtime.state.read() {
+                Ok(guard) => guard,
+                Err(_) => return make_api_error(500, "api state lock poisoned"),
+            };
+            ApiReply::bytes(
+                200,
+                state.log_lines.join("\n").into_bytes(),
+                "text/plain; charset=utf-8",
             )
         }
         "/rest/system/loglevels" => match method {
@@ -2236,8 +2256,18 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "model lock poisoned"),
                 };
-                let restored = guard.RestoreFolderVersions(folder);
-                ApiReply::json(200, json!({"folder": folder, "restored": restored}))
+                match guard.RestoreFolderVersions(folder) {
+                    Ok(restored) => {
+                        ApiReply::json(200, json!({"folder": folder, "restored": restored}))
+                    }
+                    Err(err) => {
+                        if err == crate::model_core::ErrFolderMissing {
+                            make_api_error(404, &err)
+                        } else {
+                            make_api_error(400, &err)
+                        }
+                    }
+                }
             }
             _ => make_api_error(405, "method not allowed"),
         },
@@ -2893,9 +2923,7 @@ fn parse_limit(
 }
 
 fn bool_param(params: &BTreeMap<String, String>, key: &str) -> Option<bool> {
-    params
-        .get(key)
-        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+    params.get(key).map(|v| parse_xml_bool(v))
 }
 
 fn path_param<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
@@ -4726,7 +4754,17 @@ pub(crate) fn run_api_surface_probe() -> Result<ApiSurfaceProbeResult, String> {
                     reply.status_code.0
                 ));
             }
-            let (response_kind, present_keys) = response_shape(&reply.body)?;
+            let (response_kind, present_keys) = if key == "GET /rest/system/log.txt" {
+                if !reply.content_type.starts_with("text/plain") {
+                    return Err(format!(
+                        "api probe {key} expected text/plain content type got {}",
+                        reply.content_type
+                    ));
+                }
+                ("string".to_string(), Vec::new())
+            } else {
+                response_shape(&reply.body)?
+            };
             if let Some(expected_kind) = expected_api_probe_response_kind(key) {
                 if response_kind != expected_kind {
                     return Err(format!(
@@ -5782,7 +5820,9 @@ mod tests {
             guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
             {
                 let mut db = guard.sdb.write().expect("db lock");
-                db.update("default", "local", vec![file_info("a.txt", 1, 10)])
+                let mut local = file_info("a.txt", 1, 10);
+                local.local_flags = db::FLAG_LOCAL_RECEIVE_ONLY;
+                db.update("default", "local", vec![local])
                     .expect("update local");
             }
             guard
@@ -5883,8 +5923,11 @@ mod tests {
         assert_eq!(localchanged.status_code, StatusCode(200));
         let localchanged_payload: Value =
             serde_json::from_slice(&localchanged.body).expect("decode json");
-        assert_eq!(localchanged_payload["count"], 1);
-        assert_eq!(localchanged_payload["files"][0], "a.txt");
+        assert_eq!(localchanged_payload["count"], 0);
+        assert!(localchanged_payload["files"]
+            .as_array()
+            .expect("files array")
+            .is_empty());
 
         let remoteneed = build_api_response(
             &Method::Get,
@@ -6125,9 +6168,9 @@ mod tests {
         assert_eq!(revert_get.status_code, StatusCode(405));
         let reset_get = build_api_response(&Method::Get, "/rest/db/reset?folder=default", &runtime);
         assert_eq!(reset_get.status_code, StatusCode(405));
-        let ignores_post =
-            build_api_response(&Method::Post, "/rest/db/ignores?folder=default", &runtime);
-        assert_eq!(ignores_post.status_code, StatusCode(404));
+        let ignores_put =
+            build_api_response(&Method::Put, "/rest/db/ignores?folder=default", &runtime);
+        assert_eq!(ignores_put.status_code, StatusCode(405));
         let completion_post = build_api_response(
             &Method::Post,
             "/rest/db/completion?folder=default",
@@ -6152,6 +6195,65 @@ mod tests {
             &runtime,
         );
         assert_eq!(bringtofront_get.status_code, StatusCode(405));
+    }
+
+    #[test]
+    fn api_system_log_txt_returns_text_plain() {
+        let runtime = test_api_runtime(Arc::new(RwLock::new(NewModel())), Vec::new(), 0);
+        let _ = build_api_response(&Method::Post, "/rest/system/error?message=first", &runtime);
+        let _ = build_api_response(&Method::Post, "/rest/system/error?message=second", &runtime);
+
+        let log_txt = build_api_response(&Method::Get, "/rest/system/log.txt", &runtime);
+        assert_eq!(log_txt.status_code, StatusCode(200));
+        assert_eq!(
+            log_txt.content_type,
+            "text/plain; charset=utf-8".to_string()
+        );
+        let body = String::from_utf8(log_txt.body).expect("utf8 body");
+        assert!(body.contains("ERROR: first"));
+        assert!(body.contains("ERROR: second"));
+    }
+
+    #[test]
+    fn bool_param_accepts_case_insensitive_truthy_values() {
+        let mut params = BTreeMap::new();
+        params.insert("enabled".to_string(), "TRUE".to_string());
+        assert_eq!(bool_param(&params, "enabled"), Some(true));
+
+        params.insert("enabled".to_string(), "Yes".to_string());
+        assert_eq!(bool_param(&params, "enabled"), Some(true));
+
+        params.insert("enabled".to_string(), "On".to_string());
+        assert_eq!(bool_param(&params, "enabled"), Some(true));
+
+        params.insert("enabled".to_string(), "false".to_string());
+        assert_eq!(bool_param(&params, "enabled"), Some(false));
+    }
+
+    #[test]
+    fn api_system_browse_returns_entries_sorted_by_name() {
+        let root = temp_root("api-system-browse-sorted");
+        fs::write(root.join("c.txt"), b"c").expect("write c");
+        fs::write(root.join("a.txt"), b"a").expect("write a");
+        fs::write(root.join("b.txt"), b"b").expect("write b");
+
+        let runtime = test_api_runtime(Arc::new(RwLock::new(NewModel())), Vec::new(), 0);
+        let response = build_api_response(
+            &Method::Get,
+            &format!("/rest/system/browse?current={}", root.to_string_lossy()),
+            &runtime,
+        );
+        assert_eq!(response.status_code, StatusCode(200));
+        let payload: Value = serde_json::from_slice(&response.body).expect("decode json");
+        let names = payload["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .filter_map(|entry| entry["name"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["a.txt", "b.txt", "c.txt"]);
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -6351,7 +6453,7 @@ mod tests {
         server.join().expect("join server");
         let guard = model.read().expect("lock");
         assert_eq!(
-            guard.RemoteSequences("default").get("remote").copied(),
+            guard.RemoteSequences("default").get("peer-a").copied(),
             Some(2)
         );
         assert_eq!(guard.DownloadProgress("peer-a"), vec!["default:a.txt:2"]);

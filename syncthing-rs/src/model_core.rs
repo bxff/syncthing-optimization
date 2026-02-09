@@ -634,7 +634,6 @@ impl model {
         let state = self
             .remoteFolderStates
             .get(&format!("{device}:{folder_id}"))
-            .or_else(|| self.remoteFolderStates.get(folder_id))
             .cloned()
             .unwrap_or_else(|| "idle".to_string());
         let db = self
@@ -739,7 +738,7 @@ impl model {
     pub(crate) fn LocalChangedFolderFiles(&self, folder_id: &str) -> Vec<String> {
         self.LocalFiles(folder_id)
             .into_iter()
-            .filter(|f| !f.deleted)
+            .filter(|f| f.local_flags & db::FLAG_LOCAL_RECEIVE_ONLY != 0)
             .map(|f| f.path)
             .collect()
     }
@@ -826,12 +825,16 @@ impl model {
         (files.len(), files.iter().map(|f| f.size).sum())
     }
 
-    pub(crate) fn RemoteNeedFolderFiles(
-        &self,
-        folder_id: &str,
-        _device: &str,
-    ) -> Vec<db::FileInfo> {
-        self.NeedFolderFiles(folder_id)
+    pub(crate) fn RemoteNeedFolderFiles(&self, folder_id: &str, device: &str) -> Vec<db::FileInfo> {
+        self.sdb
+            .read()
+            .ok()
+            .and_then(|db| {
+                db.all_needed_global_files(folder_id, device, db::PullOrder::Alphabetic, 10_000, 0)
+                    .ok()
+                    .and_then(|stream| db::collect_stream(stream).ok())
+            })
+            .unwrap_or_default()
     }
 
     pub(crate) fn RemoteSequences(&self, folder_id: &str) -> BTreeMap<String, i64> {
@@ -891,13 +894,9 @@ impl model {
             } => {
                 self.deviceWasSeen(device);
                 self.OnHello(device, client_name);
-                self.connections
-                    .entry(device.to_string())
-                    .or_insert_with(|| ConnectionStats {
-                        Connected: true,
-                        ClientVersion: client_name.clone(),
-                        ..ConnectionStats::default()
-                    });
+                let stats = self.connections.entry(device.to_string()).or_default();
+                stats.Connected = true;
+                stats.ClientVersion = client_name.clone();
                 Ok(None)
             }
             BepMessage::ClusterConfig { folders } => {
@@ -906,8 +905,10 @@ impl model {
                     if folder_id.is_empty() {
                         continue;
                     }
-                    self.remoteFolderStates
-                        .insert(folder_id.to_string(), "cluster_configured".to_string());
+                    self.remoteFolderStates.insert(
+                        format!("{device}:{folder_id}"),
+                        "cluster_configured".to_string(),
+                    );
                     if !self.folderCfgs.contains_key(folder_id) {
                         self.pendingFolderOffers
                             .entry(folder_id.to_string())
@@ -922,7 +923,7 @@ impl model {
                     .iter()
                     .map(|file| fileInfoFromIndexEntry(folder, file))
                     .collect::<Vec<_>>();
-                self.Index(folder, &converted)?;
+                self.IndexFromDevice(folder, device, &converted)?;
                 Ok(None)
             }
             BepMessage::IndexUpdate { folder, files } => {
@@ -930,7 +931,7 @@ impl model {
                     .iter()
                     .map(|file| fileInfoFromIndexEntry(folder, file))
                     .collect::<Vec<_>>();
-                self.IndexUpdate(folder, &converted)?;
+                self.IndexUpdateFromDevice(folder, device, &converted)?;
                 Ok(None)
             }
             BepMessage::Request {
@@ -1066,9 +1067,21 @@ impl model {
         Ok(())
     }
 
-    pub(crate) fn ScanFolders(&mut self, ids: &[String]) {
+    pub(crate) fn ScanFolders(&mut self, ids: &[String]) -> Result<(), String> {
+        let mut failures = Vec::new();
         for id in ids {
-            let _ = self.ScanFolder(id);
+            if let Err(err) = self.ScanFolder(id) {
+                failures.push(format!("{id}: {err}"));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "scan failed for {} folder(s): {}",
+                failures.len(),
+                failures.join("; ")
+            ))
         }
     }
 
@@ -1093,8 +1106,18 @@ impl model {
         self.folderIgnores.remove(folder_id);
     }
 
-    pub(crate) fn RestoreFolderVersions(&mut self, folder_id: &str) -> bool {
-        self.folderVersioners.contains_key(folder_id)
+    pub(crate) fn RestoreFolderVersions(&mut self, folder_id: &str) -> Result<bool, String> {
+        if folder_id.trim().is_empty() {
+            return Err("folder id is required".to_string());
+        }
+        if !self.folderCfgs.contains_key(folder_id) {
+            return Err(ErrFolderMissing.to_string());
+        }
+        if !self.folderVersioners.contains_key(folder_id) {
+            return Ok(false);
+        }
+        self.cleanPending(folder_id);
+        Ok(true)
     }
 
     pub(crate) fn GetFolderVersions(&self, folder_id: &str) -> Vec<String> {
@@ -1137,6 +1160,11 @@ impl model {
             return Err("device id is required".to_string());
         }
         self.connections.remove(device);
+        for devices in self.pendingFolderOffers.values_mut() {
+            devices.remove(device);
+        }
+        self.pendingFolderOffers
+            .retain(|_, devices| !devices.is_empty());
         Ok(())
     }
 
@@ -1152,11 +1180,7 @@ impl model {
             return Err("folder id is required".to_string());
         }
         if self.folderCfgs.contains_key(folder)
-            || self
-                .foldersRunning
-                .get(folder)
-                .copied()
-                .unwrap_or(false)
+            || self.foldersRunning.get(folder).copied().unwrap_or(false)
         {
             // Dismissing a configured/running folder is a no-op for compatibility with
             // API callers that treat dismiss as idempotent and only use pending offers.
@@ -1246,11 +1270,20 @@ impl model {
     }
 
     pub(crate) fn Index(&mut self, folder_id: &str, files: &[db::FileInfo]) -> Result<(), String> {
+        self.IndexFromDevice(folder_id, "remote", files)
+    }
+
+    pub(crate) fn IndexFromDevice(
+        &mut self,
+        folder_id: &str,
+        device: &str,
+        files: &[db::FileInfo],
+    ) -> Result<(), String> {
         let mut db = self
             .sdb
             .write()
             .map_err(|_| "db lock poisoned".to_string())?;
-        db.update(folder_id, "remote", files.to_vec())?;
+        db.update(folder_id, device, files.to_vec())?;
         Ok(())
     }
 
@@ -1259,7 +1292,16 @@ impl model {
         folder_id: &str,
         files: &[db::FileInfo],
     ) -> Result<(), String> {
-        self.Index(folder_id, files)
+        self.IndexUpdateFromDevice(folder_id, "remote", files)
+    }
+
+    pub(crate) fn IndexUpdateFromDevice(
+        &mut self,
+        folder_id: &str,
+        device: &str,
+        files: &[db::FileInfo],
+    ) -> Result<(), String> {
+        self.IndexFromDevice(folder_id, device, files)
     }
 
     pub(crate) fn addAndStartFolderLocked(&mut self, cfg: FolderConfiguration) {
@@ -1333,6 +1375,8 @@ impl model {
 
     pub(crate) fn cleanPending(&mut self, folder_id: &str) {
         self.remoteFolderStates.remove(folder_id);
+        self.remoteFolderStates
+            .retain(|key, _| !key.ends_with(&format!(":{folder_id}")));
         self.pendingFolderOffers.remove(folder_id);
     }
 
@@ -1716,7 +1760,17 @@ pub(crate) fn mapFolders(cfgs: &[FolderConfiguration]) -> BTreeMap<String, Folde
 }
 
 pub(crate) fn encryptionTokenPath(folder_id: &str) -> PathBuf {
-    PathBuf::from(format!("/tmp/syncthing-rs-{folder_id}.token"))
+    let safe_id = folder_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    PathBuf::from(format!("/tmp/syncthing-rs-{safe_id}.token"))
 }
 
 pub(crate) fn writeEncryptionToken(folder_id: &str, token: &str) -> Result<(), String> {
@@ -1867,11 +1921,7 @@ mod tests {
         m.ApplyBepMessage(
             "peer-a",
             &BepMessage::ClusterConfig {
-                folders: vec![
-                    "known".to_string(),
-                    " ".to_string(),
-                    "pending".to_string(),
-                ],
+                folders: vec!["known".to_string(), " ".to_string(), "pending".to_string()],
             },
         )
         .expect("cluster config");
@@ -2010,6 +2060,15 @@ mod tests {
     }
 
     #[test]
+    fn token_path_sanitizes_folder_id() {
+        let path = encryptionTokenPath("../../escape\\id");
+        let as_string = path.to_string_lossy();
+        assert!(as_string.starts_with("/tmp/syncthing-rs-"));
+        assert!(!as_string.contains("../"));
+        assert!(!as_string.contains("\\"));
+    }
+
+    #[test]
     fn request_data_reads_expected_slice() {
         let root =
             std::env::temp_dir().join(format!("syncthing-rs-request-{}", std::process::id()));
@@ -2087,7 +2146,7 @@ mod tests {
             }
         );
         assert_eq!(m.DownloadProgress("peer-a"), vec!["default:a.txt:2"]);
-        assert_eq!(m.RemoteSequences("default").get("remote").copied(), Some(2));
+        assert_eq!(m.RemoteSequences("default").get("peer-a").copied(), Some(2));
         assert_eq!(m.State("default"), "running");
         assert_eq!(m.PendingDevices(), Vec::<String>::new());
         assert_eq!(m.ConnectedTo("peer-a"), false);
@@ -2127,13 +2186,225 @@ mod tests {
     fn apply_bep_message_rejects_empty_device_id() {
         let mut m = NewModel();
         let err = m
-            .ApplyBepMessage(
-                "   ",
-                &BepMessage::Ping {
-                    timestamp_ms: 1,
-                },
-            )
+            .ApplyBepMessage("   ", &BepMessage::Ping { timestamp_ms: 1 })
             .expect_err("empty device id must be rejected");
         assert!(err.contains("device id is required"));
+    }
+
+    #[test]
+    fn local_changed_folder_files_only_returns_receive_only_entries() {
+        let root =
+            std::env::temp_dir().join(format!("syncthing-rs-local-changed-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("mkdir");
+
+        let mut m = NewModel();
+        m.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+
+        let mut plain = db::FileInfo {
+            folder: "default".to_string(),
+            path: "plain.txt".to_string(),
+            sequence: 1,
+            modified_ns: 1,
+            size: 1,
+            deleted: false,
+            ignored: false,
+            local_flags: 0,
+            file_type: db::FileInfoType::File,
+            block_hashes: vec!["h1".to_string()],
+        };
+
+        let mut changed = plain.clone();
+        changed.path = "changed.txt".to_string();
+        changed.local_flags = db::FLAG_LOCAL_RECEIVE_ONLY;
+
+        m.sdb
+            .write()
+            .expect("db write")
+            .update("default", "local", vec![plain, changed])
+            .expect("update local files");
+
+        assert_eq!(
+            m.LocalChangedFolderFiles("default"),
+            vec!["changed.txt".to_string()]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remote_need_folder_files_respects_requested_device() {
+        let root =
+            std::env::temp_dir().join(format!("syncthing-rs-remote-need-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("mkdir");
+
+        let mut m = NewModel();
+        m.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+
+        let mk = |path: &str, seq: i64| db::FileInfo {
+            folder: "default".to_string(),
+            path: path.to_string(),
+            sequence: seq,
+            modified_ns: seq,
+            size: 10,
+            deleted: false,
+            ignored: false,
+            local_flags: 0,
+            file_type: db::FileInfoType::File,
+            block_hashes: vec!["h1".to_string()],
+        };
+
+        let mut db = m.sdb.write().expect("db write");
+        db.update("default", "remote", vec![mk("a.txt", 2)])
+            .expect("update remote");
+        db.update("default", "local", vec![mk("a.txt", 2)])
+            .expect("update local");
+        db.update("default", "peer-a", vec![mk("a.txt", 1)])
+            .expect("update peer-a");
+        drop(db);
+
+        let peer_need = m.RemoteNeedFolderFiles("default", "peer-a");
+        assert_eq!(peer_need.len(), 1);
+        assert_eq!(peer_need[0].path, "a.txt");
+
+        let local_need = m.RemoteNeedFolderFiles("default", "local");
+        assert!(local_need.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apply_bep_index_tracks_sequences_per_device() {
+        let root = std::env::temp_dir().join(format!(
+            "syncthing-rs-index-per-device-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("mkdir");
+
+        let mut m = NewModel();
+        m.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+
+        m.ApplyBepMessage(
+            "peer-a",
+            &BepMessage::Index {
+                folder: "default".to_string(),
+                files: vec![IndexEntry {
+                    path: "a.txt".to_string(),
+                    sequence: 2,
+                    deleted: false,
+                    size: 10,
+                    block_hashes: vec!["h1".to_string()],
+                }],
+            },
+        )
+        .expect("apply index from peer-a");
+
+        m.ApplyBepMessage(
+            "peer-b",
+            &BepMessage::Index {
+                folder: "default".to_string(),
+                files: vec![IndexEntry {
+                    path: "b.txt".to_string(),
+                    sequence: 3,
+                    deleted: false,
+                    size: 10,
+                    block_hashes: vec!["h2".to_string()],
+                }],
+            },
+        )
+        .expect("apply index from peer-b");
+
+        let seqs = m.RemoteSequences("default");
+        assert_eq!(seqs.get("peer-a").copied(), Some(2));
+        assert_eq!(seqs.get("peer-b").copied(), Some(3));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apply_bep_hello_refreshes_existing_connection_state() {
+        let mut m = NewModel();
+        m.connections.insert(
+            "peer-a".to_string(),
+            ConnectionStats {
+                Connected: false,
+                ClientVersion: "old".to_string(),
+                ..ConnectionStats::default()
+            },
+        );
+
+        m.ApplyBepMessage(
+            "peer-a",
+            &BepMessage::Hello {
+                device_name: "peer-a".to_string(),
+                client_name: "new".to_string(),
+            },
+        )
+        .expect("apply hello");
+
+        let stats = m.connections.get("peer-a").expect("peer stats");
+        assert!(stats.Connected);
+        assert_eq!(stats.ClientVersion, "new");
+    }
+
+    #[test]
+    fn cluster_config_remote_state_is_scoped_per_device() {
+        let root = std::env::temp_dir().join(format!(
+            "syncthing-rs-cluster-state-scope-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("mkdir");
+
+        let mut m = NewModel();
+        m.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+
+        m.ApplyBepMessage(
+            "peer-a",
+            &BepMessage::ClusterConfig {
+                folders: vec!["default".to_string()],
+            },
+        )
+        .expect("cluster config");
+
+        assert_eq!(
+            m.Completion("peer-a", "default")
+                .expect("peer-a completion")
+                .RemoteState,
+            "cluster_configured"
+        );
+        assert_eq!(
+            m.Completion("peer-b", "default")
+                .expect("peer-b completion")
+                .RemoteState,
+            "idle"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dismiss_pending_device_removes_its_folder_offers() {
+        let mut m = NewModel();
+        m.pendingFolderOffers.insert(
+            "f1".to_string(),
+            BTreeSet::from(["peer-a".to_string(), "peer-b".to_string()]),
+        );
+        m.pendingFolderOffers
+            .insert("f2".to_string(), BTreeSet::from(["peer-a".to_string()]));
+
+        m.DismissPendingDevice("peer-a")
+            .expect("dismiss pending device");
+
+        assert_eq!(
+            m.PendingFolderOffers()
+                .get("f1")
+                .cloned()
+                .unwrap_or_default(),
+            vec!["peer-b".to_string()]
+        );
+        assert!(!m.PendingFolderOffers().contains_key("f2"));
     }
 }

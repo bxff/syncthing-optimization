@@ -159,7 +159,8 @@ pub(crate) trait Db {
         folder: &str,
         prefix: &str,
     ) -> Result<DbStream<'_, FileMetadata>, String>;
-    fn all_local_files(&self, folder: &str, device: &str) -> Result<DbStream<'_, FileInfo>, String>;
+    fn all_local_files(&self, folder: &str, device: &str)
+        -> Result<DbStream<'_, FileInfo>, String>;
     fn all_local_files_ordered(
         &self,
         folder: &str,
@@ -510,7 +511,7 @@ impl WalFreeDb {
             let Some(meta) = self.store.get_file(folder, &device, path) else {
                 continue;
             };
-            if meta.ignored {
+            if meta.ignored || (meta.local_flags & FLAG_LOCAL_INVALID != 0) {
                 continue;
             }
             let candidate = store_to_file_info_without_blocks(&meta);
@@ -662,15 +663,27 @@ impl Db for WalFreeDb {
         let mut last_sequence: Option<i64> = None;
         for mut file in files {
             file.folder = folder.to_string();
-            last_sequence = Some(file.sequence.max(0));
+            let seq = file.sequence.max(0);
+            last_sequence = Some(last_sequence.unwrap_or(0).max(seq));
             let encoded = file_info_to_store(folder, device, &file);
             self.store
                 .upsert_file(encoded)
                 .map_err(|e| format!("persist update: {e}"))?;
         }
         if let Some(seq) = last_sequence {
-            self.index_sequences
-                .insert((folder.to_string(), device.to_string()), seq);
+            let key = (folder.to_string(), device.to_string());
+            let prev = self.index_sequences.insert(key.clone(), seq);
+            if let Err(err) = self.persist_runtime_metadata() {
+                match prev {
+                    Some(old) => {
+                        self.index_sequences.insert(key, old);
+                    }
+                    None => {
+                        self.index_sequences.remove(&key);
+                    }
+                }
+                return Err(err);
+            }
         }
         Ok(())
     }
@@ -715,9 +728,9 @@ impl Db for WalFreeDb {
                 continue;
             };
             let candidate = store_to_file_info_without_blocks(&meta);
-            if candidate.sequence == global.sequence
-                && candidate.deleted == global.deleted
-                && !candidate.ignored
+            if !candidate.ignored
+                && candidate.local_flags & FLAG_LOCAL_INVALID == 0
+                && same_file_version_for_availability(&candidate, &global)
             {
                 out.push(device);
             }
@@ -803,7 +816,11 @@ impl Db for WalFreeDb {
         Ok(Box::new(iter))
     }
 
-    fn all_local_files(&self, folder: &str, device: &str) -> Result<DbStream<'_, FileInfo>, String> {
+    fn all_local_files(
+        &self,
+        folder: &str,
+        device: &str,
+    ) -> Result<DbStream<'_, FileInfo>, String> {
         self.ensure_open()?;
         let folder = folder.to_string();
         let device = device.to_string();
@@ -977,18 +994,21 @@ impl Db for WalFreeDb {
                     }
                 };
                 if hashes.iter().any(|h| h == &target) {
-                    return Some(Ok(file_metadata_from_info(store_to_file_info_without_blocks(
-                        &meta,
-                    ))));
+                    return Some(Ok(file_metadata_from_info(
+                        store_to_file_info_without_blocks(&meta),
+                    )));
                 }
                 continue;
             }
             if last_page {
                 return None;
             }
-            let next_page = self
-                .store
-                .files_in_folder_ordered_page(&folder, cursor.as_deref(), 2048);
+            let next_page = self.store.files_in_folder_device_ordered_page(
+                &folder,
+                LOCAL_DEVICE_ID,
+                cursor.as_deref(),
+                2048,
+            );
             cursor = next_page.next_cursor.map(|next| next.path);
             last_page = cursor.is_none();
             page = next_page.items;
@@ -1113,11 +1133,18 @@ impl Db for WalFreeDb {
                         if block_hash != &target {
                             return None;
                         }
+                        const BLOCK_SIZE: i64 = 128 * 1024;
+                        let offset = block_idx as i64 * BLOCK_SIZE;
+                        let file_size = u64_to_i64(meta.size).max(0);
+                        let remaining = file_size.saturating_sub(offset);
+                        if remaining <= 0 {
+                            return None;
+                        }
                         Some(BlockMapEntry {
                             blocklist_hash: target.as_bytes().to_vec(),
-                            offset: block_idx as i64 * 128 * 1024,
+                            offset,
                             block_index: block_idx as i32,
-                            size: 128 * 1024,
+                            size: remaining.min(BLOCK_SIZE) as i32,
                             file_name: meta.path.clone(),
                         })
                     })
@@ -1128,9 +1155,12 @@ impl Db for WalFreeDb {
             if last_page {
                 return None;
             }
-            let next_page = self
-                .store
-                .files_in_folder_ordered_page(&folder, cursor.as_deref(), 2048);
+            let next_page = self.store.files_in_folder_device_ordered_page(
+                &folder,
+                LOCAL_DEVICE_ID,
+                cursor.as_deref(),
+                2048,
+            );
             cursor = next_page.next_cursor.map(|next| next.path);
             last_page = cursor.is_none();
             page = next_page.items;
@@ -1171,6 +1201,9 @@ impl Db for WalFreeDb {
 
     fn drop_device(&mut self, device: &str) -> Result<(), String> {
         self.ensure_open()?;
+        if device == LOCAL_DEVICE_ID {
+            return Err("cannot drop local device".to_string());
+        }
         let folders = self.list_folders()?;
         for folder in folders {
             self.drop_all_files(&folder, device)?;
@@ -1276,7 +1309,10 @@ impl Db for WalFreeDb {
             if page.items.is_empty() {
                 break;
             }
-            accumulate_counts(&mut counts, count_files(page.items.into_iter()));
+            accumulate_counts(
+                &mut counts,
+                count_files(page.items.into_iter().filter(|f| !f.ignored)),
+            );
             cursor = page.next_cursor;
             if cursor.is_none() {
                 break;
@@ -1585,7 +1621,7 @@ fn best_global_candidate(
     let mut best_meta: Option<StoreFileMetadata> = None;
     let mut best_info: Option<FileInfo> = None;
     for meta in candidates {
-        if meta.ignored {
+        if meta.ignored || (meta.local_flags & FLAG_LOCAL_INVALID != 0) {
             continue;
         }
         let candidate = store_to_file_info_without_blocks(&meta);
@@ -1607,22 +1643,13 @@ fn best_global_candidate(
 fn requires_update(global: &FileInfo, local: Option<&FileInfo>) -> bool {
     match local {
         Some(current) => {
-            if same_file_version(global, current) {
-                return false;
-            }
             if global.deleted {
                 return !current.deleted;
             }
             if current.deleted {
                 return true;
             }
-            if global.sequence > current.sequence {
-                return true;
-            }
-            global.modified_ns != current.modified_ns
-                || global.size != current.size
-                || global.file_type != current.file_type
-                || global.local_flags != current.local_flags
+            !same_file_version_for_availability(global, current)
         }
         None => !global.deleted,
     }
@@ -1634,6 +1661,13 @@ fn same_file_version(a: &FileInfo, b: &FileInfo) -> bool {
         && a.modified_ns == b.modified_ns
         && a.size == b.size
         && a.local_flags == b.local_flags
+}
+
+fn same_file_version_for_availability(a: &FileInfo, b: &FileInfo) -> bool {
+    a.deleted == b.deleted
+        && a.file_type == b.file_type
+        && a.modified_ns == b.modified_ns
+        && a.size == b.size
 }
 
 fn prefer_global(candidate: &FileInfo, current: &FileInfo) -> bool {
@@ -1800,6 +1834,48 @@ mod tests {
     }
 
     #[test]
+    fn global_availability_requires_full_version_match() {
+        let mut db = WalFreeDb::default();
+
+        let mut winner = file("same.txt", 5, 100);
+        winner.modified_ns = 500;
+        db.update("default", "dev-a", vec![winner])
+            .expect("update winner");
+
+        let mut stale = file("same.txt", 5, 100);
+        stale.modified_ns = 100;
+        db.update("default", "dev-b", vec![stale])
+            .expect("update stale");
+
+        let avail = db
+            .get_global_availability("default", "same.txt")
+            .expect("availability");
+        assert_eq!(avail, vec!["dev-a".to_string()]);
+    }
+
+    #[test]
+    fn global_availability_ignores_local_flag_differences() {
+        let mut db = WalFreeDb::default();
+
+        let mut winner = file("same.txt", 5, 100);
+        winner.modified_ns = 500;
+        winner.local_flags = FLAG_LOCAL_RECEIVE_ONLY;
+        db.update("default", "dev-a", vec![winner])
+            .expect("update winner");
+
+        let mut peer = file("same.txt", 5, 100);
+        peer.modified_ns = 500;
+        peer.local_flags = 0;
+        db.update("default", "dev-b", vec![peer])
+            .expect("update peer");
+
+        let avail = db
+            .get_global_availability("default", "same.txt")
+            .expect("availability");
+        assert_eq!(avail, vec!["dev-a".to_string(), "dev-b".to_string()]);
+    }
+
+    #[test]
     fn list_devices_for_folder_excludes_local_device() {
         let mut db = WalFreeDb::default();
         db.update("default", "local", vec![file("local.txt", 1, 1)])
@@ -1809,9 +1885,7 @@ mod tests {
         db.update("default", "dev-b", vec![file("b.txt", 1, 1)])
             .expect("dev-b update");
 
-        let devices = db
-            .list_devices_for_folder("default")
-            .expect("list devices");
+        let devices = db.list_devices_for_folder("default").expect("list devices");
         assert_eq!(
             devices,
             vec!["dev-a".to_string(), "dev-b".to_string()],
@@ -1974,7 +2048,7 @@ mod tests {
     #[test]
     fn block_hash_kv_mtime_and_index_id() {
         let mut db = WalFreeDb::default();
-        db.update("default", "dev-a", vec![file("a.txt", 1, 100)])
+        db.update("default", "local", vec![file("a.txt", 1, 100)])
             .expect("update");
 
         let global = db
@@ -2019,6 +2093,22 @@ mod tests {
         assert_eq!(kv.len(), 1);
         assert_eq!(kv[0].value, b"value");
         <WalFreeDb as Kv>::delete_kv(&mut db, "alpha/key").expect("delete kv");
+    }
+
+    #[test]
+    fn all_local_blocks_with_hash_uses_tail_block_size() {
+        let mut db = WalFreeDb::default();
+        let mut tiny = file("tiny.bin", 1, (129 * 1024) as i64);
+        tiny.block_hashes = vec!["h1".to_string(), "h2".to_string()];
+        db.update("default", "local", vec![tiny]).expect("update");
+
+        let blocks = db
+            .all_local_blocks_with_hash("default", b"h2")
+            .and_then(collect_stream)
+            .expect("query blocks");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].offset, (128 * 1024) as i64);
+        assert_eq!(blocks[0].size, 1024);
     }
 
     #[test]
@@ -2074,6 +2164,85 @@ mod tests {
                 .expect("device sequence after update"),
             43
         );
+    }
+
+    #[test]
+    fn update_tracks_max_sequence_across_unsorted_batch() {
+        let mut db = WalFreeDb::default();
+        db.update(
+            "default",
+            "dev-a",
+            vec![file("high.txt", 100, 1), file("low.txt", 1, 1)],
+        )
+        .expect("update batch");
+
+        assert_eq!(
+            db.get_device_sequence("default", "dev-a")
+                .expect("device sequence"),
+            100
+        );
+    }
+
+    #[test]
+    fn local_hash_queries_only_return_local_device_entries() {
+        let mut db = WalFreeDb::default();
+
+        let mut local = file("local.txt", 1, 5);
+        local.block_hashes = vec!["samehash".to_string()];
+        db.update("default", "local", vec![local])
+            .expect("local update");
+
+        let mut remote = file("remote.txt", 2, 5);
+        remote.block_hashes = vec!["samehash".to_string()];
+        db.update("default", "peer-a", vec![remote])
+            .expect("remote update");
+
+        let files = db
+            .all_local_files_with_blocks_hash("default", b"samehash")
+            .and_then(collect_stream)
+            .expect("local files with hash");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name, "local.txt");
+
+        let blocks = db
+            .all_local_blocks_with_hash("default", b"samehash")
+            .and_then(collect_stream)
+            .expect("local blocks with hash");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].file_name, "local.txt");
+    }
+
+    #[test]
+    fn count_local_excludes_ignored_files() {
+        let mut db = WalFreeDb::default();
+        let mut ignored = file("ignored.txt", 2, 99);
+        ignored.ignored = true;
+
+        db.update("default", "dev-a", vec![file("keep.txt", 1, 1), ignored])
+            .expect("update");
+
+        let counts = db.count_local("default", "dev-a").expect("count local");
+        assert_eq!(counts.files, 1);
+        assert_eq!(counts.bytes, 1);
+    }
+
+    #[test]
+    fn invalid_candidates_are_skipped_from_global_counts_and_need() {
+        let mut db = WalFreeDb::default();
+        let mut invalid = file("bad.txt", 10, 5);
+        invalid.local_flags = FLAG_LOCAL_INVALID;
+
+        db.update("default", "dev-a", vec![invalid])
+            .expect("update invalid remote");
+
+        let global = db.count_global("default").expect("count global");
+        assert_eq!(global.files, 0);
+
+        let need = db
+            .all_needed_global_files("default", "local", PullOrder::Alphabetic, 0, 0)
+            .and_then(collect_stream)
+            .expect("collect need");
+        assert!(need.is_empty());
     }
 
     #[test]
@@ -2147,6 +2316,42 @@ mod tests {
     }
 
     #[test]
+    fn drop_device_rejects_local_device() {
+        let mut db = WalFreeDb::default();
+        db.update("default", "local", vec![file("a.txt", 1, 1)])
+            .expect("local update");
+
+        let err = db.drop_device("local").expect_err("must reject local drop");
+        assert!(err.contains("cannot drop local device"));
+        assert!(db
+            .get_device_file("default", "local", "a.txt")
+            .expect("lookup")
+            .is_some());
+    }
+
+    #[test]
+    fn need_ignores_local_flags_and_sequence_when_content_matches() {
+        let mut db = WalFreeDb::default();
+        let mut local = file("same.txt", 1, 10);
+        local.modified_ns = 100;
+        local.local_flags = FLAG_LOCAL_RECEIVE_ONLY;
+        db.update("default", "local", vec![local])
+            .expect("local update");
+
+        let mut remote = file("same.txt", 5, 10);
+        remote.modified_ns = 100;
+        remote.local_flags = 0;
+        db.update("default", "peer-a", vec![remote])
+            .expect("remote update");
+
+        let need = db
+            .all_needed_global_files("default", "local", PullOrder::Alphabetic, 10, 0)
+            .and_then(collect_stream)
+            .expect("need query");
+        assert!(need.is_empty());
+    }
+
+    #[test]
     fn close_blocks_future_mutation() {
         let mut db = WalFreeDb::default();
         db.close().expect("close");
@@ -2175,6 +2380,25 @@ mod tests {
             assert_eq!(
                 <WalFreeDb as Kv>::get_kv(&db, "alpha/key").expect("get kv"),
                 Some(b"value".to_vec())
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn device_sequence_persists_across_reopen_without_close() {
+        let root = temp_root("runtime-sequence-reopen");
+        {
+            let mut db = WalFreeDb::open_runtime(&root, 50).expect("open runtime");
+            db.update("default", "dev-a", vec![file("f.txt", 42, 1)])
+                .expect("update");
+        }
+        {
+            let db = WalFreeDb::open_runtime(&root, 50).expect("reopen runtime");
+            assert_eq!(
+                db.get_device_sequence("default", "dev-a")
+                    .expect("device sequence"),
+                42
             );
         }
         let _ = fs::remove_dir_all(root);

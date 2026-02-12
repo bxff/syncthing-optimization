@@ -638,7 +638,7 @@ impl model {
             .remoteFolderStates
             .get(&format!("{device}:{folder_id}"))
             .cloned()
-            .unwrap_or_else(|| "idle".to_string());
+            .unwrap_or_else(|| "unknown".to_string());
         let db = self
             .sdb
             .read()
@@ -943,10 +943,8 @@ impl model {
                     if folder_id.is_empty() {
                         continue;
                     }
-                    self.remoteFolderStates.insert(
-                        format!("{device}:{folder_id}"),
-                        "cluster_configured".to_string(),
-                    );
+                    self.remoteFolderStates
+                        .insert(format!("{device}:{folder_id}"), "valid".to_string());
                     if !self.folderCfgs.contains_key(folder_id) {
                         self.pendingFolderOffers
                             .entry(folder_id.to_string())
@@ -1462,6 +1460,9 @@ impl model {
 
     pub(crate) fn deviceDidCloseRLocked(&mut self, device: &str) {
         self.connections.remove(device);
+        let prefix = format!("{device}:");
+        self.remoteFolderStates
+            .retain(|key, _| !key.starts_with(&prefix));
     }
 
     pub(crate) fn deviceWasSeen(&mut self, device: &str) {
@@ -2574,10 +2575,8 @@ mod tests {
                 ..ConnectionStats::default()
             },
         );
-        m.remoteFolderStates.insert(
-            "peer-a:default".to_string(),
-            "cluster_configured".to_string(),
-        );
+        m.remoteFolderStates
+            .insert("peer-a:default".to_string(), "valid".to_string());
 
         let availability = m.Availability("default", "a.txt");
         assert_eq!(availability.len(), 1);
@@ -2796,13 +2795,55 @@ mod tests {
             m.Completion("peer-a", "default")
                 .expect("peer-a completion")
                 .RemoteState,
-            "cluster_configured"
+            "valid"
         );
         assert_eq!(
             m.Completion("peer-b", "default")
                 .expect("peer-b completion")
                 .RemoteState,
-            "idle"
+            "unknown"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remote_state_clears_when_device_closes() {
+        let root = std::env::temp_dir().join(format!(
+            "syncthing-rs-remote-state-close-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("mkdir");
+
+        let mut m = NewModel();
+        m.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+        m.ApplyBepMessage(
+            "peer-a",
+            &BepMessage::ClusterConfig {
+                folders: vec!["default".to_string()],
+            },
+        )
+        .expect("cluster config");
+        assert_eq!(
+            m.Completion("peer-a", "default")
+                .expect("peer-a completion")
+                .RemoteState,
+            "valid"
+        );
+
+        m.ApplyBepMessage(
+            "peer-a",
+            &BepMessage::Close {
+                reason: "bye".to_string(),
+            },
+        )
+        .expect("close");
+        assert_eq!(
+            m.Completion("peer-a", "default")
+                .expect("peer-a completion")
+                .RemoteState,
+            "unknown"
         );
 
         let _ = fs::remove_dir_all(root);

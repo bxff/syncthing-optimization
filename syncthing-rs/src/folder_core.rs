@@ -1747,7 +1747,13 @@ fn delete_path_if_exists(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Ok(meta) => {
             if meta.is_dir() {
-                fs::remove_dir_all(path).map_err(|e| format!("remove dir {}: {e}", path.display()))
+                match fs::remove_dir(path) {
+                    Ok(()) => Ok(()),
+                    Err(err) if err.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+                        Err(errDirNotEmpty.to_string())
+                    }
+                    Err(err) => Err(format!("remove dir {}: {err}", path.display())),
+                }
             } else {
                 fs::remove_file(path).map_err(|e| format!("remove file {}: {e}", path.display()))
             }
@@ -1817,10 +1823,50 @@ impl sendReceiveFolder {
 
     pub(crate) fn checkToBeDeleted(&self, path: &str) -> Result<(), String> {
         if path.ends_with('/') {
-            Err(errUnexpectedDirOnFileDel.to_string())
-        } else {
-            Ok(())
+            return Err(errUnexpectedDirOnFileDel.to_string());
         }
+        let Some(abs) = self.resolve_abs_path(path)? else {
+            return Ok(());
+        };
+        let meta = match fs::symlink_metadata(&abs) {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(format!("stat {}: {err}", abs.display())),
+        };
+        let expected = self
+            .folder
+            .db
+            .read()
+            .map_err(|_| "db lock poisoned".to_string())?
+            .get_device_file(&self.folder.config.id, LOCAL_DEVICE_ID, path)
+            .map_err(|e| format!("lookup local file {path}: {e}"))?;
+        let Some(expected) = expected else {
+            return Ok(());
+        };
+        if expected.deleted {
+            return Ok(());
+        }
+
+        let disk_type = if meta.is_dir() {
+            db::FileInfoType::Directory
+        } else if meta.file_type().is_symlink() {
+            db::FileInfoType::Symlink
+        } else {
+            db::FileInfoType::File
+        };
+        let disk_size = if disk_type == db::FileInfoType::File {
+            i64::try_from(meta.len()).unwrap_or(i64::MAX)
+        } else {
+            0
+        };
+        let disk_mtime = file_modified_ns(&meta)?;
+        if expected.file_type != disk_type
+            || expected.size != disk_size
+            || expected.modified_ns != disk_mtime
+        {
+            return Err(errModified.to_string());
+        }
+        Ok(())
     }
 
     pub(crate) fn copierRoutine(&mut self) -> usize {
@@ -1902,6 +1948,7 @@ impl sendReceiveFolder {
         if path.is_empty() {
             return Err(errDirNotEmpty.to_string());
         }
+        self.checkToBeDeleted(path)?;
         let Some(abs) = self.resolve_abs_path(path)? else {
             return Ok(());
         };
@@ -1949,9 +1996,7 @@ impl sendReceiveFolder {
     }
 
     pub(crate) fn deleteFileWithCurrent(&mut self, path: &str) -> Result<(), String> {
-        if path.ends_with('/') {
-            return Err(errUnexpectedDirOnFileDel.to_string());
-        }
+        self.checkToBeDeleted(path)?;
         let Some(abs) = self.resolve_abs_path(path)? else {
             return Ok(());
         };
@@ -1973,7 +2018,7 @@ impl sendReceiveFolder {
             match fs::symlink_metadata(&abs) {
                 Ok(meta) => {
                     if meta.is_dir() {
-                        return self.deleteDirOnDiskHandleChildren(path);
+                        return self.deleteDirOnDisk(path);
                     }
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -2056,10 +2101,18 @@ impl sendReceiveFolder {
     }
 
     pub(crate) fn processDeletions(&mut self, paths: &[String]) -> usize {
-        paths
-            .iter()
-            .filter_map(|p| self.deleteItemOnDisk(p).ok())
-            .count()
+        let mut deleted = 0;
+        for p in paths {
+            match self.deleteItemOnDisk(p) {
+                Ok(()) => deleted += 1,
+                Err(err) => {
+                    let pull_err = self.newPullError(p, &format!("delete: {err}"));
+                    self.tempPullErrors.push(pull_err.clone());
+                    self.folder.errorsMut.push(pull_err);
+                }
+            }
+        }
+        deleted
     }
 
     pub(crate) fn processNeeded(&mut self, paths: &[String]) -> Result<usize, String> {
@@ -2773,6 +2826,56 @@ mod tests {
         f.deleteDirOnDiskHandleChildren("dir/sub")
             .expect("recursive delete");
         assert!(!root.join("dir").join("sub").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn delete_path_if_exists_rejects_non_empty_directory() {
+        let root = temp_root("delete-path-non-empty");
+        let dir = root.join("dir");
+        fs::create_dir_all(&dir).expect("mkdir dir");
+        fs::write(dir.join("child.txt"), b"x").expect("write child");
+
+        let err = delete_path_if_exists(&dir).expect_err("must reject non-empty dir");
+        assert_eq!(err, errDirNotEmpty);
+        assert!(dir.join("child.txt").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn delete_file_with_current_rejects_locally_modified_item() {
+        let root = temp_root("delete-modified-guard");
+        fs::write(root.join("x.txt"), b"v1").expect("seed file");
+
+        let db = Arc::new(RwLock::new(db::WalFreeDb::default()));
+        let mut baseline = newFolder(scan_cfg(&root), db.clone());
+        baseline.Scan(&[]).expect("baseline scan");
+
+        std::thread::sleep(Duration::from_millis(2));
+        fs::write(root.join("x.txt"), b"v2").expect("mutate file");
+
+        let mut sr = newSendReceiveFolder(scan_cfg(&root), db);
+        let err = sr
+            .deleteFileWithCurrent("x.txt")
+            .expect_err("must reject modified file");
+        assert_eq!(err, errModified);
+        assert!(root.join("x.txt").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn process_deletions_records_errors_instead_of_swallowing() {
+        let root = temp_root("process-deletions-errors");
+        let db = Arc::new(RwLock::new(db::WalFreeDb::default()));
+        let mut sr = newSendReceiveFolder(scan_cfg(&root), db);
+
+        let deleted = sr.processDeletions(&["../escape.txt".to_string()]);
+        assert_eq!(deleted, 0);
+        assert_eq!(sr.tempPullErrors.len(), 1);
+        assert_eq!(sr.folder.errorsMut.len(), 1);
 
         let _ = fs::remove_dir_all(root);
     }

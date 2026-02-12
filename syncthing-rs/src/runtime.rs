@@ -3195,12 +3195,13 @@ fn api_events(runtime: &DaemonApiRuntime, disk_only: bool, since: u64, limit: us
     } else {
         &state.event_log
     };
-    let mut items = source
+    let filtered = source
         .iter()
         .filter(|ev| ev.get("id").and_then(Value::as_u64).unwrap_or_default() > since)
-        .take(limit)
         .cloned()
         .collect::<Vec<_>>();
+    let start = filtered.len().saturating_sub(limit);
+    let mut items = filtered[start..].to_vec();
     items.sort_by_key(|v| v.get("id").and_then(Value::as_u64).unwrap_or_default());
     ApiReply::json(200, Value::Array(items))
 }
@@ -6533,6 +6534,25 @@ mod tests {
         let lang_payload: Value = serde_json::from_slice(&lang.body).expect("decode lang");
         assert_eq!(lang_payload[0], "sv-se");
         assert_eq!(lang_payload[1], "en-us");
+    }
+
+    #[test]
+    fn api_events_limit_returns_latest_items() {
+        let runtime = test_api_runtime(Arc::new(RwLock::new(NewModel())), Vec::new(), 0);
+        append_event(&runtime, "ConfigSaved", json!({"n": 1}), false);
+        append_event(&runtime, "ConfigSaved", json!({"n": 2}), false);
+        append_event(&runtime, "ConfigSaved", json!({"n": 3}), false);
+
+        let reply = build_api_response(&Method::Get, "/rest/events?since=0&limit=2", &runtime);
+        assert_eq!(reply.status_code, StatusCode(200));
+        let payload: Value = serde_json::from_slice(&reply.body).expect("decode events");
+        let events = payload.as_array().expect("events array");
+        assert_eq!(events.len(), 2);
+        let ids = events
+            .iter()
+            .filter_map(|ev| ev.get("id").and_then(Value::as_u64))
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![2, 3]);
     }
 
     #[test]

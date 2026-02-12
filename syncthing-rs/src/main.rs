@@ -35,7 +35,12 @@ fn main() {
     }
 
     if matches!(args[1].as_str(), "--version" | "version") {
-        println!("{}", env!("CARGO_PKG_VERSION"));
+        println!(
+            "syncthing-rs {} ({} {})",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
         return;
     }
 
@@ -144,7 +149,7 @@ fn print_usage(stderr: bool) {
         eprintln!("  syncthing-rs interop-scenario <scenario-id>");
         eprintln!("  syncthing-rs scenario-list");
         eprintln!(
-            "  syncthing-rs [daemon|serve] (--folder <id>:<path> ... | --folder-path <path> [--folder-id <id>] | --config <path.json>) [--listen <addr>] [--api-listen <addr>] [--db-root <path>] [--memory-max-mb <n>] [--max-peers <n>] [--once]"
+            "  syncthing-rs serve (--folder <id>:<path> ... | --folder-path <path> [--folder-id <id>] | --config <path.json>) [--listen <addr>] [--api-listen <addr>] [--db-root <path>] [--memory-max-mb <n>] [--max-peers <n>] [--once]"
         );
     } else {
         println!("usage:");
@@ -153,7 +158,7 @@ fn print_usage(stderr: bool) {
         println!("  syncthing-rs interop-scenario <scenario-id>");
         println!("  syncthing-rs scenario-list");
         println!(
-            "  syncthing-rs [daemon|serve] (--folder <id>:<path> ... | --folder-path <path> [--folder-id <id>] | --config <path.json>) [--listen <addr>] [--api-listen <addr>] [--db-root <path>] [--memory-max-mb <n>] [--max-peers <n>] [--once]"
+            "  syncthing-rs serve (--folder <id>:<path> ... | --folder-path <path> [--folder-id <id>] | --config <path.json>) [--listen <addr>] [--api-listen <addr>] [--db-root <path>] [--memory-max-mb <n>] [--max-peers <n>] [--once]"
         );
     }
 }

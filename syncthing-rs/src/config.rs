@@ -100,6 +100,7 @@ pub(crate) enum FilesystemType {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct VersioningConfiguration {
     #[serde(default, rename = "type")]
     pub(crate) versioning_type: String,
@@ -139,6 +140,7 @@ impl Size {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FolderDeviceConfiguration {
+    #[serde(rename = "deviceID", alias = "deviceId")]
     pub(crate) device_id: String,
     pub(crate) introduced_by: String,
     pub(crate) encryption_password: String,
@@ -199,6 +201,7 @@ pub(crate) struct FolderConfiguration {
     pub(crate) label: String,
     pub(crate) filesystem_type: FilesystemType,
     pub(crate) path: String,
+    #[serde(rename = "type", alias = "folderType")]
     pub(crate) folder_type: FolderType,
     #[serde(default)]
     pub(crate) versioning: VersioningConfiguration,
@@ -211,6 +214,7 @@ pub(crate) struct FolderConfiguration {
     pub(crate) auto_normalize: bool,
     pub(crate) min_disk_free: Size,
     pub(crate) copiers: i32,
+    #[serde(rename = "pullerMaxPendingKiB", alias = "pullerMaxPendingKib")]
     pub(crate) puller_max_pending_kib: i32,
     pub(crate) hashers: i32,
     pub(crate) order: PullOrder,
@@ -235,6 +239,7 @@ pub(crate) struct FolderConfiguration {
     pub(crate) paused: bool,
     pub(crate) marker_name: String,
     pub(crate) copy_ownership_from_parent: bool,
+    #[serde(rename = "modTimeWindowS", alias = "rawModTimeWindowS")]
     pub(crate) raw_mod_time_window_s: i32,
     pub(crate) max_concurrent_writes: i32,
     pub(crate) disable_fsync: bool,

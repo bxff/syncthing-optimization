@@ -1246,7 +1246,7 @@ fn start_api_server(
                 .map(|h| h.value.to_string())
             {
                 if let Some(token) = auth.strip_prefix("Bearer ") {
-                    url = append_query_param(&url, "token", token.trim());
+                    url = append_query_param(&url, "_auth_token", token.trim());
                 }
             }
             if let Some(cookie_header) = request
@@ -1258,16 +1258,14 @@ fn start_api_server(
                 if let Some(session_token) = extract_cookie_value(&cookie_header, &session_cookie)
                     .or_else(|| extract_cookie_value(&cookie_header, "sessionid"))
                 {
-                    url = append_query_param(&url, "token", session_token);
+                    url = append_query_param(&url, "_auth_token", session_token);
                 }
             }
             for header in request.headers() {
                 let field = header.field.to_string();
-                if field.eq_ignore_ascii_case(&csrf_header)
-                    || field.eq_ignore_ascii_case("X-CSRF-Token")
-                {
+                if field.eq_ignore_ascii_case(&csrf_header) {
                     let value = header.value.to_string();
-                    url = append_query_param(&url, "csrf", value.trim());
+                    url = append_query_param(&url, "_auth_csrf", value.trim());
                     break;
                 }
             }
@@ -1544,7 +1542,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             if !expected_user.is_empty() || !expected_password.is_empty() {
                 let password_ok = verify_gui_password(&provided_password, &expected_password);
                 if user != expected_user || !password_ok {
-                    return make_api_error(401, "invalid credentials");
+                    return make_api_error(403, "invalid credentials");
                 }
             }
             state.active_auth_users.insert(user.clone());
@@ -1552,19 +1550,30 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             let csrf = mint_csrf_token(&user);
             state.active_auth_tokens.insert(token.clone(), user.clone());
             state.active_auth_csrf.insert(token.clone(), csrf.clone());
+            let secure_cookie = state
+                .gui
+                .get("useTLS")
+                .or_else(|| state.gui.get("usetls"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let session_cookie_name = session_cookie_name(runtime);
             let csrf_cookie_name = csrf_cookie_name(runtime);
             let csrf_header_name = csrf_header_name(runtime);
+            let secure_attr = if secure_cookie { "; Secure" } else { "" };
             let cookie = if stay_logged_in {
-                format!("{session_cookie_name}={token}; Path=/; HttpOnly; SameSite=Lax")
+                format!(
+                    "{session_cookie_name}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800{secure_attr}"
+                )
             } else {
-                format!("{session_cookie_name}={token}; Path=/; HttpOnly; SameSite=Lax")
+                format!(
+                    "{session_cookie_name}={token}; Path=/; HttpOnly; SameSite=Lax{secure_attr}"
+                )
             };
             ApiReply::bytes(204, Vec::new(), "application/json")
                 .with_header("Set-Cookie", cookie)
                 .with_header(
                     "Set-Cookie",
-                    format!("{csrf_cookie_name}={csrf}; Path=/; SameSite=Lax"),
+                    format!("{csrf_cookie_name}={csrf}; Path=/; SameSite=Lax{secure_attr}"),
                 )
                 .with_header("X-CSRF-Token", csrf.clone())
                 .with_header(&csrf_header_name, csrf)
@@ -1577,7 +1586,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 Ok(guard) => guard,
                 Err(_) => return make_api_error(500, "api state lock poisoned"),
             };
-            if let Some(token) = params.get("token") {
+            if let Some(token) = params.get("_auth_token") {
                 if let Some(user) = state.active_auth_tokens.get(token).cloned() {
                     state.active_auth_tokens.remove(token);
                     state.active_auth_csrf.remove(token);
@@ -1589,14 +1598,25 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             }
             let session_cookie_name = session_cookie_name(runtime);
             let csrf_cookie_name = csrf_cookie_name(runtime);
+            let secure_cookie = state
+                .gui
+                .get("useTLS")
+                .or_else(|| state.gui.get("usetls"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let secure_attr = if secure_cookie { "; Secure" } else { "" };
             ApiReply::bytes(204, Vec::new(), "application/json")
                 .with_header(
                     "Set-Cookie",
-                    format!("{session_cookie_name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"),
+                    format!(
+                        "{session_cookie_name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure_attr}"
+                    ),
                 )
                 .with_header(
                     "Set-Cookie",
-                    format!("{csrf_cookie_name}=; Path=/; SameSite=Lax; Max-Age=0"),
+                    format!(
+                        "{csrf_cookie_name}=; Path=/; SameSite=Lax; Max-Age=0{secure_attr}"
+                    ),
                 )
         }
         "/rest/system/version" => {
@@ -2342,9 +2362,11 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             let timeout_s = params
                 .get("timeout")
                 .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(60)
-                .min(60);
-            let event_filter = parse_event_type_filter(params.get("events").map(String::as_str));
+                .unwrap_or(60);
+            let event_filter = parse_event_type_filter_with_default(
+                params.get("events").map(String::as_str),
+                false,
+            );
             api_events(runtime, false, since, limit, timeout_s, event_filter)
         }
         "/rest/events/disk" => {
@@ -2359,9 +2381,8 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             let timeout_s = params
                 .get("timeout")
                 .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(60)
-                .min(60);
-            let event_filter = parse_event_type_filter(params.get("events").map(String::as_str));
+                .unwrap_or(60);
+            let event_filter = parse_event_type_filter_with_default(None, true);
             api_events(runtime, true, since, limit, timeout_s, event_filter)
         }
         "/rest/stats/device" => {
@@ -2749,9 +2770,9 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 ApiReply::json(
                     200,
                     json!({
-                        "folder": folder,
-                        "saved": true,
-                        "patterns": patterns,
+                        "ignore": patterns,
+                        "expanded": patterns,
+                        "error": null,
                     }),
                 )
             }
@@ -3412,7 +3433,7 @@ fn is_authenticated_request(
         return Ok(true);
     }
 
-    let Some(token) = params.get("token") else {
+    let Some(token) = params.get("_auth_token") else {
         return Ok(false);
     };
 
@@ -3438,7 +3459,7 @@ fn is_authenticated_request(
     let Some(expected_csrf) = state.active_auth_csrf.get(token) else {
         return Ok(false);
     };
-    let Some(provided_csrf) = params.get("csrf") else {
+    let Some(provided_csrf) = params.get("_auth_csrf") else {
         return Ok(false);
     };
     Ok(provided_csrf == expected_csrf)
@@ -3468,6 +3489,9 @@ fn append_body_params(url: &str, method: &Method, body: &[u8]) -> String {
         && (*method == Method::Post || *method == Method::Put || *method == Method::Patch)
     {
         return append_flat_object_params(url, &parsed);
+    }
+    if path == "/rest/db/ignores" && *method == Method::Post {
+        return append_ignores_body_params(url, &parsed);
     }
     if path == "/rest/system/loglevels" && *method == Method::Post {
         return append_flat_object_params(url, &parsed);
@@ -3529,6 +3553,28 @@ fn append_flat_object_params(url: &str, payload: &Value) -> String {
         };
         if let Some(encoded) = encoded {
             out = append_query_param(&out, key, &encoded);
+        }
+    }
+    out
+}
+
+fn append_ignores_body_params(url: &str, payload: &Value) -> String {
+    let Some(obj) = payload.as_object() else {
+        return url.to_string();
+    };
+    let mut out = url.to_string();
+    if let Some(ignore) = obj.get("ignore").or_else(|| obj.get("patterns")) {
+        if let Some(arr) = ignore.as_array() {
+            let joined = arr
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(",");
+            if !joined.is_empty() {
+                out = append_query_param(&out, "patterns", &joined);
+            }
         }
     }
     out
@@ -3727,6 +3773,49 @@ fn parse_event_type_filter(raw: Option<&str>) -> Option<BTreeSet<String>> {
     } else {
         Some(set)
     }
+}
+
+fn parse_event_type_filter_with_default(
+    raw: Option<&str>,
+    disk_only: bool,
+) -> Option<BTreeSet<String>> {
+    if let Some(explicit) = parse_event_type_filter(raw) {
+        return Some(explicit);
+    }
+    if disk_only {
+        return Some(
+            [
+                "foldersummary",
+                "itemfinished",
+                "foldercompletion",
+                "foldererrors",
+                "localindexupdated",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        );
+    }
+    Some(
+        [
+            "startupcomplete",
+            "devicediscovered",
+            "deviceconnected",
+            "devicedisconnected",
+            "configsaved",
+            "foldersummary",
+            "foldercompletion",
+            "foldererrors",
+            "failure",
+            "pendingdeviceschanged",
+            "pendingfolderschanged",
+            "itemstarted",
+            "itemfinished",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+    )
 }
 
 fn build_config_document(runtime: &DaemonApiRuntime) -> Result<Value, String> {
@@ -7163,7 +7252,7 @@ mod tests {
             "/rest/noauth/auth/password?user=alice&password=wrong",
             &runtime,
         );
-        assert_eq!(wrong_login.status_code, StatusCode(401));
+        assert_eq!(wrong_login.status_code, StatusCode(403));
 
         let login = build_api_response(
             &Method::Post,
@@ -7175,7 +7264,7 @@ mod tests {
 
         let authorized = build_api_response(
             &Method::Get,
-            &format!("/rest/system/status?token={token}"),
+            &format!("/rest/system/status?_auth_token={token}"),
             &runtime,
         );
         assert_eq!(authorized.status_code, StatusCode(200));
@@ -7231,14 +7320,14 @@ mod tests {
 
         let good_logout = build_api_response(
             &Method::Post,
-            &format!("/rest/noauth/auth/logout?user=alice&token={token}&csrf={csrf}"),
+            &format!("/rest/noauth/auth/logout?user=alice&_auth_token={token}&_auth_csrf={csrf}"),
             &runtime,
         );
         assert_eq!(good_logout.status_code, StatusCode(204));
 
         let still_auth = build_api_response(
             &Method::Get,
-            &format!("/rest/system/status?token={token}"),
+            &format!("/rest/system/status?_auth_token={token}"),
             &runtime,
         );
         assert_eq!(still_auth.status_code, StatusCode(401));
@@ -7266,21 +7355,21 @@ mod tests {
 
         let get_ok = build_api_response(
             &Method::Get,
-            &format!("/rest/system/status?token={token}"),
+            &format!("/rest/system/status?_auth_token={token}"),
             &runtime,
         );
         assert_eq!(get_ok.status_code, StatusCode(200));
 
         let write_missing_csrf = build_api_response(
             &Method::Post,
-            &format!("/rest/db/scan?folder=default&token={token}"),
+            &format!("/rest/db/scan?folder=default&_auth_token={token}"),
             &runtime,
         );
         assert_eq!(write_missing_csrf.status_code, StatusCode(401));
 
         let write_ok = build_api_response(
             &Method::Post,
-            &format!("/rest/db/scan?folder=default&token={token}&csrf={csrf}"),
+            &format!("/rest/db/scan?folder=default&_auth_token={token}&_auth_csrf={csrf}"),
             &runtime,
         );
         assert_ne!(write_ok.status_code, StatusCode(401));

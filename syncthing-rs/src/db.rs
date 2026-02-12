@@ -754,10 +754,7 @@ impl Db for WalFreeDb {
                 continue;
             };
             let candidate = store_to_file_info(&meta);
-            if !candidate.ignored
-                && candidate.local_flags & FLAG_LOCAL_INVALID == 0
-                && same_file_version_for_availability(&candidate, &global)
-            {
+            if same_file_version_for_availability(&candidate, &global) {
                 out.push(device);
             }
         }
@@ -1707,12 +1704,18 @@ fn best_global_candidate(
 ) -> Option<(StoreFileMetadata, FileInfo)> {
     let mut best_meta: Option<StoreFileMetadata> = None;
     let mut best_info: Option<FileInfo> = None;
-    let mut first_invalid: Option<(StoreFileMetadata, FileInfo)> = None;
+    let mut best_invalid_meta: Option<StoreFileMetadata> = None;
+    let mut best_invalid_info: Option<FileInfo> = None;
     for meta in candidates {
         let candidate = store_to_file_info_without_blocks(&meta);
         if meta.ignored || (meta.local_flags & FLAG_LOCAL_INVALID != 0) {
-            if first_invalid.is_none() {
-                first_invalid = Some((meta, candidate));
+            let use_candidate = match best_invalid_info.as_ref() {
+                Some(current) => prefer_global(&candidate, current),
+                None => true,
+            };
+            if use_candidate {
+                best_invalid_meta = Some(meta);
+                best_invalid_info = Some(candidate);
             }
             continue;
         }
@@ -1727,7 +1730,10 @@ fn best_global_candidate(
     }
     match (best_meta, best_info) {
         (Some(meta), Some(info)) => Some((meta, info)),
-        _ => first_invalid,
+        _ => match (best_invalid_meta, best_invalid_info) {
+            (Some(meta), Some(info)) => Some((meta, info)),
+            _ => None,
+        },
     }
 }
 

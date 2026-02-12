@@ -658,7 +658,7 @@ impl model {
             .copied()
             .unwrap_or_default();
         if downloaded > 0 {
-            completion.NeedBytes = completion.NeedBytes.saturating_sub(downloaded);
+            completion.NeedBytes = completion.NeedBytes.saturating_sub(downloaded).max(0);
             completion.setCompletionPct();
         }
         Ok(completion)

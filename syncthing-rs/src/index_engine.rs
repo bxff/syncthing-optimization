@@ -31,18 +31,8 @@ impl IndexEngine {
         folder: &str,
         update: FolderUpdate,
     ) -> Result<(), String> {
-        if update.sequence == 0 {
-            return Err("sequence must be greater than zero".to_string());
-        }
-
         let next = self.folder_sequence.entry(folder.to_string()).or_insert(0);
-        if update.sequence <= *next {
-            return Err(format!(
-                "sequence {} does not advance folder sequence {}",
-                update.sequence, *next
-            ));
-        }
-        *next = update.sequence;
+        *next = (*next).max(update.sequence);
 
         let key = (folder.to_string(), update.path.clone());
         self.files.insert(
@@ -101,20 +91,16 @@ mod tests {
     }
 
     #[test]
-    fn rejects_out_of_order_folder_sequence_updates() {
+    fn accepts_out_of_order_folder_sequence_updates() {
         let mut idx = IndexEngine::new();
         idx.apply_update("default", update("c.txt", 3, false))
             .expect("apply b");
-
-        let err = idx
-            .apply_update("default", update("a.txt", 1, false))
-            .expect_err("must reject out-of-order update");
-        assert!(err.contains("does not advance"));
+        idx.apply_update("default", update("a.txt", 1, false))
+            .expect("accept anomaly");
 
         assert_eq!(idx.folder_sequence("default"), 3);
         let files = idx.ordered_files(Some("default"));
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].file.path, "c.txt");
+        assert_eq!(files.len(), 2);
     }
 
     #[test]

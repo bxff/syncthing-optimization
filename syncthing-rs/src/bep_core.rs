@@ -5,9 +5,9 @@ use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub(crate) const CompressionNever: i32 = 0;
-pub(crate) const CompressionAlways: i32 = 1;
-pub(crate) const CompressionMetadata: i32 = 2;
+pub(crate) const CompressionMetadata: i32 = 0;
+pub(crate) const CompressionNever: i32 = 1;
+pub(crate) const CompressionAlways: i32 = 2;
 pub(crate) const Compression_COMPRESSION_NEVER: i32 = CompressionNever;
 pub(crate) const Compression_COMPRESSION_ALWAYS: i32 = CompressionAlways;
 pub(crate) const Compression_COMPRESSION_METADATA: i32 = CompressionMetadata;
@@ -184,11 +184,18 @@ impl FileInfo {
         if self.Name.is_empty() {
             return Err("file info name is required".to_string());
         }
+        if self.Deleted && !self.Blocks.is_empty() {
+            return Err("deleted files must not contain blocks".to_string());
+        }
         if self.Type == FileInfoTypeDirectory && !self.Blocks.is_empty() {
             return Err("directories must not contain block payloads".to_string());
         }
-        if self.Deleted && self.Size > 0 {
-            return Err("deleted files must not advertise positive size".to_string());
+        if !self.Deleted
+            && !self.IsInvalid()
+            && self.Type == FileInfoTypeFile
+            && self.Blocks.is_empty()
+        {
+            return Err("regular files must contain at least one block".to_string());
         }
         Ok(())
     }
@@ -457,6 +464,44 @@ mod tests {
 
         let err = file.validate().expect_err("must reject");
         assert!(err.contains("directories must not contain block payloads"));
+    }
+
+    #[test]
+    fn file_validation_rejects_deleted_files_with_blocks() {
+        let file = FileInfo {
+            Name: "gone.txt".to_string(),
+            Type: FileInfoTypeFile,
+            Deleted: true,
+            Blocks: vec![BlockInfo {
+                Hash: vec![1],
+                Offset: 0,
+                Size: 1,
+            }],
+            ..Default::default()
+        };
+        let err = file.validate().expect_err("must reject");
+        assert!(err.contains("deleted files must not contain blocks"));
+    }
+
+    #[test]
+    fn file_validation_rejects_non_deleted_regular_file_without_blocks() {
+        let file = FileInfo {
+            Name: "live.txt".to_string(),
+            Type: FileInfoTypeFile,
+            Deleted: false,
+            Invalid: false,
+            Blocks: Vec::new(),
+            ..Default::default()
+        };
+        let err = file.validate().expect_err("must reject");
+        assert!(err.contains("regular files must contain at least one block"));
+    }
+
+    #[test]
+    fn compression_enum_values_match_go_wire_numbers() {
+        assert_eq!(Compression_COMPRESSION_METADATA, 0);
+        assert_eq!(Compression_COMPRESSION_NEVER, 1);
+        assert_eq!(Compression_COMPRESSION_ALWAYS, 2);
     }
 
     #[test]

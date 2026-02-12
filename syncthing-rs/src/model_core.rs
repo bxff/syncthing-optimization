@@ -95,7 +95,6 @@ impl FolderCompletion {
         self.NeedBytes += other.NeedBytes;
         self.GlobalItems += other.GlobalItems;
         self.GlobalBytes += other.GlobalBytes;
-        self.Sequence = self.Sequence.max(other.Sequence);
         self.setCompletionPct();
     }
 
@@ -114,6 +113,7 @@ impl FolderCompletion {
 
     pub(crate) fn Map(&self) -> BTreeMap<&'static str, Value> {
         BTreeMap::from([
+            ("completion", Value::from(self.CompletionPct as f64)),
             ("completionPct", Value::from(self.CompletionPct)),
             ("needItems", Value::from(self.NeedItems)),
             ("needDeletes", Value::from(self.NeedDeletes)),
@@ -657,9 +657,6 @@ impl model {
         folder_id: &str,
         path: &str,
     ) -> Result<Option<db::FileInfo>, String> {
-        if !self.folderCfgs.contains_key(folder_id) {
-            return Err(ErrFolderMissing.to_string());
-        }
         self.sdb
             .read()
             .map_err(|_| "db lock poisoned".to_string())?
@@ -676,9 +673,6 @@ impl model {
         folder_id: &str,
         path: &str,
     ) -> Result<Option<db::FileInfo>, String> {
-        if !self.folderCfgs.contains_key(folder_id) {
-            return Err(ErrFolderMissing.to_string());
-        }
         self.sdb
             .read()
             .map_err(|_| "db lock poisoned".to_string())?
@@ -1033,6 +1027,9 @@ impl model {
         if self.closed {
             return "stopped".to_string();
         }
+        if !self.folderRunners.contains_key(folder_id) {
+            return String::new();
+        }
         if !self.foldersRunning.get(folder_id).copied().unwrap_or(false) {
             return "idle".to_string();
         }
@@ -1185,9 +1182,6 @@ impl model {
         device: &str,
         folder: &str,
     ) -> Result<(), String> {
-        if device.trim().is_empty() {
-            return Err("device id is required".to_string());
-        }
         if folder.trim().is_empty() {
             return Err("folder id is required".to_string());
         }
@@ -1196,6 +1190,10 @@ impl model {
         {
             // Dismissing a configured/running folder is a no-op for compatibility with
             // API callers that treat dismiss as idempotent and only use pending offers.
+            return Ok(());
+        }
+        if device.trim().is_empty() {
+            self.pendingFolderOffers.remove(folder);
             return Ok(());
         }
         if let Some(devices) = self.pendingFolderOffers.get_mut(folder) {
@@ -1899,6 +1897,9 @@ mod tests {
         };
         c.setCompletionPct();
         assert_eq!(c.CompletionPct, 80);
+        let mapped = c.Map();
+        assert_eq!(mapped.get("completion"), Some(&Value::from(80.0)));
+        assert_eq!(mapped.get("completionPct"), Some(&Value::from(80)));
     }
 
     #[test]
@@ -1913,7 +1914,7 @@ mod tests {
         assert!(stats.contains_key("memoryRuntimeReservedBytes"));
         assert!(stats.contains_key("memoryRuntimeBudgetBytes"));
         m.removeFolder("default");
-        assert_eq!(m.State("default"), "idle");
+        assert_eq!(m.State("default"), "");
     }
 
     #[test]
@@ -1944,6 +1945,31 @@ mod tests {
         m.DismissPendingFolder("peer-b", "pending")
             .expect("dismiss last offer");
         assert!(m.PendingFolders().is_empty());
+
+        m.pendingFolderOffers
+            .entry("wildcard".to_string())
+            .or_default()
+            .insert("peer-a".to_string());
+        m.pendingFolderOffers
+            .entry("wildcard".to_string())
+            .or_default()
+            .insert("peer-b".to_string());
+        m.DismissPendingFolder("", "wildcard")
+            .expect("dismiss all offers for folder");
+        assert!(!m.pendingFolderOffers.contains_key("wildcard"));
+    }
+
+    #[test]
+    fn current_file_status_for_unknown_folder_returns_none() {
+        let m = NewModel();
+        assert!(m
+            .CurrentFolderFileStatus("missing", "a.txt")
+            .expect("lookup")
+            .is_none());
+        assert!(m
+            .CurrentGlobalFileStatus("missing", "a.txt")
+            .expect("lookup")
+            .is_none());
     }
 
     #[test]

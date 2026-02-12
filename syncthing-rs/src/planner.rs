@@ -89,7 +89,8 @@ pub(crate) fn classify_paths(paths: &[String], ignore_suffixes: &[&str]) -> Path
 }
 
 fn is_conflict_path(path: &str) -> bool {
-    path.contains(".sync-conflict-") || path.contains("sync-conflict")
+    let base = path.rsplit('/').next().unwrap_or(path);
+    base.contains(".sync-conflict-")
 }
 
 #[cfg(test)]
@@ -132,6 +133,8 @@ mod tests {
             "docs/.DS_Store".to_string(),
             "tmp/build.tmp".to_string(),
             "docs/readme.sync-conflict-20260207.md".to_string(),
+            "sync-conflict-dir/readme.md".to_string(),
+            "docs/sync-conflict-not-a-marker.md".to_string(),
         ];
 
         let c = classify_paths(&paths, &[".tmp", ".DS_Store"]);
@@ -139,7 +142,12 @@ mod tests {
         assert_eq!(c.conflicts, vec!["docs/readme.sync-conflict-20260207.md"]);
         assert_eq!(
             c.considered,
-            vec!["docs/readme.md", "docs/readme.sync-conflict-20260207.md"]
+            vec![
+                "docs/readme.md",
+                "docs/readme.sync-conflict-20260207.md",
+                "docs/sync-conflict-not-a-marker.md",
+                "sync-conflict-dir/readme.md"
+            ]
         );
     }
 }

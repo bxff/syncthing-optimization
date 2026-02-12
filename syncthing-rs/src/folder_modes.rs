@@ -37,7 +37,7 @@ pub(crate) fn mode_actions(mode: FolderMode) -> FolderModeActions {
         },
         FolderMode::SendOnly => FolderModeActions {
             mode,
-            pipeline: vec!["scan", "index", "push"],
+            pipeline: vec!["scan", "index", "pull_metadata", "push"],
             may_push: true,
             requires_local_revert: false,
             encrypted_index: false,
@@ -53,7 +53,7 @@ pub(crate) fn mode_actions(mode: FolderMode) -> FolderModeActions {
             mode,
             pipeline: vec!["scan", "index_encrypted", "pull_encrypted"],
             may_push: false,
-            requires_local_revert: false,
+            requires_local_revert: true,
             encrypted_index: true,
         },
     }
@@ -97,7 +97,10 @@ mod tests {
         let actions = mode_actions(FolderMode::SendOnly);
         assert!(actions.may_push);
         assert!(!actions.requires_local_revert);
-        assert_eq!(actions.pipeline, vec!["scan", "index", "push"]);
+        assert_eq!(
+            actions.pipeline,
+            vec!["scan", "index", "pull_metadata", "push"]
+        );
     }
 
     #[test]
@@ -109,8 +112,8 @@ mod tests {
     }
 
     #[test]
-    fn receive_encrypted_does_not_require_local_revert() {
+    fn receive_encrypted_requires_local_revert() {
         let actions = mode_actions(FolderMode::ReceiveEncrypted);
-        assert!(!actions.requires_local_revert);
+        assert!(actions.requires_local_revert);
     }
 }

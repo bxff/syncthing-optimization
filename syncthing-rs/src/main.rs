@@ -23,9 +23,14 @@ use std::process;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
+    if args.len() == 1 {
+        run_daemon_command(&[]);
+        return;
+    }
+
+    if matches!(args[1].as_str(), "-h" | "--help" | "help") {
         usage();
-        process::exit(2);
+        return;
     }
 
     match args[1].as_str() {
@@ -91,21 +96,25 @@ fn main() {
                 println!("{id}");
             }
         }
-        "daemon" => match parse_daemon_args(&args[2..]) {
-            Ok(cfg) => {
-                if let Err(err) = run_daemon(cfg) {
-                    eprintln!("daemon failed: {err}");
-                    process::exit(1);
-                }
-            }
-            Err(err) => {
-                eprintln!("invalid daemon arguments: {err}");
-                usage();
-                process::exit(2);
-            }
-        },
+        "daemon" | "serve" => run_daemon_command(&args[2..]),
         _ => {
             eprintln!("unknown command: {}", args[1]);
+            usage();
+            process::exit(2);
+        }
+    }
+}
+
+fn run_daemon_command(args: &[String]) {
+    match parse_daemon_args(args) {
+        Ok(cfg) => {
+            if let Err(err) = run_daemon(cfg) {
+                eprintln!("daemon failed: {err}");
+                process::exit(1);
+            }
+        }
+        Err(err) => {
+            eprintln!("invalid daemon arguments: {err}");
             usage();
             process::exit(2);
         }
@@ -119,6 +128,6 @@ fn usage() {
     eprintln!("  syncthing-rs interop-scenario <scenario-id>");
     eprintln!("  syncthing-rs scenario-list");
     eprintln!(
-        "  syncthing-rs daemon (--folder <id>:<path> ... | --folder-path <path> [--folder-id <id>] | --config <path.json>) [--listen <addr>] [--api-listen <addr>] [--db-root <path>] [--memory-max-mb <n>] [--max-peers <n>] [--once]"
+        "  syncthing-rs [daemon|serve] (--folder <id>:<path> ... | --folder-path <path> [--folder-id <id>] | --config <path.json>) [--listen <addr>] [--api-listen <addr>] [--db-root <path>] [--memory-max-mb <n>] [--max-peers <n>] [--once]"
     );
 }

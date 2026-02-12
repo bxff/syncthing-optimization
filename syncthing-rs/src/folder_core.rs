@@ -2346,11 +2346,28 @@ impl receiveOnlyFolder {
                 .map_err(|e| format!("load local files: {e}"))?,
         )
         .map_err(|e| format!("load local files: {e}"))?;
+        let remote_devices = db
+            .list_devices_for_folder(&folder_id)
+            .map_err(|e| format!("list remote devices: {e}"))?;
 
         let mut updates = Vec::new();
         let mut disk_deletes = Vec::new();
         for mut local in locals {
             if local.local_flags & db::FLAG_LOCAL_RECEIVE_ONLY == 0 {
+                continue;
+            }
+            let mut has_remote_entry = false;
+            for device in &remote_devices {
+                if db
+                    .get_device_file(&folder_id, device, &local.path)
+                    .map_err(|e| format!("lookup remote file {} on {}: {e}", local.path, device))?
+                    .is_some()
+                {
+                    has_remote_entry = true;
+                    break;
+                }
+            }
+            if !has_remote_entry {
                 continue;
             }
             match db.get_global_file(&folder_id, &local.path) {

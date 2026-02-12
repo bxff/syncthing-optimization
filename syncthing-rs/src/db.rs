@@ -22,6 +22,7 @@ pub(crate) const FLAG_LOCAL_REMOTE_INVALID: LocalFlags = 1 << 6;
 pub(crate) const FLAG_LOCAL_INVALID: LocalFlags = FLAG_LOCAL_UNSUPPORTED
     | FLAG_LOCAL_IGNORED
     | FLAG_LOCAL_MUST_RESCAN
+    | FLAG_LOCAL_RECEIVE_ONLY
     | FLAG_LOCAL_REMOTE_INVALID;
 pub(crate) const FLAG_LOCAL_CONFLICT: LocalFlags =
     FLAG_LOCAL_UNSUPPORTED | FLAG_LOCAL_IGNORED | FLAG_LOCAL_RECEIVE_ONLY;
@@ -417,6 +418,9 @@ impl WalFreeDb {
         let mut items = Vec::new();
         let mut has_more = false;
         self.for_each_global_winner(folder, true, |global| {
+            if global.ignored || (global.local_flags & FLAG_LOCAL_INVALID != 0) {
+                return Ok(true);
+            }
             if let Some(cursor) = start_after {
                 if crate::store::compare_path_order(&global.path, cursor)
                     != std::cmp::Ordering::Greater
@@ -516,14 +520,20 @@ impl WalFreeDb {
     ) -> Result<Option<FileInfo>, String> {
         let mut best_meta: Option<StoreFileMetadata> = None;
         let mut best_info: Option<FileInfo> = None;
+        let mut first_invalid_meta: Option<StoreFileMetadata> = None;
+        let mut first_invalid_info: Option<FileInfo> = None;
         for device in self.store.devices_in_folder(folder) {
             let Some(meta) = self.store.get_file(folder, &device, path) else {
                 continue;
             };
+            let candidate = store_to_file_info_without_blocks(&meta);
             if meta.ignored || (meta.local_flags & FLAG_LOCAL_INVALID != 0) {
+                if first_invalid_meta.is_none() {
+                    first_invalid_meta = Some(meta.clone());
+                    first_invalid_info = Some(candidate);
+                }
                 continue;
             }
-            let candidate = store_to_file_info_without_blocks(&meta);
             let use_candidate = match best_info.as_ref() {
                 Some(current) => prefer_global(&candidate, current),
                 None => true,
@@ -534,16 +544,17 @@ impl WalFreeDb {
             }
         }
 
-        let Some(mut winner) = best_info else {
-            return Ok(None);
+        let (meta, mut winner) = match (best_meta, best_info) {
+            (Some(meta), Some(info)) => (meta, info),
+            _ => match (first_invalid_meta, first_invalid_info) {
+                (Some(meta), Some(info)) => (meta, info),
+                _ => return Ok(None),
+            },
         };
         if include_hashes {
-            let Some(meta) = best_meta.as_ref() else {
-                return Ok(None);
-            };
             winner.block_hashes = self
                 .store
-                .resolve_file_block_hashes(meta)
+                .resolve_file_block_hashes(&meta)
                 .map_err(|err| format!("load block hashes for {}/{}: {err}", folder, path))?;
         }
         Ok(Some(winner))
@@ -1096,6 +1107,9 @@ impl Db for WalFreeDb {
 
         let mut need = Vec::new();
         self.for_each_global_winner(folder, true, |global| {
+            if global.ignored || (global.local_flags & FLAG_LOCAL_INVALID != 0) {
+                return Ok(true);
+            }
             let local = self.get_device_file_light(folder, device, &global.path);
             if requires_update(&global, local.as_ref()) {
                 need.push(global);
@@ -1317,6 +1331,9 @@ impl Db for WalFreeDb {
             ..Counts::default()
         };
         self.for_each_global_winner(folder, false, |global| {
+            if global.ignored || (global.local_flags & FLAG_LOCAL_INVALID != 0) {
+                return Ok(true);
+            }
             add_file_to_counts(&mut counts, &global);
             Ok(true)
         })?;
@@ -1355,6 +1372,9 @@ impl Db for WalFreeDb {
             ..Counts::default()
         };
         self.for_each_global_winner(folder, true, |global| {
+            if global.ignored || (global.local_flags & FLAG_LOCAL_INVALID != 0) {
+                return Ok(true);
+            }
             let local = self.get_device_file_light(folder, device, &global.path);
             if requires_update(&global, local.as_ref()) {
                 add_file_to_counts(&mut counts, &global);
@@ -1687,11 +1707,15 @@ fn best_global_candidate(
 ) -> Option<(StoreFileMetadata, FileInfo)> {
     let mut best_meta: Option<StoreFileMetadata> = None;
     let mut best_info: Option<FileInfo> = None;
+    let mut first_invalid: Option<(StoreFileMetadata, FileInfo)> = None;
     for meta in candidates {
+        let candidate = store_to_file_info_without_blocks(&meta);
         if meta.ignored || (meta.local_flags & FLAG_LOCAL_INVALID != 0) {
+            if first_invalid.is_none() {
+                first_invalid = Some((meta, candidate));
+            }
             continue;
         }
-        let candidate = store_to_file_info_without_blocks(&meta);
         let use_candidate = match best_info.as_ref() {
             Some(current) => prefer_global(&candidate, current),
             None => true,
@@ -1703,7 +1727,7 @@ fn best_global_candidate(
     }
     match (best_meta, best_info) {
         (Some(meta), Some(info)) => Some((meta, info)),
-        _ => None,
+        _ => first_invalid,
     }
 }
 
@@ -1711,7 +1735,9 @@ fn requires_update(global: &FileInfo, local: Option<&FileInfo>) -> bool {
     match local {
         Some(current) => {
             if global.deleted {
-                return !current.deleted;
+                return !current.deleted
+                    && !current.ignored
+                    && (current.local_flags & FLAG_LOCAL_INVALID == 0);
             }
             if current.deleted {
                 return true;
@@ -1936,7 +1962,7 @@ mod tests {
 
         let mut winner = file("same.txt", 5, 100);
         winner.modified_ns = 500;
-        winner.local_flags = FLAG_LOCAL_RECEIVE_ONLY;
+        winner.local_flags = FLAG_LOCAL_NEEDED;
         db.update("default", "dev-a", vec![winner])
             .expect("update winner");
 
@@ -2037,6 +2063,14 @@ mod tests {
         let local_live = file("same.txt", 1, 10);
         assert!(requires_update(&global_deleted, Some(&local_live)));
 
+        let mut local_receive_only = local_live.clone();
+        local_receive_only.local_flags = FLAG_LOCAL_RECEIVE_ONLY;
+        assert!(!requires_update(&global_deleted, Some(&local_receive_only)));
+
+        let mut local_ignored = local_live.clone();
+        local_ignored.ignored = true;
+        assert!(!requires_update(&global_deleted, Some(&local_ignored)));
+
         let mut local_same_version = file("same.txt", 1, 10);
         local_same_version.modified_ns = global_live.modified_ns;
         local_same_version.local_flags = global_live.local_flags;
@@ -2048,6 +2082,14 @@ mod tests {
             &global_live,
             Some(&local_different_version)
         ));
+    }
+
+    #[test]
+    fn receive_only_is_treated_as_invalid() {
+        let mut meta = file_metadata_from_info(file("same.txt", 1, 10));
+        assert!(!meta.is_invalid());
+        meta.local_flags = FLAG_LOCAL_RECEIVE_ONLY;
+        assert!(meta.is_invalid());
     }
 
     #[test]
@@ -2354,6 +2396,13 @@ mod tests {
             .and_then(collect_stream)
             .expect("collect need");
         assert!(need.is_empty());
+
+        let winner = db
+            .get_global_file("default", "bad.txt")
+            .expect("global lookup")
+            .expect("invalid winner fallback");
+        assert_eq!(winner.path, "bad.txt");
+        assert_ne!(winner.local_flags & FLAG_LOCAL_INVALID, 0);
     }
 
     #[test]

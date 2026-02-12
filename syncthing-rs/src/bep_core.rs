@@ -3,6 +3,7 @@
 
 use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub(crate) const CompressionNever: i32 = 0;
 pub(crate) const CompressionAlways: i32 = 1;
@@ -406,7 +407,15 @@ pub(crate) fn apply_index_update(index: &mut Index, update: &IndexUpdate) -> Res
         return Err("index update previous sequence mismatch".to_string());
     }
 
-    index.Files = update.Files.clone();
+    let mut merged = index
+        .Files
+        .iter()
+        .map(|file| (file.Name.clone(), file.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for file in &update.Files {
+        merged.insert(file.Name.clone(), file.clone());
+    }
+    index.Files = merged.into_values().collect();
     index.LastSequence = update.LastSequence;
     Ok(())
 }
@@ -455,7 +464,12 @@ mod tests {
         let mut index = Index {
             Folder: "docs".to_string(),
             LastSequence: 3,
-            Files: Vec::new(),
+            Files: vec![FileInfo {
+                Name: "old.txt".to_string(),
+                Type: FileInfoTypeFile,
+                Size: 7,
+                ..Default::default()
+            }],
         };
         let update = IndexUpdate {
             Folder: "docs".to_string(),
@@ -471,6 +485,8 @@ mod tests {
 
         apply_index_update(&mut index, &update).expect("update");
         assert_eq!(index.LastSequence, 4);
-        assert_eq!(index.Files.len(), 1);
+        assert_eq!(index.Files.len(), 2);
+        assert!(index.Files.iter().any(|f| f.Name == "old.txt"));
+        assert!(index.Files.iter().any(|f| f.Name == "a.txt"));
     }
 }

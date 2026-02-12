@@ -1008,7 +1008,10 @@ impl Db for WalFreeDb {
                         )));
                     }
                 };
-                if hashes.iter().any(|h| h.as_bytes() == target.as_slice()) {
+                if hashes
+                    .iter()
+                    .any(|h| hash_matches_target(h, target.as_slice()))
+                {
                     return Some(Ok(file_metadata_from_info(
                         store_to_file_info_without_blocks(&meta),
                     )));
@@ -1145,7 +1148,7 @@ impl Db for WalFreeDb {
                     .iter()
                     .enumerate()
                     .filter_map(|(block_idx, block_hash)| {
-                        if block_hash.as_bytes() != target.as_slice() {
+                        if !hash_matches_target(block_hash, target.as_slice()) {
                             return None;
                         }
                         const BLOCK_SIZE: i64 = 128 * 1024;
@@ -1579,6 +1582,31 @@ fn normalize_lookup_path(path: &str) -> String {
     {
         path.to_string()
     }
+}
+
+fn hash_matches_target(stored: &str, target: &[u8]) -> bool {
+    if stored.as_bytes() == target {
+        return true;
+    }
+    decode_hex(stored)
+        .map(|decoded| decoded.as_slice() == target)
+        .unwrap_or(false)
+}
+
+fn decode_hex(input: &str) -> Option<Vec<u8>> {
+    if input.len() % 2 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(input.len() / 2);
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let hi = (bytes[i] as char).to_digit(16)? as u8;
+        let lo = (bytes[i + 1] as char).to_digit(16)? as u8;
+        out.push((hi << 4) | lo);
+        i += 2;
+    }
+    Some(out)
 }
 
 fn runtime_metadata_path(root: &PathBuf) -> PathBuf {
@@ -2274,6 +2302,17 @@ mod tests {
             .and_then(collect_stream)
             .expect("local files with hash");
         assert!(files.is_empty());
+
+        let mut hex = file("hex.txt", 2, 7);
+        hex.block_hashes = vec!["ff".to_string()];
+        db.update("default", "local", vec![hex])
+            .expect("local hex update");
+        let hex_files = db
+            .all_local_files_with_blocks_hash("default", &[0xFF])
+            .and_then(collect_stream)
+            .expect("local hex files with hash");
+        assert_eq!(hex_files.len(), 1);
+        assert_eq!(hex_files[0].name, "hex.txt");
 
         let blocks = db
             .all_local_blocks_with_hash("default", b"h2")

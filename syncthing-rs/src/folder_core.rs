@@ -7,7 +7,7 @@ use crate::db::{self, Db};
 use crate::folder_modes::{mode_actions, FolderMode};
 use crate::store::compare_path_order;
 use crate::walker::{walk_deterministic, WalkConfig};
-use crc32fast::Hasher;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
@@ -1661,9 +1661,9 @@ fn hash_file_blocks(path: &Path) -> Result<Vec<String>, String> {
         if read == 0 {
             break;
         }
-        let mut hasher = Hasher::new();
+        let mut hasher = Sha256::new();
         hasher.update(&buf[..read]);
-        hashes.push(format!("{:08x}", hasher.finalize()));
+        hashes.push(format!("{:x}", hasher.finalize()));
     }
     Ok(hashes)
 }
@@ -3593,6 +3593,27 @@ mod tests {
 
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(db_root);
+    }
+
+    #[test]
+    fn scan_uses_sha256_block_hashes() {
+        let root = temp_root("scan-sha256-block-hashes");
+        fs::write(root.join("a.txt"), b"hello-world").expect("write a.txt");
+
+        let db = Arc::new(RwLock::new(db::WalFreeDb::default()));
+        let mut f = newFolder(scan_cfg(&root), db.clone());
+        f.Scan(&[]).expect("scan");
+
+        let entry = db
+            .read()
+            .expect("db lock")
+            .get_device_file("default", "local", "a.txt")
+            .expect("lookup")
+            .expect("entry");
+        assert!(!entry.block_hashes.is_empty());
+        assert_eq!(entry.block_hashes[0].len(), 64);
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

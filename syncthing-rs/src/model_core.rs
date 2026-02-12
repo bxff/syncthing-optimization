@@ -885,13 +885,13 @@ impl model {
             .CurrentFolderFile(folder_id, path)
             .or_else(|| self.CurrentGlobalFile(folder_id, path));
         let Some(info) = info else {
-            return true;
+            return false;
         };
         let index = (offset / BEP_REQUEST_BLOCK_SIZE) as usize;
         info.block_hashes
             .get(index)
             .map(|candidate| candidate == hash)
-            .unwrap_or(true)
+            .unwrap_or(false)
     }
 
     fn request_permitted(&self, device: &str, folder: &str, name: &str) -> bool {

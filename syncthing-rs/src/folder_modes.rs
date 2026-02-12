@@ -18,10 +18,10 @@ pub(crate) struct FolderModeActions {
 impl FolderMode {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
-            Self::SendReceive => "sendreceive",
+            Self::SendReceive => "sendrecv",
             Self::SendOnly => "sendonly",
-            Self::ReceiveOnly => "receiveonly",
-            Self::ReceiveEncrypted => "receiveencrypted",
+            Self::ReceiveOnly => "recvonly",
+            Self::ReceiveEncrypted => "recvenc",
         }
     }
 }
@@ -37,7 +37,7 @@ pub(crate) fn mode_actions(mode: FolderMode) -> FolderModeActions {
         },
         FolderMode::SendOnly => FolderModeActions {
             mode,
-            pipeline: vec!["scan", "index", "pull_metadata", "push"],
+            pipeline: vec!["scan", "index", "push"],
             may_push: true,
             requires_local_revert: false,
             encrypted_index: false,
@@ -53,7 +53,7 @@ pub(crate) fn mode_actions(mode: FolderMode) -> FolderModeActions {
             mode,
             pipeline: vec!["scan", "index_encrypted", "pull_encrypted"],
             may_push: false,
-            requires_local_revert: true,
+            requires_local_revert: false,
             encrypted_index: true,
         },
     }
@@ -97,23 +97,20 @@ mod tests {
         let actions = mode_actions(FolderMode::SendOnly);
         assert!(actions.may_push);
         assert!(!actions.requires_local_revert);
-        assert_eq!(
-            actions.pipeline,
-            vec!["scan", "index", "pull_metadata", "push"]
-        );
+        assert_eq!(actions.pipeline, vec!["scan", "index", "push"]);
     }
 
     #[test]
     fn canonical_mode_names_match_go_tokens() {
-        assert_eq!(FolderMode::SendReceive.as_str(), "sendreceive");
+        assert_eq!(FolderMode::SendReceive.as_str(), "sendrecv");
         assert_eq!(FolderMode::SendOnly.as_str(), "sendonly");
-        assert_eq!(FolderMode::ReceiveOnly.as_str(), "receiveonly");
-        assert_eq!(FolderMode::ReceiveEncrypted.as_str(), "receiveencrypted");
+        assert_eq!(FolderMode::ReceiveOnly.as_str(), "recvonly");
+        assert_eq!(FolderMode::ReceiveEncrypted.as_str(), "recvenc");
     }
 
     #[test]
-    fn receive_encrypted_requires_local_revert() {
+    fn receive_encrypted_does_not_require_local_revert() {
         let actions = mode_actions(FolderMode::ReceiveEncrypted);
-        assert!(actions.requires_local_revert);
+        assert!(!actions.requires_local_revert);
     }
 }

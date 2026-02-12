@@ -36,6 +36,12 @@ impl IndexEngine {
         }
 
         let next = self.folder_sequence.entry(folder.to_string()).or_insert(0);
+        if update.sequence <= *next {
+            return Err(format!(
+                "sequence {} does not advance folder sequence {}",
+                update.sequence, *next
+            ));
+        }
         *next = update.sequence;
 
         let key = (folder.to_string(), update.path.clone());
@@ -95,33 +101,20 @@ mod tests {
     }
 
     #[test]
-    fn accepts_out_of_order_folder_sequence_and_applies_last_update() {
+    fn rejects_out_of_order_folder_sequence_updates() {
         let mut idx = IndexEngine::new();
-        idx.apply_update("default", update("a.txt", 1, false))
-            .expect("apply 1");
-        idx.apply_update("default", update("b.txt", 3, false))
+        idx.apply_update("default", update("c.txt", 3, false))
             .expect("apply b");
-        idx.apply_update("default", update("a.txt", 2, true))
-            .expect("out of order a");
 
-        assert_eq!(idx.folder_sequence("default"), 2);
-        let files = idx.ordered_files(Some("default"));
-        let a = files
-            .iter()
-            .find(|f| f.file.path == "a.txt")
-            .expect("a entry");
-        assert_eq!(a.file.sequence, 2);
-        assert!(a.file.deleted);
+        let err = idx
+            .apply_update("default", update("a.txt", 1, false))
+            .expect_err("must reject out-of-order update");
+        assert!(err.contains("does not advance"));
 
-        idx.apply_update("default", update("a.txt", 1, false))
-            .expect("replay older update");
+        assert_eq!(idx.folder_sequence("default"), 3);
         let files = idx.ordered_files(Some("default"));
-        let a = files
-            .iter()
-            .find(|f| f.file.path == "a.txt")
-            .expect("a entry after replay");
-        assert_eq!(a.file.sequence, 1);
-        assert!(!a.file.deleted);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].file.path, "c.txt");
     }
 
     #[test]

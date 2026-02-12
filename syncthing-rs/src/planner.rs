@@ -29,12 +29,16 @@ pub(crate) fn compute_need(local: &[VersionedFile], remote: &[VersionedFile]) ->
     let mut stale_deletes = Vec::new();
 
     for r in remote {
+        if r.ignored {
+            continue;
+        }
+
         let local_entry = local_by_path.get(r.path.as_str()).copied();
+        let local_sequence = local_entry.map(|f| f.sequence).unwrap_or(0);
 
         if r.deleted {
             if let Some(local_file) = local_entry {
                 if !local_file.deleted {
-                    need_paths.push(r.path.clone());
                     if r.sequence >= local_file.sequence {
                         stale_deletes.push(r.path.clone());
                     }
@@ -43,19 +47,13 @@ pub(crate) fn compute_need(local: &[VersionedFile], remote: &[VersionedFile]) ->
             continue;
         }
 
-        let needs_update = match local_entry {
-            Some(local_file) => local_file.deleted || local_file.sequence != r.sequence,
-            None => true,
-        };
-        if needs_update {
+        if r.sequence > local_sequence {
             need_paths.push(r.path.clone());
         }
     }
 
     need_paths.sort();
-    need_paths.dedup();
     stale_deletes.sort();
-    stale_deletes.dedup();
 
     NeedPlan {
         need_paths,
@@ -126,17 +124,8 @@ mod tests {
         ];
 
         let plan = compute_need(&local, &remote);
-        assert_eq!(plan.need_paths, vec!["a.txt", "d.txt", "e.txt"]);
+        assert_eq!(plan.need_paths, vec!["a.txt", "d.txt"]);
         assert_eq!(plan.stale_deletes, vec!["e.txt"]);
-    }
-
-    #[test]
-    fn compute_need_does_not_drop_remote_ignored_entries() {
-        let local = vec![v("a.txt", 1, false, false)];
-        let remote = vec![v("a.txt", 2, false, true)];
-
-        let plan = compute_need(&local, &remote);
-        assert_eq!(plan.need_paths, vec!["a.txt"]);
     }
 
     #[test]

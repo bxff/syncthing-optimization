@@ -28,13 +28,13 @@ pub(crate) const ErrMarkerMissing: &str = ERR_MARKER_MISSING;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum FolderType {
-    #[serde(rename = "sendreceive", alias = "sendrecv", alias = "readwrite")]
+    #[serde(rename = "sendrecv", alias = "sendreceive", alias = "readwrite")]
     SendReceive,
     #[serde(rename = "sendonly", alias = "readonly")]
     SendOnly,
-    #[serde(rename = "receiveonly", alias = "recvonly")]
+    #[serde(rename = "recvonly", alias = "receiveonly")]
     ReceiveOnly,
-    #[serde(rename = "receiveencrypted", alias = "recvenc")]
+    #[serde(rename = "recvenc", alias = "receiveencrypted")]
     ReceiveEncrypted,
 }
 
@@ -306,10 +306,10 @@ impl Default for FolderConfiguration {
 impl FolderType {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
-            Self::SendReceive => "sendreceive",
+            Self::SendReceive => "sendrecv",
             Self::SendOnly => "sendonly",
-            Self::ReceiveOnly => "receiveonly",
-            Self::ReceiveEncrypted => "receiveencrypted",
+            Self::ReceiveOnly => "recvonly",
+            Self::ReceiveEncrypted => "recvenc",
         }
     }
 
@@ -990,13 +990,15 @@ mod tests {
 
     #[test]
     fn folder_type_and_orders_accept_go_tokens_and_aliases() {
-        let canonical: FolderType = serde_json::from_str("\"sendreceive\"").expect("canonical");
+        let canonical: FolderType = serde_json::from_str("\"sendrecv\"").expect("canonical");
         let alias: FolderType = serde_json::from_str("\"sendrecv\"").expect("alias");
+        let alias_long: FolderType = serde_json::from_str("\"sendreceive\"").expect("long alias");
         let legacy: FolderType = serde_json::from_str("\"readwrite\"").expect("legacy");
         assert_eq!(canonical, FolderType::SendReceive);
         assert_eq!(alias, FolderType::SendReceive);
+        assert_eq!(alias_long, FolderType::SendReceive);
         assert_eq!(legacy, FolderType::SendReceive);
-        assert_eq!(FolderType::ReceiveOnly.as_str(), "receiveonly");
+        assert_eq!(FolderType::ReceiveOnly.as_str(), "recvonly");
 
         let pull: PullOrder = serde_json::from_str("\"smallestFirst\"").expect("pull order");
         assert_eq!(pull, PullOrder::SmallestFirst);

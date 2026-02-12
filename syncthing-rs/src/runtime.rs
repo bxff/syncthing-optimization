@@ -946,10 +946,10 @@ fn parse_xml_bool(value: &str) -> bool {
 
 fn parse_folder_type_attr(value: &str) -> Option<FolderType> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "sendreceive" => Some(FolderType::SendReceive),
+        "sendreceive" | "sendrecv" => Some(FolderType::SendReceive),
         "sendonly" => Some(FolderType::SendOnly),
-        "receiveonly" => Some(FolderType::ReceiveOnly),
-        "receiveencrypted" => Some(FolderType::ReceiveEncrypted),
+        "receiveonly" | "recvonly" => Some(FolderType::ReceiveOnly),
+        "receiveencrypted" | "recvenc" => Some(FolderType::ReceiveEncrypted),
         _ => None,
     }
 }
@@ -2623,7 +2623,13 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             let cursor = params.get("cursor").map(|v| v.as_str());
             let limit = parse_limit(&params, "limit", 2000, 10_000);
             match browse_local_files(runtime, folder, cursor, limit) {
-                Ok(payload) => ApiReply::json(200, payload),
+                Ok(payload) => ApiReply::json(
+                    200,
+                    payload
+                        .get("items")
+                        .cloned()
+                        .unwrap_or_else(|| Value::Array(Vec::new())),
+                ),
                 Err(ApiFolderStatusError::MissingFolder) => ApiReply::json(
                     404,
                     json!({ "error": "folder not found", "folder": folder }),
@@ -5211,7 +5217,7 @@ fn required_api_probe_keys(endpoint: &str) -> &'static [&'static str] {
         "GET /rest/db/localchanged" => &["files", "page", "perpage"],
         "GET /rest/db/need" => &["progress", "queued", "rest", "page", "perpage"],
         "GET /rest/db/remoteneed" => &["files", "page", "perpage"],
-        "GET /rest/db/browse" => &["folder", "limit", "items"],
+        "GET /rest/db/browse" => &[],
         "POST /rest/db/bringtofront" => &["folder", "action", "ok"],
         "POST /rest/db/override" => &["folder", "action", "ok"],
         "POST /rest/db/revert" => &["folder", "action", "ok"],
@@ -6248,20 +6254,16 @@ mod tests {
         );
         assert_eq!(first.status_code, StatusCode(200));
         let first_payload: Value = serde_json::from_slice(&first.body).expect("decode json");
-        assert_eq!(first_payload["items"][0]["path"], "a.txt");
-        let next = first_payload["nextCursor"]
-            .as_str()
-            .expect("next cursor")
-            .to_string();
+        assert_eq!(first_payload[0]["path"], "a.txt");
 
         let second = build_api_response(
             &Method::Get,
-            &format!("/rest/db/browse?folder=default&limit=1&cursor={next}"),
+            "/rest/db/browse?folder=default&limit=1&cursor=a.txt",
             &runtime,
         );
         assert_eq!(second.status_code, StatusCode(200));
         let second_payload: Value = serde_json::from_slice(&second.body).expect("decode json");
-        assert_eq!(second_payload["items"][0]["path"], "b.txt");
+        assert_eq!(second_payload[0]["path"], "b.txt");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -6880,14 +6882,14 @@ mod tests {
         let add_payload: Value = serde_json::from_slice(&add.body).expect("decode json");
         assert_eq!(add_payload["added"], true);
         assert_eq!(add_payload["folder"]["id"], "docs");
-        assert_eq!(add_payload["folder"]["folderType"], "receiveonly");
+        assert_eq!(add_payload["folder"]["folderType"], "recvonly");
 
         let list = build_api_response(&Method::Get, "/rest/system/config/folders", &runtime);
         assert_eq!(list.status_code, StatusCode(200));
         let list_payload: Value = serde_json::from_slice(&list.body).expect("decode json");
         assert_eq!(list_payload["count"], 1);
         assert_eq!(list_payload["folders"][0]["id"], "docs");
-        assert_eq!(list_payload["folders"][0]["folderType"], "receiveonly");
+        assert_eq!(list_payload["folders"][0]["folderType"], "recvonly");
         assert_eq!(list_payload["folders"][0]["memoryPolicy"], "throttle");
 
         let restart = build_api_response(

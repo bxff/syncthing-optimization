@@ -6,6 +6,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
+use unicode_normalization::UnicodeNormalization;
 
 const LOG_RECORD_MAX_BYTES: u32 = 32 * 1024 * 1024;
 pub(crate) const JOURNAL_FILE_NAME: &str = "events.log";
@@ -273,8 +274,9 @@ impl Store {
                 ),
             ));
         }
-        self.append_op(&JournalOp::Upsert(file.clone()))?;
+        let persisted = file.clone();
         file.block_hashes = spill_block_hashes(&self.block_blob_path, &file.block_hashes)?;
+        self.append_op(&JournalOp::Upsert(persisted))?;
         self.apply_upsert(key, stored_from_file(&file));
         Ok(())
     }
@@ -1476,7 +1478,9 @@ pub(crate) fn decode_path_key(path_key: &str) -> Option<String> {
 }
 
 pub(crate) fn normalize_path(path: &str) -> String {
-    path.replace('\\', "/")
+    path.nfc()
+        .collect::<String>()
+        .replace('\\', "/")
         .trim_matches('/')
         .split('/')
         .filter(|segment| !segment.is_empty())
@@ -2537,6 +2541,39 @@ mod tests {
             .get_file("alpha", "local", "custom.type")
             .expect("roundtrip file");
         assert_eq!(roundtrip.file_type, "special");
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn normalize_path_applies_unicode_nfc() {
+        assert_eq!(normalize_path("Cafe\u{301}/x"), "Caf\u{00E9}/x");
+    }
+
+    #[test]
+    fn failed_block_spill_does_not_append_journal() {
+        let root = temp_root("spill-failure-no-journal-append");
+        let cfg = StoreConfig::new(&root).with_memory_cap_mb(50);
+        let mut store = Store::open(cfg).expect("open");
+
+        let _ = fs::remove_file(&store.block_blob_path);
+        fs::create_dir_all(&store.block_blob_path).expect("block blob as dir");
+
+        let before = fs::metadata(store.journal_path())
+            .expect("journal metadata before")
+            .len();
+
+        let mut file = meta("alpha", "a.bin", 1);
+        file.block_hashes = vec!["h1".to_string()];
+        let err = store.upsert_file(file).expect_err("upsert should fail");
+        assert!(
+            err.to_string().contains("Is a directory") || err.to_string().contains("directory")
+        );
+
+        let after = fs::metadata(store.journal_path())
+            .expect("journal metadata after")
+            .len();
+        assert_eq!(before, after);
 
         fs::remove_dir_all(root).expect("cleanup");
     }

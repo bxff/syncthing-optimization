@@ -119,7 +119,9 @@ pub(crate) fn run_message_exchange(messages: &[BepMessage]) -> Result<Vec<&'stat
                 pending_requests.insert(*id);
             }
             BepMessage::Response { id, .. } => {
-                pending_requests.remove(id);
+                if !pending_requests.remove(id) {
+                    return Err(format!("response {id} received without pending request"));
+                }
             }
             _ => {}
         }
@@ -189,23 +191,23 @@ mod tests {
     }
 
     #[test]
-    fn response_id_mismatch_is_ignored() {
+    fn response_id_mismatch_fails() {
         let mut messages = default_exchange();
         for msg in &mut messages {
             if let BepMessage::Response { id, .. } = msg {
                 *id = 999;
             }
         }
-        let trace = run_message_exchange(&messages).expect("mismatched response should be ignored");
-        assert!(trace.contains(&"response"));
+        let err = run_message_exchange(&messages).expect_err("mismatched response should fail");
+        assert!(err.contains("without pending request"));
     }
 
     #[test]
-    fn response_without_pending_request_is_ignored() {
+    fn response_without_pending_request_fails() {
         let mut messages = default_exchange();
         messages.retain(|message| !matches!(message, BepMessage::Request { .. }));
-        let trace = run_message_exchange(&messages).expect("orphan response should be ignored");
-        assert!(trace.contains(&"response"));
+        let err = run_message_exchange(&messages).expect_err("orphan response should fail");
+        assert!(err.contains("without pending request"));
     }
 
     #[test]

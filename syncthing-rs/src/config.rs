@@ -597,11 +597,12 @@ impl FolderConfiguration {
 
     pub(crate) fn unmarshal_xml(data: &str) -> Result<Self, String> {
         // Minimal XML parsing for parity harness purposes.
+        let source = extract_xml_opening_tag(data, "folder").unwrap_or(data);
         let mut cfg = FolderConfiguration::default();
-        cfg.id = extract_xml_attr(data, "id").unwrap_or_default();
-        cfg.label = extract_xml_attr(data, "label").unwrap_or_default();
-        cfg.path = extract_xml_attr(data, "path").unwrap_or_default();
-        cfg.folder_type = match extract_xml_attr(data, "type").as_deref() {
+        cfg.id = extract_xml_attr(source, "id").unwrap_or_default();
+        cfg.label = extract_xml_attr(source, "label").unwrap_or_default();
+        cfg.path = extract_xml_attr(source, "path").unwrap_or_default();
+        cfg.folder_type = match extract_xml_attr(source, "type").as_deref() {
             Some("sendonly") => FolderType::SendOnly,
             Some("receiveonly") | Some("recvonly") => FolderType::ReceiveOnly,
             Some("receiveencrypted") | Some("recvenc") => FolderType::ReceiveEncrypted,
@@ -651,6 +652,14 @@ fn extract_xml_attr(xml: &str, attr: &str) -> Option<String> {
     let rest = &xml[start..];
     let end = rest.find('"')?;
     Some(rest[..end].to_string())
+}
+
+fn extract_xml_opening_tag<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
+    let needle = format!("<{tag}");
+    let start = xml.find(&needle)?;
+    let rest = &xml[start..];
+    let end = rest.find('>')?;
+    Some(&rest[..=end])
 }
 
 fn wildcard_match(pattern: &str, value: &str) -> bool {
@@ -932,6 +941,14 @@ mod tests {
         )
         .expect("xml sendonly parse");
         assert_eq!(xml_send_only.folder_type, FolderType::SendOnly);
+
+        let xml_nested = FolderConfiguration::unmarshal_xml(
+            r#"<config id="outer" path="/tmp/outer"><folder id="inner" label="Inner" path="/tmp/inner" type="receiveonly"/></config>"#,
+        )
+        .expect("xml nested parse");
+        assert_eq!(xml_nested.id, "inner");
+        assert_eq!(xml_nested.path, "/tmp/inner");
+        assert_eq!(xml_nested.folder_type, FolderType::ReceiveOnly);
     }
 
     #[test]

@@ -1,9 +1,9 @@
 use crate::folder_modes::FolderMode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{hash_map::DefaultHasher, BTreeMap};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -14,7 +14,8 @@ pub(crate) const MAX_CONCURRENT_WRITES_LIMIT: usize = 256;
 
 pub(crate) const ERR_PATH_NOT_DIRECTORY: &str = "folder path not a directory";
 pub(crate) const ERR_PATH_MISSING: &str = "folder path missing";
-pub(crate) const ERR_MARKER_MISSING: &str = "folder marker missing";
+pub(crate) const ERR_MARKER_MISSING: &str =
+    "folder marker missing (this indicates potential data loss, search docs/forum to get information about how to proceed)";
 
 // Compatibility aliases matching Go surface names used by parity guardrails.
 pub(crate) const DefaultMarkerName: &str = DEFAULT_MARKER_NAME;
@@ -384,10 +385,11 @@ impl FolderConfiguration {
     }
 
     pub(crate) fn marker_filename(&self) -> String {
-        let mut hasher = DefaultHasher::new();
-        self.id.hash(&mut hasher);
-        let h = hasher.finish();
-        format!("syncthing-folder-{h:06x}.txt")
+        let digest = Sha256::digest(self.id.as_bytes());
+        format!(
+            "syncthing-folder-{:02x}{:02x}{:02x}.txt",
+            digest[0], digest[1], digest[2]
+        )
     }
 
     pub(crate) fn marker_contents(&self) -> Vec<u8> {
@@ -432,11 +434,20 @@ impl FolderConfiguration {
     }
 
     pub(crate) fn create_marker(&self) -> Result<(), String> {
+        match self.check_path() {
+            Ok(()) => return Ok(()),
+            Err(err) if err == ERR_MARKER_MISSING => {}
+            Err(err) => return Err(err),
+        }
         if self.marker_name != DEFAULT_MARKER_NAME {
             return Ok(());
         }
         let marker_dir = Path::new(&self.path).join(DEFAULT_MARKER_NAME);
-        fs::create_dir_all(&marker_dir).map_err(|err| format!("create marker dir: {err}"))?;
+        match fs::create_dir(&marker_dir) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(format!("create marker dir: {err}")),
+        }
         let marker_file = marker_dir.join(self.marker_filename());
         fs::write(marker_file, self.marker_contents()).map_err(|err| err.to_string())
     }
@@ -786,6 +797,32 @@ mod tests {
         cfg.remove_marker().expect("remove marker");
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn marker_filename_uses_sha256_prefix() {
+        let mut cfg = FolderConfiguration::default();
+        cfg.id = "abc".to_string();
+        assert_eq!(cfg.marker_filename(), "syncthing-folder-ba7816.txt");
+    }
+
+    #[test]
+    fn create_marker_requires_existing_root_path() {
+        let root = std::env::temp_dir().join(format!(
+            "syncthing-rs-config-missing-root-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let mut cfg = FolderConfiguration::default();
+        cfg.id = "abc".to_string();
+        cfg.path = root.to_string_lossy().to_string();
+        cfg.marker_name = DEFAULT_MARKER_NAME.to_string();
+
+        let err = cfg.create_marker().expect_err("missing root should fail");
+        assert_eq!(err, ERR_PATH_MISSING);
     }
 
     #[test]

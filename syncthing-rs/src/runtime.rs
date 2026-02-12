@@ -3435,7 +3435,7 @@ fn folder_completion(
     Ok(json!({
         "folder": folder,
         "device": device,
-        "completion": completion.CompletionPct,
+        "completion": completion.completion_float(),
         "completionPct": completion.CompletionPct,
         "needItems": completion.NeedItems,
         "needDeletes": completion.NeedDeletes,

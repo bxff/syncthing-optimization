@@ -90,6 +90,18 @@ pub(crate) struct FolderCompletion {
 }
 
 impl FolderCompletion {
+    pub(crate) fn completion_float(&self) -> f64 {
+        if self.GlobalBytes <= 0 {
+            return 100.0;
+        }
+        let need_ratio = self.NeedBytes as f64 / self.GlobalBytes as f64;
+        let pct = (100_f64 * (1_f64 - need_ratio)).clamp(0_f64, 100_f64);
+        if self.NeedBytes == 0 && self.NeedDeletes > 0 {
+            return 95.0;
+        }
+        pct
+    }
+
     pub(crate) fn add(&mut self, other: &FolderCompletion) {
         self.NeedItems += other.NeedItems;
         self.NeedDeletes += other.NeedDeletes;
@@ -100,21 +112,12 @@ impl FolderCompletion {
     }
 
     pub(crate) fn setCompletionPct(&mut self) {
-        if self.GlobalBytes <= 0 {
-            self.CompletionPct = 100;
-            return;
-        }
-        let need_ratio = self.NeedBytes as f64 / self.GlobalBytes as f64;
-        let pct = (100_f64 * (1_f64 - need_ratio)).clamp(0_f64, 100_f64);
-        self.CompletionPct = pct as i32;
-        if self.NeedBytes == 0 && self.NeedDeletes > 0 {
-            self.CompletionPct = 95;
-        }
+        self.CompletionPct = self.completion_float() as i32;
     }
 
     pub(crate) fn Map(&self) -> BTreeMap<&'static str, Value> {
         BTreeMap::from([
-            ("completion", Value::from(self.CompletionPct as f64)),
+            ("completion", Value::from(self.completion_float())),
             ("completionPct", Value::from(self.CompletionPct)),
             ("needItems", Value::from(self.NeedItems)),
             ("needDeletes", Value::from(self.NeedDeletes)),
@@ -1965,6 +1968,16 @@ mod tests {
         let mapped = c.Map();
         assert_eq!(mapped.get("completion"), Some(&Value::from(80.0)));
         assert_eq!(mapped.get("completionPct"), Some(&Value::from(80)));
+
+        let mut fractional = FolderCompletion {
+            NeedBytes: 1,
+            GlobalBytes: 3,
+            ..Default::default()
+        };
+        fractional.setCompletionPct();
+        let completion = fractional.completion_float();
+        assert!(completion > 66.6 && completion < 66.7);
+        assert_eq!(fractional.CompletionPct, 66);
     }
 
     #[test]

@@ -6,6 +6,7 @@ use crate::bep_core::*;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::sync::OnceLock;
@@ -476,7 +477,25 @@ impl FileInfo {
     }
 
     pub(crate) fn InConflictWith(&self, other: &Self) -> bool {
-        self.Name == other.Name && self.VersionHash != other.VersionHash
+        if self.Name != other.Name {
+            return false;
+        }
+        match compare_vectors(&self.Version, &other.Version) {
+            VectorRelation::Less | VectorRelation::Greater | VectorRelation::Equal => false,
+            VectorRelation::Concurrent => {
+                if !self.PreviousBlocksHash.is_empty()
+                    && self.PreviousBlocksHash == other.BlocksHash
+                {
+                    return false;
+                }
+                if !other.PreviousBlocksHash.is_empty()
+                    && other.PreviousBlocksHash == self.BlocksHash
+                {
+                    return false;
+                }
+                true
+            }
+        }
     }
 
     pub(crate) fn InodeChangeTime(&self) -> i64 {
@@ -496,6 +515,15 @@ impl FileInfo {
     }
 
     pub(crate) fn IsEquivalentOptional(&self, other: &Self, cmp: &FileInfoComparison) -> bool {
+        if self.Name != other.Name
+            || self.Type != other.Type
+            || self.Deleted != other.Deleted
+            || self.Invalid != other.Invalid
+            || self.MustRescan()
+            || other.MustRescan()
+        {
+            return false;
+        }
         if !cmp.IgnorePerms && !PermsEqual(self, other) {
             return false;
         }
@@ -508,8 +536,17 @@ impl FileInfo {
         if !cmp.IgnoreFlags && self.LocalFlags != other.LocalFlags {
             return false;
         }
-        if !cmp.IgnoreBlocks && !blocksEqual(&self.Blocks, &other.Blocks) {
-            return false;
+        if self.IsSymlink() {
+            if self.SymlinkTarget != other.SymlinkTarget {
+                return false;
+            }
+        } else if self.Type == FileInfoTypeFile && !self.Deleted {
+            if self.Size != other.Size {
+                return false;
+            }
+            if !cmp.IgnoreBlocks && !blocksEqual(&self.Blocks, &other.Blocks) {
+                return false;
+            }
         }
         if !ModTimeEqual(self, other, cmp.ModTimeWindow) {
             return false;
@@ -566,6 +603,9 @@ impl FileInfo {
 
     pub(crate) fn SetDeleted(&mut self, deleted: bool) {
         self.Deleted = deleted;
+        if deleted {
+            self.setNoContent();
+        }
     }
 
     pub(crate) fn SetIgnored(&mut self, ignored: bool) {
@@ -590,8 +630,18 @@ impl FileInfo {
     }
 
     pub(crate) fn WinsConflict(&self, other: &Self) -> bool {
-        self.Sequence > other.Sequence
-            || (self.Sequence == other.Sequence && self.VersionHash > other.VersionHash)
+        if self.IsInvalid() != other.IsInvalid() {
+            return !self.IsInvalid();
+        }
+        if self.ModTime() != other.ModTime() {
+            return self.ModTime() > other.ModTime();
+        }
+        match compare_vectors(&self.Version, &other.Version) {
+            VectorRelation::Greater => true,
+            VectorRelation::Less => false,
+            VectorRelation::Equal => self.VersionHash >= other.VersionHash,
+            VectorRelation::Concurrent => self.VersionHash >= other.VersionHash,
+        }
     }
 
     pub(crate) fn isEquivalent(&self, other: &Self) -> bool {
@@ -610,6 +660,9 @@ impl FileInfo {
     pub(crate) fn setLocalFlags(&mut self, mask: u32, set: bool) {
         if set {
             self.LocalFlags |= mask;
+            if mask & (FlagLocalUnsupported | FlagLocalIgnored | FlagLocalMustRescan) != 0 {
+                self.setNoContent();
+            }
         } else {
             self.LocalFlags &= !mask;
         }
@@ -1239,7 +1292,47 @@ pub(crate) fn xattrsEqual(a: &XattrData, b: &XattrData) -> bool {
 }
 
 pub(crate) fn unixOwnershipEqual(a: &UnixData, b: &UnixData) -> bool {
-    a.Uid == b.Uid && a.Gid == b.Gid
+    (a.Uid == b.Uid && a.Gid == b.Gid)
+        || (!a.OwnerName.is_empty()
+            && !a.GroupName.is_empty()
+            && a.OwnerName == b.OwnerName
+            && a.GroupName == b.GroupName)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VectorRelation {
+    Less,
+    Equal,
+    Greater,
+    Concurrent,
+}
+
+fn compare_vectors(left: &Vector, right: &Vector) -> VectorRelation {
+    let mut right_by_id = BTreeMap::new();
+    for counter in &right.Counters {
+        right_by_id.insert(counter.Id, counter.Value);
+    }
+    let mut less = false;
+    let mut greater = false;
+    for counter in &left.Counters {
+        let rv = right_by_id.remove(&counter.Id).unwrap_or(0);
+        match counter.Value.cmp(&rv) {
+            Ordering::Less => less = true,
+            Ordering::Greater => greater = true,
+            Ordering::Equal => {}
+        }
+    }
+    for rv in right_by_id.values() {
+        if *rv > 0 {
+            less = true;
+        }
+    }
+    match (less, greater) {
+        (false, false) => VectorRelation::Equal,
+        (true, false) => VectorRelation::Less,
+        (false, true) => VectorRelation::Greater,
+        (true, true) => VectorRelation::Concurrent,
+    }
 }
 
 pub(crate) fn windowsOwnershipEqual(a: &WindowsData, b: &WindowsData) -> bool {
@@ -1583,5 +1676,55 @@ mod tests {
             ..Default::default()
         };
         assert!(a.IsEquivalentOptional(&b, &cmp));
+    }
+
+    #[test]
+    fn set_deleted_clears_content_payloads() {
+        let mut fi = FileInfo {
+            Name: "a.txt".to_string(),
+            Type: FileInfoTypeFile,
+            Size: 42,
+            Blocks: vec![BlockInfo {
+                Hash: vec![1, 2, 3],
+                Offset: 0,
+                Size: 3,
+            }],
+            BlocksHash: vec![9, 9, 9],
+            ..Default::default()
+        };
+        fi.SetDeleted(true);
+        assert!(fi.Deleted);
+        assert_eq!(fi.Size, 0);
+        assert!(fi.Blocks.is_empty());
+        assert!(fi.BlocksHash.is_empty());
+    }
+
+    #[test]
+    fn unix_ownership_allows_name_equivalence() {
+        let a = UnixData {
+            Uid: 1000,
+            Gid: 1000,
+            OwnerName: "alice".to_string(),
+            GroupName: "staff".to_string(),
+        };
+        let b = UnixData {
+            Uid: 2000,
+            Gid: 2000,
+            OwnerName: "alice".to_string(),
+            GroupName: "staff".to_string(),
+        };
+        assert!(unixOwnershipEqual(&a, &b));
+    }
+
+    #[test]
+    fn equivalent_optional_rejects_must_rescan_files() {
+        let mut a = FileInfo {
+            Name: "a.txt".to_string(),
+            ModifiedS: 1,
+            ..Default::default()
+        };
+        let b = a.clone();
+        a.SetMustRescan(true);
+        assert!(!a.IsEquivalentOptional(&b, &FileInfoComparison::default()));
     }
 }

@@ -2210,7 +2210,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             for (id, values) in &guard.deviceStatRefs {
                 devices.insert(id.clone(), json!(values));
             }
-            ApiReply::json(200, json!({"devices": devices}))
+            ApiReply::json(200, json!(devices))
         }
         "/rest/stats/folder" => {
             if method != &Method::Get {
@@ -2224,7 +2224,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             for id in guard.folderCfgs.keys() {
                 folders.insert(id.clone(), json!(guard.FolderStatistics(id)));
             }
-            ApiReply::json(200, json!({"folders": folders}))
+            ApiReply::json(200, json!(folders))
         }
         "/rest/svc/deviceid" => {
             if method != &Method::Get {
@@ -6965,6 +6965,37 @@ mod tests {
             payload["listenAddresses"],
             json!(["tcp://0.0.0.0:22000", "quic://0.0.0.0:22000"])
         );
+    }
+
+    #[test]
+    fn api_stats_endpoints_return_top_level_maps() {
+        let root = temp_root("api-stats-top-level");
+        let model = Arc::new(RwLock::new(NewModel()));
+        {
+            let mut guard = model.write().expect("lock");
+            guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+            guard.deviceStatRefs.insert(
+                "peer-a".to_string(),
+                BTreeMap::from([("seen".to_string(), 1)]),
+            );
+        }
+        let runtime = test_api_runtime(model, Vec::new(), 0);
+
+        let device_stats = build_api_response(&Method::Get, "/rest/stats/device", &runtime);
+        assert_eq!(device_stats.status_code, StatusCode(200));
+        let device_payload: Value =
+            serde_json::from_slice(&device_stats.body).expect("decode device stats");
+        assert!(device_payload.get("devices").is_none());
+        assert_eq!(device_payload["peer-a"]["seen"], 1);
+
+        let folder_stats = build_api_response(&Method::Get, "/rest/stats/folder", &runtime);
+        assert_eq!(folder_stats.status_code, StatusCode(200));
+        let folder_payload: Value =
+            serde_json::from_slice(&folder_stats.body).expect("decode folder stats");
+        assert!(folder_payload.get("folders").is_none());
+        assert!(folder_payload.get("default").is_some());
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

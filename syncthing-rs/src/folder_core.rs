@@ -1709,6 +1709,21 @@ fn apply_remote_file_to_disk(root: &Path, file: &db::FileInfo) -> Result<(), Str
 }
 
 fn safe_join_relative_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
+    safe_join_relative_path_impl(root, relative, false)
+}
+
+fn safe_join_relative_path_allow_leaf_symlink(
+    root: &Path,
+    relative: &str,
+) -> Result<PathBuf, String> {
+    safe_join_relative_path_impl(root, relative, true)
+}
+
+fn safe_join_relative_path_impl(
+    root: &Path,
+    relative: &str,
+    allow_leaf_symlink: bool,
+) -> Result<PathBuf, String> {
     use std::path::Component;
 
     let candidate = Path::new(relative);
@@ -1726,13 +1741,20 @@ fn safe_join_relative_path(root: &Path, relative: &str) -> Result<PathBuf, Strin
         return Err(format!("invalid relative path: {relative}"));
     }
     let mut current = root.to_path_buf();
-    for component in clean.components() {
-        let Component::Normal(seg) = component else {
-            continue;
-        };
+    let parts = clean
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(seg) => Some(seg.to_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for (idx, seg) in parts.iter().enumerate() {
         current.push(seg);
         match fs::symlink_metadata(&current) {
             Ok(meta) if meta.file_type().is_symlink() => {
+                if allow_leaf_symlink && idx + 1 == parts.len() {
+                    continue;
+                }
                 return Err(format!("symlink path component is not allowed: {relative}"));
             }
             Ok(_) => {}
@@ -1806,6 +1828,14 @@ impl sendReceiveFolder {
         safe_join_relative_path(&root, path).map(Some)
     }
 
+    fn resolve_abs_path_for_delete(&self, path: &str) -> Result<Option<PathBuf>, String> {
+        if self.folder.config.path.trim().is_empty() {
+            return Ok(None);
+        }
+        let root = PathBuf::from(&self.folder.config.path);
+        safe_join_relative_path_allow_leaf_symlink(&root, path).map(Some)
+    }
+
     pub(crate) fn BringToFront(&mut self) {
         self.folder.BringToFront();
     }
@@ -1825,8 +1855,13 @@ impl sendReceiveFolder {
         if path.ends_with('/') {
             return Err(errUnexpectedDirOnFileDel.to_string());
         }
-        let Some(abs) = self.resolve_abs_path(path)? else {
+        let Some(abs) = self.resolve_abs_path_for_delete(path)? else {
             return Ok(());
+        };
+        let meta = match fs::symlink_metadata(&abs) {
+            Ok(meta) => Some(meta),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => return Err(format!("stat {}: {err}", abs.display())),
         };
         let expected = self
             .folder
@@ -1836,17 +1871,19 @@ impl sendReceiveFolder {
             .get_device_file(&self.folder.config.id, LOCAL_DEVICE_ID, path)
             .map_err(|e| format!("lookup local file {path}: {e}"))?;
         let Some(expected) = expected else {
-            return Ok(());
+            return match meta {
+                Some(_) => Err(errModified.to_string()),
+                None => Ok(()),
+            };
         };
         if expected.deleted {
             return Ok(());
         }
-        let meta = match fs::symlink_metadata(&abs) {
-            Ok(meta) => meta,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+        let meta = match meta {
+            Some(meta) => meta,
+            None => {
                 return Err(errModified.to_string());
             }
-            Err(err) => return Err(format!("stat {}: {err}", abs.display())),
         };
 
         let disk_type = if meta.is_dir() {
@@ -1951,7 +1988,7 @@ impl sendReceiveFolder {
             return Err(errDirNotEmpty.to_string());
         }
         self.checkToBeDeleted(path)?;
-        let Some(abs) = self.resolve_abs_path(path)? else {
+        let Some(abs) = self.resolve_abs_path_for_delete(path)? else {
             return Ok(());
         };
         match fs::symlink_metadata(&abs) {
@@ -1976,7 +2013,7 @@ impl sendReceiveFolder {
         if path.is_empty() {
             return Err(errDirNotEmpty.to_string());
         }
-        let Some(abs) = self.resolve_abs_path(path)? else {
+        let Some(abs) = self.resolve_abs_path_for_delete(path)? else {
             return Ok(());
         };
         match fs::symlink_metadata(&abs) {
@@ -1999,7 +2036,7 @@ impl sendReceiveFolder {
 
     pub(crate) fn deleteFileWithCurrent(&mut self, path: &str) -> Result<(), String> {
         self.checkToBeDeleted(path)?;
-        let Some(abs) = self.resolve_abs_path(path)? else {
+        let Some(abs) = self.resolve_abs_path_for_delete(path)? else {
             return Ok(());
         };
         match fs::symlink_metadata(&abs) {
@@ -2016,7 +2053,7 @@ impl sendReceiveFolder {
     }
 
     pub(crate) fn deleteItemOnDisk(&mut self, path: &str) -> Result<(), String> {
-        if let Some(abs) = self.resolve_abs_path(path)? {
+        if let Some(abs) = self.resolve_abs_path_for_delete(path)? {
             match fs::symlink_metadata(&abs) {
                 Ok(meta) => {
                     if meta.is_dir() {
@@ -2817,6 +2854,31 @@ mod tests {
         assert_eq!(copied, 1);
         assert!(root.join("dir").join("sub").join("a.txt").exists());
 
+        let file_meta = fs::symlink_metadata(root.join("dir").join("sub").join("a.txt"))
+            .expect("file metadata");
+        let file_mtime = file_modified_ns(&file_meta).expect("file mtime");
+        f.folder
+            .db
+            .write()
+            .expect("db write")
+            .update(
+                "default",
+                "local",
+                vec![db::FileInfo {
+                    folder: "default".to_string(),
+                    path: "dir/sub/a.txt".to_string(),
+                    sequence: 1,
+                    modified_ns: file_mtime,
+                    size: 0,
+                    deleted: false,
+                    ignored: false,
+                    local_flags: 0,
+                    file_type: db::FileInfoType::File,
+                    block_hashes: Vec::new(),
+                }],
+            )
+            .expect("seed local entry");
+
         f.deleteFile("dir/sub/a.txt").expect("delete file");
         assert!(!root.join("dir").join("sub").join("a.txt").exists());
 
@@ -2826,6 +2888,29 @@ mod tests {
             b"x",
         )
         .expect("write nested");
+        let dir_meta = fs::symlink_metadata(root.join("dir").join("sub")).expect("dir metadata");
+        let dir_mtime = file_modified_ns(&dir_meta).expect("dir mtime");
+        f.folder
+            .db
+            .write()
+            .expect("db write")
+            .update(
+                "default",
+                "local",
+                vec![db::FileInfo {
+                    folder: "default".to_string(),
+                    path: "dir/sub".to_string(),
+                    sequence: 2,
+                    modified_ns: dir_mtime,
+                    size: 0,
+                    deleted: false,
+                    ignored: false,
+                    local_flags: 0,
+                    file_type: db::FileInfoType::Directory,
+                    block_hashes: Vec::new(),
+                }],
+            )
+            .expect("seed local dir entry");
         let err = f
             .deleteDirOnDisk("dir/sub")
             .expect_err("must reject non-empty dir");
@@ -2889,6 +2974,63 @@ mod tests {
             .deleteFileWithCurrent("x.txt")
             .expect_err("must reject missing file drift");
         assert_eq!(err, errModified);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn delete_file_with_current_rejects_untracked_existing_item() {
+        let root = temp_root("delete-untracked-guard");
+        fs::write(root.join("x.txt"), b"v1").expect("seed file");
+
+        let db = Arc::new(RwLock::new(db::WalFreeDb::default()));
+        let mut sr = newSendReceiveFolder(scan_cfg(&root), db);
+        let err = sr
+            .deleteFileWithCurrent("x.txt")
+            .expect_err("must reject untracked delete");
+        assert_eq!(err, errModified);
+        assert!(root.join("x.txt").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_file_with_current_allows_tracked_symlink_leaf() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root("delete-symlink-leaf");
+        fs::write(root.join("target.txt"), b"target").expect("write target");
+        symlink(root.join("target.txt"), root.join("link.txt")).expect("create symlink");
+
+        let meta = fs::symlink_metadata(root.join("link.txt")).expect("symlink metadata");
+        let mtime = file_modified_ns(&meta).expect("mtime");
+
+        let db = Arc::new(RwLock::new(db::WalFreeDb::default()));
+        db.write()
+            .expect("db lock")
+            .update(
+                "default",
+                "local",
+                vec![db::FileInfo {
+                    folder: "default".to_string(),
+                    path: "link.txt".to_string(),
+                    sequence: 1,
+                    modified_ns: mtime,
+                    size: 0,
+                    deleted: false,
+                    ignored: false,
+                    local_flags: 0,
+                    file_type: db::FileInfoType::Symlink,
+                    block_hashes: Vec::new(),
+                }],
+            )
+            .expect("seed local");
+
+        let mut sr = newSendReceiveFolder(scan_cfg(&root), db);
+        sr.deleteFileWithCurrent("link.txt")
+            .expect("delete symlink");
+        assert!(!root.join("link.txt").exists());
 
         let _ = fs::remove_dir_all(root);
     }

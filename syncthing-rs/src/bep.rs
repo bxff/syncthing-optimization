@@ -1,18 +1,20 @@
 use crate::bep_core::{
-    Header, MessageCompression_MESSAGE_COMPRESSION_LZ4,
-    MessageCompression_MESSAGE_COMPRESSION_NONE, MessageType_MESSAGE_TYPE_CLOSE,
-    MessageType_MESSAGE_TYPE_CLUSTER_CONFIG, MessageType_MESSAGE_TYPE_DOWNLOAD_PROGRESS,
-    MessageType_MESSAGE_TYPE_INDEX, MessageType_MESSAGE_TYPE_INDEX_UPDATE,
-    MessageType_MESSAGE_TYPE_PING, MessageType_MESSAGE_TYPE_REQUEST,
-    MessageType_MESSAGE_TYPE_RESPONSE,
+    FileDownloadProgressUpdateType_FILE_DOWNLOAD_PROGRESS_UPDATE_TYPE_APPEND,
+    FileDownloadProgressUpdateType_FILE_DOWNLOAD_PROGRESS_UPDATE_TYPE_FORGET, HelloMessageMagic,
+    MessageCompression_MESSAGE_COMPRESSION_LZ4, MessageCompression_MESSAGE_COMPRESSION_NONE,
+    MessageType_MESSAGE_TYPE_CLOSE, MessageType_MESSAGE_TYPE_CLUSTER_CONFIG,
+    MessageType_MESSAGE_TYPE_DOWNLOAD_PROGRESS, MessageType_MESSAGE_TYPE_INDEX,
+    MessageType_MESSAGE_TYPE_INDEX_UPDATE, MessageType_MESSAGE_TYPE_PING,
+    MessageType_MESSAGE_TYPE_REQUEST, MessageType_MESSAGE_TYPE_RESPONSE,
 };
-use lz4_flex::{compress_prepend_size, decompress_size_prepended};
+use crate::bep_proto::bep as pb;
+use prost::Message;
 use serde::{Deserialize, Serialize};
 
 const MAX_HEADER_BYTES: usize = 32 * 1024;
-const MAX_DECODED_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
+const MAX_MESSAGE_LEN: usize = 500 * 1_000_000;
+const MAX_HELLO_BYTES: usize = 32_767;
 const COMPRESSION_THRESHOLD_BYTES: usize = 128;
-const MESSAGE_TYPE_HELLO: i32 = -1;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -77,9 +79,9 @@ pub(crate) struct DownloadProgressEntry {
     pub(crate) update_type: String,
 }
 
-fn message_type_of(message: &BepMessage) -> i32 {
-    match message {
-        BepMessage::Hello { .. } => MESSAGE_TYPE_HELLO,
+fn message_type_of(message: &BepMessage) -> Result<i32, String> {
+    let t = match message {
+        BepMessage::Hello { .. } => return Err("hello uses dedicated hello packet".to_string()),
         BepMessage::ClusterConfig { .. } => MessageType_MESSAGE_TYPE_CLUSTER_CONFIG,
         BepMessage::Index { .. } => MessageType_MESSAGE_TYPE_INDEX,
         BepMessage::IndexUpdate { .. } => MessageType_MESSAGE_TYPE_INDEX_UPDATE,
@@ -88,7 +90,8 @@ fn message_type_of(message: &BepMessage) -> i32 {
         BepMessage::DownloadProgress { .. } => MessageType_MESSAGE_TYPE_DOWNLOAD_PROGRESS,
         BepMessage::Ping { .. } => MessageType_MESSAGE_TYPE_PING,
         BepMessage::Close { .. } => MessageType_MESSAGE_TYPE_CLOSE,
-    }
+    };
+    Ok(t)
 }
 
 fn should_compress(message: &BepMessage, payload_len: usize) -> bool {
@@ -96,14 +99,17 @@ fn should_compress(message: &BepMessage, payload_len: usize) -> bool {
 }
 
 pub(crate) fn encode_frame(message: &BepMessage) -> Result<Vec<u8>, String> {
-    let payload =
-        serde_json::to_vec(message).map_err(|err| format!("serialize message payload: {err}"))?;
+    if matches!(message, BepMessage::Hello { .. }) {
+        return encode_hello_packet(message);
+    }
+
+    let message_type = message_type_of(message)?;
+    let payload = encode_payload(message)?;
     let mut compression = MessageCompression_MESSAGE_COMPRESSION_NONE;
     let mut encoded_payload = payload;
 
     if should_compress(message, encoded_payload.len()) {
-        let compressed = compress_prepend_size(&encoded_payload);
-        // Mirror Syncthing's approach: compress only when savings are meaningful.
+        let compressed = lz4_compress_wire(&encoded_payload)?;
         let min_gain_threshold = encoded_payload
             .len()
             .saturating_sub(encoded_payload.len().saturating_div(32));
@@ -113,17 +119,20 @@ pub(crate) fn encode_frame(message: &BepMessage) -> Result<Vec<u8>, String> {
         }
     }
 
-    if encoded_payload.len() > u32::MAX as usize {
-        return Err(format!("payload too large: {}", encoded_payload.len()));
+    if encoded_payload.len() > MAX_MESSAGE_LEN {
+        return Err(format!(
+            "payload too large: {} > {}",
+            encoded_payload.len(),
+            MAX_MESSAGE_LEN
+        ));
     }
 
-    let header = Header {
-        Type: message_type_of(message),
-        Compression: compression,
+    let header = pb::Header {
+        r#type: message_type,
+        compression,
     };
-    let header_bytes =
-        serde_json::to_vec(&header).map_err(|err| format!("serialize header: {err}"))?;
-    if header_bytes.len() > u16::MAX as usize {
+    let header_bytes = proto_encode(&header, "header")?;
+    if header_bytes.len() > MAX_HEADER_BYTES || header_bytes.len() > u16::MAX as usize {
         return Err(format!("header too large: {}", header_bytes.len()));
     }
 
@@ -136,6 +145,9 @@ pub(crate) fn encode_frame(message: &BepMessage) -> Result<Vec<u8>, String> {
 }
 
 pub(crate) fn decode_frame(frame: &[u8]) -> Result<BepMessage, String> {
+    if is_hello_packet(frame) {
+        return decode_hello_packet(frame);
+    }
     if frame.len() < 6 {
         return Err("frame too short".to_string());
     }
@@ -152,14 +164,19 @@ pub(crate) fn decode_frame(frame: &[u8]) -> Result<BepMessage, String> {
         return Err("invalid frame length: truncated header".to_string());
     }
 
-    let header: Header = serde_json::from_slice(&frame[2..header_end])
-        .map_err(|err| format!("decode header: {err}"))?;
+    let header: pb::Header = proto_decode(&frame[2..header_end], "header")?;
     let message_len = u32::from_be_bytes([
         frame[header_end],
         frame[header_end + 1],
         frame[header_end + 2],
         frame[header_end + 3],
     ]) as usize;
+    if message_len > MAX_MESSAGE_LEN {
+        return Err(format!(
+            "message length {} exceeds maximum {}",
+            message_len, MAX_MESSAGE_LEN
+        ));
+    }
     let message_start = header_end + 4;
     if frame.len() != message_start + message_len {
         return Err(format!(
@@ -171,56 +188,365 @@ pub(crate) fn decode_frame(frame: &[u8]) -> Result<BepMessage, String> {
     }
 
     let payload = &frame[message_start..];
-    let decoded_payload = match header.Compression {
-        MessageCompression_MESSAGE_COMPRESSION_NONE => {
-            if payload.len() > MAX_DECODED_PAYLOAD_BYTES {
-                return Err(format!(
-                    "payload too large: {} > {}",
-                    payload.len(),
-                    MAX_DECODED_PAYLOAD_BYTES
-                ));
-            }
-            payload.to_vec()
-        }
-        MessageCompression_MESSAGE_COMPRESSION_LZ4 => {
-            let declared = lz4_declared_size(payload)?;
-            if declared > MAX_DECODED_PAYLOAD_BYTES {
-                return Err(format!(
-                    "declared decompressed payload too large: {} > {}",
-                    declared, MAX_DECODED_PAYLOAD_BYTES
-                ));
-            }
-            decompress_size_prepended(payload)
-                .map_err(|err| format!("lz4 decompress payload: {err}"))?
-        }
+    let decoded_payload = match header.compression {
+        MessageCompression_MESSAGE_COMPRESSION_NONE => payload.to_vec(),
+        MessageCompression_MESSAGE_COMPRESSION_LZ4 => lz4_decompress_wire(payload)?,
         other => return Err(format!("unknown message compression {other}")),
     };
-    if decoded_payload.len() > MAX_DECODED_PAYLOAD_BYTES {
-        return Err(format!(
-            "decompressed payload too large: {} > {}",
-            decoded_payload.len(),
-            MAX_DECODED_PAYLOAD_BYTES
-        ));
-    }
 
-    let message: BepMessage = serde_json::from_slice(&decoded_payload)
-        .map_err(|err| format!("decode message payload: {err}"))?;
-    if message_type_of(&message) != header.Type {
-        return Err(format!(
-            "message type mismatch: header={} payload={}",
-            header.Type,
-            message_type_of(&message)
-        ));
-    }
-
-    Ok(message)
+    decode_payload(header.r#type, &decoded_payload)
 }
 
-fn lz4_declared_size(payload: &[u8]) -> Result<usize, String> {
+fn is_hello_packet(frame: &[u8]) -> bool {
+    frame.len() >= 6
+        && u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]) == HelloMessageMagic
+}
+
+fn encode_hello_packet(message: &BepMessage) -> Result<Vec<u8>, String> {
+    let (device_name, client_name) = match message {
+        BepMessage::Hello {
+            device_name,
+            client_name,
+        } => (device_name, client_name),
+        _ => return Err("encode_hello_packet requires hello message".to_string()),
+    };
+    let hello = pb::Hello {
+        device_name: device_name.clone(),
+        client_name: client_name.clone(),
+        client_version: String::new(),
+        num_connections: 0,
+        timestamp: 0,
+    };
+    let payload = proto_encode(&hello, "hello")?;
+    if payload.len() > MAX_HELLO_BYTES {
+        return Err(format!("hello message too big: {}", payload.len()));
+    }
+    let mut out = Vec::with_capacity(6 + payload.len());
+    out.extend_from_slice(&HelloMessageMagic.to_be_bytes());
+    out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    out.extend_from_slice(&payload);
+    Ok(out)
+}
+
+fn decode_hello_packet(packet: &[u8]) -> Result<BepMessage, String> {
+    if packet.len() < 6 {
+        return Err("hello packet too short".to_string());
+    }
+    let magic = u32::from_be_bytes([packet[0], packet[1], packet[2], packet[3]]);
+    if magic != HelloMessageMagic {
+        return Err("unknown hello magic".to_string());
+    }
+    let size = u16::from_be_bytes([packet[4], packet[5]]) as usize;
+    if size > MAX_HELLO_BYTES {
+        return Err(format!("hello message too big: {}", size));
+    }
+    if packet.len() != 6 + size {
+        return Err("invalid hello packet length".to_string());
+    }
+    let hello: pb::Hello = proto_decode(&packet[6..], "hello")?;
+    Ok(BepMessage::Hello {
+        device_name: hello.device_name,
+        client_name: hello.client_name,
+    })
+}
+
+fn encode_payload(message: &BepMessage) -> Result<Vec<u8>, String> {
+    match message {
+        BepMessage::Hello { .. } => Err("hello uses dedicated packet".to_string()),
+        BepMessage::ClusterConfig { folders } => {
+            let wire = pb::ClusterConfig {
+                folders: folders
+                    .iter()
+                    .map(|id| pb::Folder {
+                        id: id.clone(),
+                        label: String::new(),
+                        devices: Vec::new(),
+                        r#type: 0,
+                        stop_reason: 0,
+                    })
+                    .collect(),
+                secondary: false,
+            };
+            proto_encode(&wire, "cluster config")
+        }
+        BepMessage::Index { folder, files } => {
+            let last_sequence = files.iter().map(|f| f.sequence as i64).max().unwrap_or(0);
+            let wire = pb::Index {
+                folder: folder.clone(),
+                files: files.iter().map(index_entry_to_wire).collect(),
+                last_sequence,
+            };
+            proto_encode(&wire, "index")
+        }
+        BepMessage::IndexUpdate { folder, files } => {
+            let last_sequence = files.iter().map(|f| f.sequence as i64).max().unwrap_or(0);
+            let wire = pb::IndexUpdate {
+                folder: folder.clone(),
+                files: files.iter().map(index_entry_to_wire).collect(),
+                last_sequence,
+                prev_sequence: 0,
+            };
+            proto_encode(&wire, "index update")
+        }
+        BepMessage::Request {
+            id,
+            folder,
+            name,
+            offset,
+            size,
+            hash,
+        } => {
+            let id = i32::try_from(*id).map_err(|_| format!("request id too large: {id}"))?;
+            let offset = i64::try_from(*offset)
+                .map_err(|_| format!("request offset too large: {offset}"))?;
+            let size =
+                i32::try_from(*size).map_err(|_| format!("request size too large: {size}"))?;
+            let wire = pb::Request {
+                id,
+                folder: folder.clone(),
+                name: name.clone(),
+                offset,
+                size,
+                hash: hash.as_bytes().to_vec(),
+                from_temporary: false,
+                block_no: 0,
+            };
+            proto_encode(&wire, "request")
+        }
+        BepMessage::Response {
+            id,
+            code,
+            data,
+            data_len: _,
+        } => {
+            let id = i32::try_from(*id).map_err(|_| format!("response id too large: {id}"))?;
+            let code =
+                i32::try_from(*code).map_err(|_| format!("response code too large: {code}"))?;
+            let wire = pb::Response {
+                id,
+                data: data.clone(),
+                code,
+            };
+            proto_encode(&wire, "response")
+        }
+        BepMessage::DownloadProgress { folder, updates } => {
+            let wire = pb::DownloadProgress {
+                folder: folder.clone(),
+                updates: updates
+                    .iter()
+                    .map(|update| pb::FileDownloadProgressUpdate {
+                        update_type: if update.update_type.eq_ignore_ascii_case("forget") {
+                            FileDownloadProgressUpdateType_FILE_DOWNLOAD_PROGRESS_UPDATE_TYPE_FORGET
+                        } else {
+                            FileDownloadProgressUpdateType_FILE_DOWNLOAD_PROGRESS_UPDATE_TYPE_APPEND
+                        },
+                        name: update.name.clone(),
+                        version: Some(pb::Vector {
+                            counters: vec![pb::Counter {
+                                id: 0,
+                                value: update.version,
+                            }],
+                        }),
+                        block_indexes: update
+                            .block_indexes
+                            .iter()
+                            .map(|idx| i32::try_from(*idx).unwrap_or(i32::MAX))
+                            .collect(),
+                        block_size: i32::try_from(update.block_size).unwrap_or(i32::MAX),
+                    })
+                    .collect(),
+            };
+            proto_encode(&wire, "download progress")
+        }
+        BepMessage::Ping { .. } => proto_encode(&pb::Ping {}, "ping"),
+        BepMessage::Close { reason } => proto_encode(
+            &pb::Close {
+                reason: reason.clone(),
+            },
+            "close",
+        ),
+    }
+}
+
+fn decode_payload(message_type: i32, payload: &[u8]) -> Result<BepMessage, String> {
+    match message_type {
+        MessageType_MESSAGE_TYPE_CLUSTER_CONFIG => {
+            let msg: pb::ClusterConfig = proto_decode(payload, "cluster config")?;
+            Ok(BepMessage::ClusterConfig {
+                folders: msg
+                    .folders
+                    .into_iter()
+                    .map(|f| f.id)
+                    .filter(|id| !id.is_empty())
+                    .collect(),
+            })
+        }
+        MessageType_MESSAGE_TYPE_INDEX => {
+            let msg: pb::Index = proto_decode(payload, "index")?;
+            Ok(BepMessage::Index {
+                folder: msg.folder,
+                files: msg.files.iter().map(index_entry_from_wire).collect(),
+            })
+        }
+        MessageType_MESSAGE_TYPE_INDEX_UPDATE => {
+            let msg: pb::IndexUpdate = proto_decode(payload, "index update")?;
+            Ok(BepMessage::IndexUpdate {
+                folder: msg.folder,
+                files: msg.files.iter().map(index_entry_from_wire).collect(),
+            })
+        }
+        MessageType_MESSAGE_TYPE_REQUEST => {
+            let msg: pb::Request = proto_decode(payload, "request")?;
+            Ok(BepMessage::Request {
+                id: msg.id.max(0) as u32,
+                folder: msg.folder,
+                name: msg.name,
+                offset: msg.offset.max(0) as u64,
+                size: msg.size.max(0) as u32,
+                hash: String::from_utf8_lossy(&msg.hash).to_string(),
+            })
+        }
+        MessageType_MESSAGE_TYPE_RESPONSE => {
+            let msg: pb::Response = proto_decode(payload, "response")?;
+            Ok(BepMessage::Response {
+                id: msg.id.max(0) as u32,
+                code: msg.code.max(0) as u32,
+                data_len: msg.data.len() as u32,
+                data: msg.data,
+            })
+        }
+        MessageType_MESSAGE_TYPE_DOWNLOAD_PROGRESS => {
+            let msg: pb::DownloadProgress = proto_decode(payload, "download progress")?;
+            Ok(BepMessage::DownloadProgress {
+                folder: msg.folder,
+                updates: msg
+                    .updates
+                    .into_iter()
+                    .map(|u| DownloadProgressEntry {
+                        name: u.name,
+                        version: u
+                            .version
+                            .as_ref()
+                            .and_then(|v| v.counters.iter().map(|c| c.value).max())
+                            .unwrap_or_default(),
+                        block_indexes: u
+                            .block_indexes
+                            .into_iter()
+                            .map(|idx| idx.max(0) as u32)
+                            .collect(),
+                        block_size: u.block_size.max(0) as u32,
+                        update_type: if u.update_type
+                            == FileDownloadProgressUpdateType_FILE_DOWNLOAD_PROGRESS_UPDATE_TYPE_FORGET
+                        {
+                            "forget".to_string()
+                        } else {
+                            "append".to_string()
+                        },
+                    })
+                    .collect(),
+            })
+        }
+        MessageType_MESSAGE_TYPE_PING => {
+            let _: pb::Ping = proto_decode(payload, "ping")?;
+            Ok(BepMessage::Ping { timestamp_ms: 0 })
+        }
+        MessageType_MESSAGE_TYPE_CLOSE => {
+            let msg: pb::Close = proto_decode(payload, "close")?;
+            Ok(BepMessage::Close { reason: msg.reason })
+        }
+        other => Err(format!("unknown message type {other}")),
+    }
+}
+
+fn index_entry_to_wire(entry: &IndexEntry) -> pb::FileInfo {
+    pb::FileInfo {
+        name: entry.path.clone(),
+        r#type: 0,
+        size: entry.size as i64,
+        permissions: 0,
+        modified_s: 0,
+        modified_by: 0,
+        version: None,
+        sequence: entry.sequence as i64,
+        blocks: entry
+            .block_hashes
+            .iter()
+            .map(|hash| pb::BlockInfo {
+                hash: hash.as_bytes().to_vec(),
+                offset: 0,
+                size: 0,
+            })
+            .collect(),
+        symlink_target: Vec::new(),
+        blocks_hash: Vec::new(),
+        previous_blocks_hash: Vec::new(),
+        encrypted: Vec::new(),
+        modified_ns: 0,
+        block_size: 0,
+        platform: None,
+        local_flags: 0,
+        version_hash: Vec::new(),
+        inode_change_ns: 0,
+        encryption_trailer_size: 0,
+        deleted: entry.deleted,
+        invalid: false,
+        no_permissions: false,
+    }
+}
+
+fn index_entry_from_wire(file: &pb::FileInfo) -> IndexEntry {
+    IndexEntry {
+        path: file.name.clone(),
+        sequence: file.sequence.max(0) as u64,
+        deleted: file.deleted,
+        size: file.size.max(0) as u64,
+        block_hashes: file
+            .blocks
+            .iter()
+            .map(|b| String::from_utf8_lossy(&b.hash).to_string())
+            .collect(),
+    }
+}
+
+fn lz4_compress_wire(payload: &[u8]) -> Result<Vec<u8>, String> {
+    if payload.len() > u32::MAX as usize {
+        return Err(format!(
+            "payload too large for lz4 prefix: {}",
+            payload.len()
+        ));
+    }
+    let compressed = lz4_flex::block::compress(payload);
+    let mut out = Vec::with_capacity(4 + compressed.len());
+    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    out.extend_from_slice(&compressed);
+    Ok(out)
+}
+
+fn lz4_decompress_wire(payload: &[u8]) -> Result<Vec<u8>, String> {
     if payload.len() < 4 {
         return Err("lz4 payload too short for size prefix".to_string());
     }
-    Ok(u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize)
+    let declared = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+    if declared > MAX_MESSAGE_LEN {
+        return Err(format!(
+            "declared decompressed payload too large: {} > {}",
+            declared, MAX_MESSAGE_LEN
+        ));
+    }
+    lz4_flex::block::decompress(&payload[4..], declared)
+        .map_err(|err| format!("lz4 decompress payload: {err}"))
+}
+
+fn proto_encode<M: Message>(message: &M, what: &str) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(message.encoded_len());
+    message
+        .encode(&mut out)
+        .map_err(|err| format!("serialize {what}: {err}"))?;
+    Ok(out)
+}
+
+fn proto_decode<M: Message + Default>(bytes: &[u8], what: &str) -> Result<M, String> {
+    M::decode(bytes).map_err(|err| format!("decode {what}: {err}"))
 }
 
 pub(crate) fn default_exchange() -> Vec<BepMessage> {
@@ -302,13 +628,11 @@ pub(crate) fn message_name(message: &BepMessage) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bep_core::{Header, MessageCompression_MESSAGE_COMPRESSION_NONE};
-    use lz4_flex::compress_prepend_size;
     use std::panic;
 
-    fn parse_header(frame: &[u8]) -> Header {
+    fn parse_header(frame: &[u8]) -> pb::Header {
         let header_len = u16::from_be_bytes([frame[0], frame[1]]) as usize;
-        serde_json::from_slice(&frame[2..(2 + header_len)]).expect("decode header")
+        proto_decode(&frame[2..(2 + header_len)], "header").expect("decode header")
     }
 
     #[test]
@@ -326,6 +650,21 @@ mod tests {
 
         let frame = encode_frame(&msg).expect("encode");
         let decoded = decode_frame(&frame).expect("decode");
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn hello_round_trip_uses_magic_packet() {
+        let msg = BepMessage::Hello {
+            device_name: "a".to_string(),
+            client_name: "b".to_string(),
+        };
+        let frame = encode_frame(&msg).expect("encode hello");
+        assert_eq!(
+            u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]),
+            HelloMessageMagic
+        );
+        let decoded = decode_frame(&frame).expect("decode hello");
         assert_eq!(decoded, msg);
     }
 
@@ -351,7 +690,7 @@ mod tests {
         let frame = encode_frame(&message).expect("encode");
         let header = parse_header(&frame);
         assert_eq!(
-            header.Compression,
+            header.compression,
             MessageCompression_MESSAGE_COMPRESSION_NONE
         );
     }
@@ -373,7 +712,7 @@ mod tests {
         let frame = encode_frame(&message).expect("encode");
         let header = parse_header(&frame);
         assert_eq!(
-            header.Compression,
+            header.compression,
             MessageCompression_MESSAGE_COMPRESSION_LZ4
         );
         let decoded = decode_frame(&frame).expect("decode");
@@ -381,53 +720,13 @@ mod tests {
     }
 
     #[test]
-    fn decompressed_payload_size_is_capped() {
-        let oversized = vec![0x41_u8; MAX_DECODED_PAYLOAD_BYTES + 1];
-        let compressed = compress_prepend_size(&oversized);
-        let header = Header {
-            Type: MessageType_MESSAGE_TYPE_PING,
-            Compression: MessageCompression_MESSAGE_COMPRESSION_LZ4,
-        };
-        let header_bytes = serde_json::to_vec(&header).expect("encode header");
-        let mut frame = Vec::with_capacity(2 + header_bytes.len() + 4 + compressed.len());
-        frame.extend_from_slice(&(header_bytes.len() as u16).to_be_bytes());
-        frame.extend_from_slice(&header_bytes);
-        frame.extend_from_slice(&(compressed.len() as u32).to_be_bytes());
-        frame.extend_from_slice(&compressed);
-
-        let err = decode_frame(&frame).expect_err("must reject oversized decompressed payload");
-        assert!(
-            err.contains("decompressed payload too large")
-                || err.contains("declared decompressed payload too large")
-        );
-    }
-
-    #[test]
-    fn rejects_lz4_payload_without_size_prefix() {
-        let header = Header {
-            Type: MessageType_MESSAGE_TYPE_PING,
-            Compression: MessageCompression_MESSAGE_COMPRESSION_LZ4,
-        };
-        let header_bytes = serde_json::to_vec(&header).expect("encode header");
-        let payload = vec![1_u8, 2_u8, 3_u8];
-        let mut frame = Vec::new();
-        frame.extend_from_slice(&(header_bytes.len() as u16).to_be_bytes());
-        frame.extend_from_slice(&header_bytes);
-        frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-        frame.extend_from_slice(&payload);
-
-        let err = decode_frame(&frame).expect_err("must reject missing lz4 size prefix");
-        assert!(err.contains("lz4 payload too short"));
-    }
-
-    #[test]
     fn rejects_oversized_uncompressed_payload_before_decode() {
-        let header = Header {
-            Type: MessageType_MESSAGE_TYPE_PING,
-            Compression: MessageCompression_MESSAGE_COMPRESSION_NONE,
+        let header = pb::Header {
+            r#type: MessageType_MESSAGE_TYPE_PING,
+            compression: MessageCompression_MESSAGE_COMPRESSION_NONE,
         };
-        let header_bytes = serde_json::to_vec(&header).expect("encode header");
-        let payload = vec![0_u8; MAX_DECODED_PAYLOAD_BYTES + 1];
+        let header_bytes = proto_encode(&header, "header").expect("encode header");
+        let payload = vec![0_u8; MAX_MESSAGE_LEN + 1];
         let mut frame = Vec::new();
         frame.extend_from_slice(&(header_bytes.len() as u16).to_be_bytes());
         frame.extend_from_slice(&header_bytes);
@@ -435,7 +734,18 @@ mod tests {
         frame.extend_from_slice(&payload);
 
         let err = decode_frame(&frame).expect_err("must reject oversized payload");
-        assert!(err.contains("payload too large"));
+        assert!(err.contains("message length") || err.contains("payload too large"));
+    }
+
+    #[test]
+    fn lz4_prefix_uses_big_endian_size() {
+        let data = vec![1_u8, 2_u8, 3_u8, 4_u8];
+        let compressed = lz4_compress_wire(&data).expect("compress");
+        let declared =
+            u32::from_be_bytes([compressed[0], compressed[1], compressed[2], compressed[3]]);
+        assert_eq!(declared, data.len() as u32);
+        let out = lz4_decompress_wire(&compressed).expect("decompress");
+        assert_eq!(out, data);
     }
 
     #[test]

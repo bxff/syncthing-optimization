@@ -1,6 +1,7 @@
 mod bep;
 mod bep_compat;
 mod bep_core;
+mod bep_proto;
 mod config;
 mod db;
 mod folder_core;

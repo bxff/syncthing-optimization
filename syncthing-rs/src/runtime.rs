@@ -4247,24 +4247,28 @@ pub(crate) fn handle_peer_connection(
         .set_write_timeout(timeout)
         .map_err(|err| format!("set write timeout: {err}"))?;
     let peer_id_looks_transport = peer_id.contains(':') || peer_id.contains('#');
-    let mut seen_hello = false;
-    let mut logical_peer_id = canonical_peer_device_id(peer_id, "", peer_id_looks_transport);
+    let hello = match read_hello_packet(stream)? {
+        Some(hello) => hello,
+        None => return Ok(()),
+    };
+    let BepMessage::Hello { device_name, .. } = &hello else {
+        return Err("expected hello packet".to_string());
+    };
+    let logical_peer_id = canonical_peer_device_id(peer_id, device_name, peer_id_looks_transport);
+    {
+        let mut guard = model
+            .write()
+            .map_err(|_| "model lock poisoned".to_string())?;
+        let _ = guard.ApplyBepMessage(&logical_peer_id, &hello)?;
+    }
+
     loop {
         let frame = match read_frame(stream)? {
             Some(frame) => frame,
             None => return Ok(()),
         };
         let inbound = decode_frame(&frame)?;
-        if !seen_hello {
-            if !matches!(inbound, BepMessage::Hello { .. }) {
-                return Err("expected hello as first message".to_string());
-            }
-            if let BepMessage::Hello { device_name, .. } = &inbound {
-                logical_peer_id =
-                    canonical_peer_device_id(peer_id, device_name, peer_id_looks_transport);
-            }
-            seen_hello = true;
-        } else if matches!(inbound, BepMessage::Hello { .. }) {
+        if matches!(inbound, BepMessage::Hello { .. }) {
             return Err("duplicate hello message".to_string());
         }
         let outbound = {
@@ -4280,6 +4284,31 @@ pub(crate) fn handle_peer_connection(
             return Ok(());
         }
     }
+}
+
+fn read_hello_packet(reader: &mut impl Read) -> Result<Option<BepMessage>, String> {
+    let mut prefix = [0_u8; 6];
+    match reader.read_exact(&mut prefix[..1]) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(err) => return Err(format!("read hello magic: {err}")),
+    }
+    reader
+        .read_exact(&mut prefix[1..])
+        .map_err(|err| format!("read hello header: {err}"))?;
+    let magic = u32::from_be_bytes([prefix[0], prefix[1], prefix[2], prefix[3]]);
+    if magic != crate::bep_core::HelloMessageMagic {
+        return Err("expected hello as first message".to_string());
+    }
+    let size = u16::from_be_bytes([prefix[4], prefix[5]]) as usize;
+    let mut payload = vec![0_u8; size];
+    reader
+        .read_exact(&mut payload)
+        .map_err(|err| format!("read hello payload: {err}"))?;
+    let mut packet = Vec::with_capacity(6 + size);
+    packet.extend_from_slice(&prefix);
+    packet.extend_from_slice(&payload);
+    decode_frame(&packet).map(Some)
 }
 
 fn read_frame(reader: &mut impl Read) -> Result<Option<Vec<u8>>, String> {

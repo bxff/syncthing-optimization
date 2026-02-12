@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use crate::bep::{BepMessage, IndexEntry};
-use crate::config::FolderConfiguration;
+use crate::config::{FolderConfiguration, FolderType};
 use crate::db::{self, Db};
 use crate::folder_core;
 use crate::folder_modes::FolderMode;
@@ -1032,7 +1032,13 @@ impl model {
                         data: Vec::new(),
                     }));
                 }
-                let enforce_metadata_hash = !is_hex_sha256(hash);
+                let is_receive_encrypted = self
+                    .folderCfgs
+                    .get(folder)
+                    .map(|cfg| cfg.folder_type == FolderType::ReceiveEncrypted)
+                    .unwrap_or(false);
+
+                let enforce_metadata_hash = !is_receive_encrypted && !is_hex_sha256(hash);
                 if enforce_metadata_hash && !self.request_hash_matches(folder, name, *offset, hash)
                 {
                     return Ok(Some(BepMessage::Response {
@@ -1044,7 +1050,10 @@ impl model {
                 }
                 match self.RequestData(folder, name, *offset, *size as usize) {
                     Ok(data) => {
-                        if is_hex_sha256(hash) && !sha256_hex_matches(hash, &data) {
+                        if !is_receive_encrypted
+                            && is_hex_sha256(hash)
+                            && !sha256_hex_matches(hash, &data)
+                        {
                             let _ = self.ScheduleForceRescan(folder, &[name.clone()]);
                             return Ok(Some(BepMessage::Response {
                                 id: *id,
@@ -2030,21 +2039,25 @@ fn matches_any_ignore_pattern(path: &str, patterns: Option<&Vec<String>>) -> boo
         return false;
     };
     let clean_path = path.trim_start_matches('/');
-    patterns.iter().any(|pattern| {
+    let mut ignored = false;
+    for pattern in patterns {
         let mut p = pattern.trim();
         if p.is_empty() || p.starts_with('#') {
-            return false;
+            continue;
         }
+        let negated = p.starts_with('!');
         if let Some(rest) = p.strip_prefix('!') {
             p = rest.trim();
             if p.is_empty() {
-                return false;
+                continue;
             }
-            return false;
         }
         let p = p.trim_start_matches('/');
-        wildcard_match(p, clean_path)
-    })
+        if wildcard_match(p, clean_path) {
+            ignored = !negated;
+        }
+    }
+    ignored
 }
 
 fn wildcard_match(pattern: &str, value: &str) -> bool {
@@ -2690,6 +2703,76 @@ mod tests {
     }
 
     #[test]
+    fn apply_bep_request_receive_encrypted_skips_hash_validation() {
+        let root = std::env::temp_dir().join(format!(
+            "syncthing-rs-bep-request-recvenc-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("mkdir");
+        fs::write(root.join("a.txt"), b"hello").expect("write file");
+
+        let mut cfg = newFolderConfiguration("default", &root.to_string_lossy());
+        cfg.folder_type = FolderType::ReceiveEncrypted;
+        cfg.devices.push(crate::config::FolderDeviceConfiguration {
+            device_id: "peer-a".to_string(),
+            introduced_by: String::new(),
+            encryption_password: String::new(),
+        });
+
+        let mut m = NewModel();
+        m.newFolder(cfg);
+        let fi = db::FileInfo {
+            folder: "default".to_string(),
+            path: "a.txt".to_string(),
+            sequence: 1,
+            modified_ns: 1,
+            size: 5,
+            deleted: false,
+            ignored: false,
+            local_flags: 0,
+            file_type: db::FileInfoType::File,
+            block_hashes: vec!["expected-hash".to_string()],
+        };
+        m.sdb
+            .write()
+            .expect("db write")
+            .update("default", "local", vec![fi])
+            .expect("update local");
+
+        let response = m
+            .ApplyBepMessage(
+                "peer-a",
+                &BepMessage::Request {
+                    id: 121,
+                    folder: "default".to_string(),
+                    name: "a.txt".to_string(),
+                    offset: 0,
+                    size: 5,
+                    hash: "0000000000000000000000000000000000000000000000000000000000000000"
+                        .to_string(),
+                },
+            )
+            .expect("response generated");
+
+        match response {
+            Some(BepMessage::Response {
+                code,
+                data_len,
+                data,
+                ..
+            }) => {
+                assert_eq!(code, 0);
+                assert_eq!(data_len, 5);
+                assert_eq!(data, b"hello");
+            }
+            _ => panic!("expected response payload"),
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn apply_bep_request_rejects_unshared_device() {
         let root = std::env::temp_dir().join(format!(
             "syncthing-rs-bep-request-share-{}",
@@ -2729,6 +2812,70 @@ mod tests {
                 data: Vec::new(),
             })
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apply_bep_request_honors_ignore_negation_rules() {
+        let root = std::env::temp_dir().join(format!(
+            "syncthing-rs-bep-request-ignore-negation-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("mkdir");
+        fs::write(root.join("keep.tmp"), b"ok").expect("write keep");
+        fs::write(root.join("drop.tmp"), b"no").expect("write drop");
+
+        let mut cfg = newFolderConfiguration("default", &root.to_string_lossy());
+        cfg.devices.push(crate::config::FolderDeviceConfiguration {
+            device_id: "peer-a".to_string(),
+            introduced_by: String::new(),
+            encryption_password: String::new(),
+        });
+
+        let mut m = NewModel();
+        m.newFolder(cfg);
+        m.SetIgnores(
+            "default",
+            vec!["*.tmp".to_string(), "!keep.tmp".to_string()],
+        );
+
+        let keep = m
+            .ApplyBepMessage(
+                "peer-a",
+                &BepMessage::Request {
+                    id: 131,
+                    folder: "default".to_string(),
+                    name: "keep.tmp".to_string(),
+                    offset: 0,
+                    size: 2,
+                    hash: "".to_string(),
+                },
+            )
+            .expect("keep response");
+        match keep {
+            Some(BepMessage::Response { code, .. }) => assert_eq!(code, 0),
+            _ => panic!("expected keep response"),
+        }
+
+        let drop = m
+            .ApplyBepMessage(
+                "peer-a",
+                &BepMessage::Request {
+                    id: 132,
+                    folder: "default".to_string(),
+                    name: "drop.tmp".to_string(),
+                    offset: 0,
+                    size: 2,
+                    hash: "".to_string(),
+                },
+            )
+            .expect("drop response");
+        match drop {
+            Some(BepMessage::Response { code, .. }) => assert_eq!(code, 1),
+            _ => panic!("expected drop response"),
+        }
 
         let _ = fs::remove_dir_all(root);
     }

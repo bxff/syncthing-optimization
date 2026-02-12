@@ -1,4 +1,5 @@
 use crate::bep::BepMessage;
+use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProtocolEvent {
@@ -106,8 +107,20 @@ pub(crate) fn event_from_message(message: &BepMessage) -> ProtocolEvent {
 pub(crate) fn run_message_exchange(messages: &[BepMessage]) -> Result<Vec<&'static str>, String> {
     let mut state = ProtocolState::Dialed;
     let mut trace = vec![ProtocolEvent::Dial.as_str()];
+    let mut pending_requests: BTreeSet<u32> = BTreeSet::new();
 
     for message in messages {
+        match message {
+            BepMessage::Request { id, .. } => {
+                pending_requests.insert(*id);
+            }
+            BepMessage::Response { id, .. } => {
+                // Go only correlates responses that match an in-flight request ID.
+                // Orphan/mismatched responses do not satisfy any request.
+                let _ = pending_requests.remove(id);
+            }
+            _ => {}
+        }
         let event = event_from_message(message);
         state = advance(state, event)?;
         trace.push(event.as_str());

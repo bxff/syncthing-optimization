@@ -1828,11 +1828,6 @@ impl sendReceiveFolder {
         let Some(abs) = self.resolve_abs_path(path)? else {
             return Ok(());
         };
-        let meta = match fs::symlink_metadata(&abs) {
-            Ok(meta) => meta,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(err) => return Err(format!("stat {}: {err}", abs.display())),
-        };
         let expected = self
             .folder
             .db
@@ -1846,6 +1841,13 @@ impl sendReceiveFolder {
         if expected.deleted {
             return Ok(());
         }
+        let meta = match fs::symlink_metadata(&abs) {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Err(errModified.to_string());
+            }
+            Err(err) => return Err(format!("stat {}: {err}", abs.display())),
+        };
 
         let disk_type = if meta.is_dir() {
             db::FileInfoType::Directory
@@ -2309,16 +2311,18 @@ impl receiveOnlyFolder {
         .map_err(|e| format!("load local files: {e}"))?;
 
         let mut updates = Vec::new();
+        let mut disk_deletes = Vec::new();
         for mut local in locals {
             if local.local_flags & db::FLAG_LOCAL_RECEIVE_ONLY == 0 {
                 continue;
             }
-            local.local_flags &= !db::FLAG_LOCAL_RECEIVE_ONLY;
             match db.get_global_file(&folder_id, &local.path) {
                 Ok(Some(global)) => {
                     if global.local_flags & db::FLAG_LOCAL_RECEIVE_ONLY != 0 {
                         local.deleted = true;
+                        local.local_flags &= !db::FLAG_LOCAL_RECEIVE_ONLY;
                         local.block_hashes.clear();
+                        disk_deletes.push(local.path.clone());
                     } else {
                         let mut merged = global;
                         merged.local_flags &= !db::FLAG_LOCAL_RECEIVE_ONLY;
@@ -2328,7 +2332,7 @@ impl receiveOnlyFolder {
                         continue;
                     }
                 }
-                Ok(None) => {}
+                Ok(None) => continue,
                 Err(err) => return Err(format!("lookup global {}: {err}", local.path)),
             }
             local.sequence = sequence;
@@ -2340,6 +2344,9 @@ impl receiveOnlyFolder {
                 .map_err(|e| format!("persist receive-only revert: {e}"))?;
         }
         drop(db);
+        for path in disk_deletes {
+            self.sendReceiveFolder.deleteItemOnDisk(&path)?;
+        }
         self.sendReceiveFolder.folder.SchedulePull();
         Ok(())
     }
@@ -2867,6 +2874,26 @@ mod tests {
     }
 
     #[test]
+    fn delete_file_with_current_rejects_missing_disk_item_when_db_has_file() {
+        let root = temp_root("delete-missing-guard");
+        fs::write(root.join("x.txt"), b"v1").expect("seed file");
+
+        let db = Arc::new(RwLock::new(db::WalFreeDb::default()));
+        let mut baseline = newFolder(scan_cfg(&root), db.clone());
+        baseline.Scan(&[]).expect("baseline scan");
+
+        fs::remove_file(root.join("x.txt")).expect("remove file");
+
+        let mut sr = newSendReceiveFolder(scan_cfg(&root), db);
+        let err = sr
+            .deleteFileWithCurrent("x.txt")
+            .expect_err("must reject missing file drift");
+        assert_eq!(err, errModified);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn process_deletions_records_errors_instead_of_swallowing() {
         let root = temp_root("process-deletions-errors");
         let db = Arc::new(RwLock::new(db::WalFreeDb::default()));
@@ -2876,6 +2903,109 @@ mod tests {
         assert_eq!(deleted, 0);
         assert_eq!(sr.tempPullErrors.len(), 1);
         assert_eq!(sr.folder.errorsMut.len(), 1);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn receive_only_revert_preserves_flag_when_global_missing() {
+        let root = temp_root("recvonly-revert-missing-global");
+        let db = Arc::new(RwLock::new(db::WalFreeDb::default()));
+        db.write()
+            .expect("db lock")
+            .update(
+                "default",
+                "local",
+                vec![db::FileInfo {
+                    folder: "default".to_string(),
+                    path: "x.txt".to_string(),
+                    sequence: 1,
+                    modified_ns: 1,
+                    size: 2,
+                    deleted: false,
+                    ignored: false,
+                    local_flags: db::FLAG_LOCAL_RECEIVE_ONLY | db::FLAG_LOCAL_IGNORED,
+                    file_type: db::FileInfoType::File,
+                    block_hashes: vec!["h1".to_string()],
+                }],
+            )
+            .expect("seed local");
+
+        let mut ro = newReceiveOnlyFolder(scan_cfg(&root), db.clone());
+        ro.revert().expect("revert");
+
+        let current = db
+            .read()
+            .expect("db lock")
+            .get_device_file("default", "local", "x.txt")
+            .expect("lookup")
+            .expect("local file");
+        assert_eq!(
+            current.local_flags & db::FLAG_LOCAL_RECEIVE_ONLY,
+            db::FLAG_LOCAL_RECEIVE_ONLY
+        );
+        assert!(!current.deleted);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn receive_only_revert_deletes_disk_when_global_is_receive_only_changed() {
+        let root = temp_root("recvonly-revert-delete-disk");
+        fs::write(root.join("x.txt"), b"v1").expect("seed file");
+        let db = Arc::new(RwLock::new(db::WalFreeDb::default()));
+        {
+            let mut guard = db.write().expect("db lock");
+            guard
+                .update(
+                    "default",
+                    "local",
+                    vec![db::FileInfo {
+                        folder: "default".to_string(),
+                        path: "x.txt".to_string(),
+                        sequence: 1,
+                        modified_ns: 1,
+                        size: 2,
+                        deleted: false,
+                        ignored: false,
+                        local_flags: db::FLAG_LOCAL_RECEIVE_ONLY,
+                        file_type: db::FileInfoType::File,
+                        block_hashes: vec!["h1".to_string()],
+                    }],
+                )
+                .expect("seed local");
+            guard
+                .update(
+                    "default",
+                    "peer-a",
+                    vec![db::FileInfo {
+                        folder: "default".to_string(),
+                        path: "x.txt".to_string(),
+                        sequence: 2,
+                        modified_ns: 2,
+                        size: 2,
+                        deleted: false,
+                        ignored: false,
+                        local_flags: db::FLAG_LOCAL_RECEIVE_ONLY,
+                        file_type: db::FileInfoType::File,
+                        block_hashes: vec!["h2".to_string()],
+                    }],
+                )
+                .expect("seed peer");
+        }
+
+        let mut ro = newReceiveOnlyFolder(scan_cfg(&root), db.clone());
+        ro.revert().expect("revert");
+
+        assert!(!root.join("x.txt").exists());
+        let current = db
+            .read()
+            .expect("db lock")
+            .get_device_file("default", "local", "x.txt")
+            .expect("lookup")
+            .expect("local file");
+        assert!(current.deleted);
+        assert_eq!(current.local_flags & db::FLAG_LOCAL_RECEIVE_ONLY, 0);
 
         let _ = fs::remove_dir_all(root);
     }

@@ -22,7 +22,6 @@ pub(crate) const FLAG_LOCAL_REMOTE_INVALID: LocalFlags = 1 << 6;
 pub(crate) const FLAG_LOCAL_INVALID: LocalFlags = FLAG_LOCAL_UNSUPPORTED
     | FLAG_LOCAL_IGNORED
     | FLAG_LOCAL_MUST_RESCAN
-    | FLAG_LOCAL_RECEIVE_ONLY
     | FLAG_LOCAL_REMOTE_INVALID;
 pub(crate) const FLAG_LOCAL_CONFLICT: LocalFlags =
     FLAG_LOCAL_UNSUPPORTED | FLAG_LOCAL_IGNORED | FLAG_LOCAL_RECEIVE_ONLY;
@@ -1922,7 +1921,7 @@ mod tests {
         let avail = db
             .get_global_availability("default", "same.txt")
             .expect("availability");
-        assert_eq!(avail, vec!["dev-b".to_string()]);
+        assert_eq!(avail, vec!["dev-a".to_string(), "dev-b".to_string()]);
     }
 
     #[test]

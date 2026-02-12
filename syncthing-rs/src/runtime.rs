@@ -2654,26 +2654,35 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             if method != &Method::Post {
                 return make_api_error(405, "method not allowed");
             }
-            let Some(folder) = params.get("folder") else {
-                return make_api_error(400, "missing folder query parameter");
-            };
             let subdirs = parse_subdirs(&params);
-            match scan_folder(runtime, folder, &subdirs) {
-                Ok(payload) => {
-                    append_event(
-                        runtime,
-                        "LocalIndexUpdated",
-                        json!({"folder": folder, "subdirs": subdirs}),
-                        true,
-                    );
-                    ApiReply::json(200, payload)
+            if let Some(folder) = params.get("folder") {
+                match scan_folder(runtime, folder, &subdirs) {
+                    Ok(payload) => {
+                        append_event(
+                            runtime,
+                            "LocalIndexUpdated",
+                            json!({"folder": folder, "subdirs": subdirs}),
+                            true,
+                        );
+                        ApiReply::json(200, payload)
+                    }
+                    Err(ApiFolderStatusError::MissingFolder) => ApiReply::json(
+                        404,
+                        json!({ "error": "folder not found", "folder": folder }),
+                    ),
+                    Err(ApiFolderStatusError::Internal(err)) => {
+                        ApiReply::json(500, json!({ "error": err }))
+                    }
                 }
-                Err(ApiFolderStatusError::MissingFolder) => ApiReply::json(
-                    404,
-                    json!({ "error": "folder not found", "folder": folder }),
-                ),
-                Err(ApiFolderStatusError::Internal(err)) => {
-                    ApiReply::json(500, json!({ "error": err }))
+            } else {
+                match scan_all_folders(runtime, &subdirs) {
+                    Ok(()) => ApiReply::bytes(200, Vec::new(), "application/json"),
+                    Err(ApiFolderStatusError::Internal(err)) => {
+                        ApiReply::json(500, json!({ "error": err }))
+                    }
+                    Err(ApiFolderStatusError::MissingFolder) => {
+                        ApiReply::json(500, json!({ "error": "unexpected missing folder" }))
+                    }
                 }
             }
         }
@@ -3641,6 +3650,29 @@ fn scan_folder(
         "jobs": jobs,
         "stats": stats,
     }))
+}
+
+fn scan_all_folders(
+    runtime: &DaemonApiRuntime,
+    subdirs: &[String],
+) -> Result<(), ApiFolderStatusError> {
+    let mut guard = runtime
+        .model
+        .write()
+        .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
+    let folders = guard.folderCfgs.keys().cloned().collect::<Vec<_>>();
+    for folder in folders {
+        let res = if subdirs.is_empty() {
+            guard.ScanFolder(&folder)
+        } else {
+            guard.ScanFolderSubdirs(&folder, subdirs)
+        };
+        if let Err(err) = res {
+            return Err(ApiFolderStatusError::Internal(err));
+        }
+    }
+    guard.serve();
+    Ok(())
 }
 
 fn pull_folder(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiFolderStatusError> {
@@ -5892,6 +5924,51 @@ mod tests {
         let jobs_payload: Value = serde_json::from_slice(&jobs.body).expect("decode json");
         assert_eq!(jobs_payload["folder"], "default");
         assert!(jobs_payload["jobs"].is_object());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn api_db_scan_without_folder_scans_all_and_returns_empty_body() {
+        let root = temp_root("api-db-scan-all");
+        let docs = root.join("docs");
+        let media = root.join("media");
+        fs::create_dir_all(&docs).expect("mkdir docs");
+        fs::create_dir_all(&media).expect("mkdir media");
+        fs::write(docs.join("a.txt"), b"a").expect("write docs/a");
+        fs::write(media.join("b.txt"), b"b").expect("write media/b");
+
+        let model = Arc::new(RwLock::new(
+            NewModelWithRuntime(Some(root.clone()), Some(50)).expect("new model"),
+        ));
+        {
+            let mut guard = model.write().expect("lock");
+            guard.newFolder(newFolderConfiguration("docs", &docs.to_string_lossy()));
+            guard.newFolder(newFolderConfiguration("media", &media.to_string_lossy()));
+        }
+
+        let runtime = test_api_runtime(
+            model.clone(),
+            vec![
+                FolderSpec {
+                    id: "docs".to_string(),
+                    path: docs.to_string_lossy().to_string(),
+                },
+                FolderSpec {
+                    id: "media".to_string(),
+                    path: media.to_string_lossy().to_string(),
+                },
+            ],
+            0,
+        );
+
+        let scan = build_api_response(&Method::Post, "/rest/db/scan", &runtime);
+        assert_eq!(scan.status_code, StatusCode(200));
+        assert!(scan.body.is_empty());
+
+        let guard = model.read().expect("lock");
+        assert!(guard.Sequence("docs") > 0);
+        assert!(guard.Sequence("media") > 0);
 
         let _ = fs::remove_dir_all(root);
     }

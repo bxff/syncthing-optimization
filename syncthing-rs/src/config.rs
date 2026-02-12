@@ -407,12 +407,9 @@ impl FolderConfiguration {
     }
 
     pub(crate) fn marker_contents(&self) -> Vec<u8> {
-        let created = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_else(|_| Duration::from_secs(0))
-            .as_secs();
+        let created = humantime::format_rfc3339_seconds(SystemTime::now()).to_string();
         format!(
-            "# This directory is a Syncthing folder marker.\n# Do not delete.\n\nfolderID: {}\ncreated_unix: {}\n",
+            "# This directory is a Syncthing folder marker.\n# Do not delete.\n\nfolderID: {}\ncreated: {}\n",
             self.id, created
         )
         .into_bytes()
@@ -470,8 +467,7 @@ impl FolderConfiguration {
         let marker_dir = Path::new(&self.path).join(DEFAULT_MARKER_NAME);
         let marker_file = marker_dir.join(self.marker_filename());
         let _ = fs::remove_file(marker_file);
-        let _ = fs::remove_dir(marker_dir);
-        Ok(())
+        fs::remove_dir(marker_dir).map_err(|err| err.to_string())
     }
 
     pub(crate) fn description(&self) -> String {
@@ -837,6 +833,40 @@ mod tests {
 
         let err = cfg.create_marker().expect_err("missing root should fail");
         assert_eq!(err, ERR_PATH_MISSING);
+    }
+
+    #[test]
+    fn marker_contents_uses_rfc3339_created_field() {
+        let mut cfg = FolderConfiguration::default();
+        cfg.id = "abc".to_string();
+        let text = String::from_utf8(cfg.marker_contents()).expect("utf8 marker");
+        assert!(text.contains("folderID: abc"));
+        assert!(text.contains("created: "));
+        assert!(!text.contains("created_unix"));
+    }
+
+    #[test]
+    fn remove_marker_returns_error_when_marker_dir_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "syncthing-rs-config-remove-marker-missing-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create root");
+
+        let mut cfg = FolderConfiguration::default();
+        cfg.id = "abc".to_string();
+        cfg.path = root.to_string_lossy().to_string();
+        cfg.marker_name = DEFAULT_MARKER_NAME.to_string();
+
+        let err = cfg
+            .remove_marker()
+            .expect_err("missing marker dir should return error");
+        assert!(!err.is_empty());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

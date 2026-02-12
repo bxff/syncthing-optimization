@@ -36,16 +36,17 @@ impl IndexEngine {
         }
 
         let next = self.folder_sequence.entry(folder.to_string()).or_insert(0);
-        if update.sequence <= *next {
-            return Err(format!(
-                "stale sequence {} for folder {} (current {})",
-                update.sequence, folder, *next
-            ));
+        *next = (*next).max(update.sequence);
+
+        let key = (folder.to_string(), update.path.clone());
+        if let Some(current) = self.files.get(&key) {
+            if update.sequence <= current.sequence {
+                return Ok(());
+            }
         }
 
-        *next = update.sequence;
         self.files.insert(
-            (folder.to_string(), update.path.clone()),
+            key,
             VersionedFile {
                 path: update.path,
                 sequence: update.sequence,
@@ -100,18 +101,23 @@ mod tests {
     }
 
     #[test]
-    fn enforces_monotonic_folder_sequence() {
+    fn accepts_out_of_order_folder_sequence_but_preserves_latest_per_file() {
         let mut idx = IndexEngine::new();
         idx.apply_update("default", update("a.txt", 1, false))
             .expect("apply 1");
-        idx.apply_update("default", update("a.txt", 2, false))
-            .expect("apply 2");
+        idx.apply_update("default", update("b.txt", 3, false))
+            .expect("apply b");
+        idx.apply_update("default", update("a.txt", 2, true))
+            .expect("out of order a");
 
-        let err = idx
-            .apply_update("default", update("a.txt", 2, false))
-            .expect_err("must reject stale update");
-        assert!(err.contains("stale sequence"));
-        assert_eq!(idx.folder_sequence("default"), 2);
+        assert_eq!(idx.folder_sequence("default"), 3);
+        let files = idx.ordered_files(Some("default"));
+        let a = files
+            .iter()
+            .find(|f| f.file.path == "a.txt")
+            .expect("a entry");
+        assert_eq!(a.file.sequence, 2);
+        assert!(a.file.deleted);
     }
 
     #[test]

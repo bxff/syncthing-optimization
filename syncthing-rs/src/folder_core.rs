@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 pub(crate) const deletedBatchSize: usize = 1000;
-pub(crate) const kqueueItemCountThreshold: usize = 100_000;
-pub(crate) const maxToRemove: usize = 10_000;
+pub(crate) const kqueueItemCountThreshold: usize = 10_000;
+pub(crate) const maxToRemove: usize = 1_000;
 const LOCAL_DEVICE_ID: &str = "local";
 const SCAN_DB_BATCH_SIZE: usize = 256;
 const BLOCK_CHUNK_SIZE: usize = 128 * 1024;
@@ -31,10 +31,10 @@ pub(crate) const dbUpdateHandleSymlink: u8 = 5;
 pub(crate) const dbUpdateInvalidate: u8 = 6;
 pub(crate) const dbUpdateShortcutFile: u8 = 7;
 
-pub(crate) const defaultCopiers: usize = 4;
-pub(crate) const defaultPullerPause: f64 = 1.0;
-pub(crate) const defaultPullerPendingKiB: usize = 64 * 1024;
-pub(crate) const maxPullerIterations: usize = 4096;
+pub(crate) const defaultCopiers: usize = 2;
+pub(crate) const defaultPullerPause: f64 = 60.0;
+pub(crate) const defaultPullerPendingKiB: usize = 32 * 1024;
+pub(crate) const maxPullerIterations: usize = 3;
 pub(crate) const retainBits: u32 = 0o7000;
 
 pub(crate) static activity: &str = "folder_activity";
@@ -1464,8 +1464,6 @@ fn should_skip_scan_path(path: &str) -> bool {
         || path.starts_with(".stscan-spill/")
         || path == ".stscan-spill"
         || path.starts_with(".syncthing.")
-        || path.ends_with("/.DS_Store")
-        || path.ends_with(".tmp")
 }
 
 fn process_scanned_file(
@@ -3324,6 +3322,41 @@ mod tests {
             "internal temp files should be ignored instead of treated as deletes"
         );
         assert!(!tracked.deleted);
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(db_root);
+    }
+
+    #[test]
+    fn scan_tracks_regular_tmp_and_ds_store_files() {
+        let root = temp_root("scan-regular-tmp-and-ds-store");
+        fs::write(root.join("report.tmp"), b"tmp").expect("write report.tmp");
+        fs::write(root.join(".DS_Store"), b"ds").expect("write .DS_Store");
+
+        let db_root = temp_root("scan-regular-tmp-and-ds-store-db");
+        let db = Arc::new(RwLock::new(
+            db::WalFreeDb::open_runtime(&db_root, 50).expect("open runtime db"),
+        ));
+        let mut f = newFolder(scan_cfg(&root), db.clone());
+        f.Scan(&[]).expect("scan");
+
+        let report = db
+            .read()
+            .expect("db lock")
+            .get_device_file("default", "local", "report.tmp")
+            .expect("lookup report")
+            .expect("report tracked");
+        assert!(!report.deleted);
+        assert!(!report.ignored);
+
+        let ds_store = db
+            .read()
+            .expect("db lock")
+            .get_device_file("default", "local", ".DS_Store")
+            .expect("lookup ds_store")
+            .expect("ds_store tracked");
+        assert!(!ds_store.deleted);
+        assert!(!ds_store.ignored);
 
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(db_root);

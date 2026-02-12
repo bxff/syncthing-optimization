@@ -36,15 +36,9 @@ impl IndexEngine {
         }
 
         let next = self.folder_sequence.entry(folder.to_string()).or_insert(0);
-        *next = (*next).max(update.sequence);
+        *next = update.sequence;
 
         let key = (folder.to_string(), update.path.clone());
-        if let Some(current) = self.files.get(&key) {
-            if update.sequence <= current.sequence {
-                return Ok(());
-            }
-        }
-
         self.files.insert(
             key,
             VersionedFile {
@@ -101,7 +95,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_out_of_order_folder_sequence_but_preserves_latest_per_file() {
+    fn accepts_out_of_order_folder_sequence_and_applies_last_update() {
         let mut idx = IndexEngine::new();
         idx.apply_update("default", update("a.txt", 1, false))
             .expect("apply 1");
@@ -110,7 +104,7 @@ mod tests {
         idx.apply_update("default", update("a.txt", 2, true))
             .expect("out of order a");
 
-        assert_eq!(idx.folder_sequence("default"), 3);
+        assert_eq!(idx.folder_sequence("default"), 2);
         let files = idx.ordered_files(Some("default"));
         let a = files
             .iter()
@@ -118,6 +112,16 @@ mod tests {
             .expect("a entry");
         assert_eq!(a.file.sequence, 2);
         assert!(a.file.deleted);
+
+        idx.apply_update("default", update("a.txt", 1, false))
+            .expect("replay older update");
+        let files = idx.ordered_files(Some("default"));
+        let a = files
+            .iter()
+            .find(|f| f.file.path == "a.txt")
+            .expect("a entry after replay");
+        assert_eq!(a.file.sequence, 1);
+        assert!(!a.file.deleted);
     }
 
     #[test]

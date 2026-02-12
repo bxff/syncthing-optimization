@@ -1,5 +1,5 @@
 use crate::bep::{decode_frame, default_exchange, encode_frame, message_name};
-use crate::config::{demo_configs, MemoryPolicy};
+use crate::config::{demo_configs, FolderDeviceConfiguration, MemoryPolicy};
 use crate::db;
 use crate::folder_modes::all_mode_actions;
 use crate::index_engine::{FolderUpdate, IndexEngine};
@@ -265,10 +265,13 @@ fn scenario_protocol_state_transition() -> Result<Value, String> {
     let req_root = scenario_root("protocol-state-transition")?;
     fs::write(req_root.join("a.txt"), b"hello-world").map_err(err_to_string)?;
     let mut model = NewModel();
-    model.newFolder(newFolderConfiguration(
-        "default",
-        &req_root.to_string_lossy(),
-    ));
+    let mut cfg = newFolderConfiguration("default", &req_root.to_string_lossy());
+    cfg.devices.push(FolderDeviceConfiguration {
+        device_id: "peer-a".to_string(),
+        introduced_by: String::new(),
+        encryption_password: String::new(),
+    });
+    model.newFolder(cfg);
     let exchange_result = model.RunBepExchange("peer-a", &exchange)?;
     let generated_responses = exchange_result
         .outbound_messages

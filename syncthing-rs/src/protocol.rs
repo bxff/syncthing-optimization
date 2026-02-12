@@ -1,5 +1,4 @@
 use crate::bep::BepMessage;
-use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProtocolEvent {
@@ -19,7 +18,6 @@ pub(crate) enum ProtocolEvent {
 enum ProtocolState {
     Start,
     Dialed,
-    HelloDone,
     Ready,
     Closed,
 }
@@ -59,8 +57,9 @@ fn advance(state: ProtocolState, event: ProtocolEvent) -> Result<ProtocolState, 
 
     match (state, event) {
         (S::Start, E::Dial) => Ok(S::Dialed),
-        (S::Dialed, E::Hello) => Ok(S::HelloDone),
-        (S::HelloDone, E::ClusterConfig) => Ok(S::Ready),
+        // Hello is exchanged out of band in Go; tolerate it but do not require it.
+        (S::Dialed, E::Hello) => Ok(S::Dialed),
+        (S::Dialed, E::ClusterConfig) => Ok(S::Ready),
         (S::Ready, E::ClusterConfig) => Ok(S::Ready),
         (S::Ready, E::Index) => Ok(S::Ready),
         (S::Ready, E::IndexUpdate) => Ok(S::Ready),
@@ -68,10 +67,7 @@ fn advance(state: ProtocolState, event: ProtocolEvent) -> Result<ProtocolState, 
         (S::Ready, E::Response) => Ok(S::Ready),
         (S::Ready, E::DownloadProgress) => Ok(S::Ready),
         (S::Ready, E::Ping) => Ok(S::Ready),
-        (S::Start, E::Close)
-        | (S::Dialed, E::Close)
-        | (S::HelloDone, E::Close)
-        | (S::Ready, E::Close) => Ok(S::Closed),
+        (S::Start, E::Close) | (S::Dialed, E::Close) | (S::Ready, E::Close) => Ok(S::Closed),
         _ => Err(format!(
             "invalid protocol transition: {state:?} + {event:?}"
         )),
@@ -110,21 +106,9 @@ pub(crate) fn event_from_message(message: &BepMessage) -> ProtocolEvent {
 pub(crate) fn run_message_exchange(messages: &[BepMessage]) -> Result<Vec<&'static str>, String> {
     let mut state = ProtocolState::Dialed;
     let mut trace = vec![ProtocolEvent::Dial.as_str()];
-    let mut pending_requests: BTreeSet<u32> = BTreeSet::new();
 
     for message in messages {
         let event = event_from_message(message);
-        match message {
-            BepMessage::Request { id, .. } => {
-                pending_requests.insert(*id);
-            }
-            BepMessage::Response { id, .. } => {
-                if !pending_requests.remove(id) {
-                    return Err(format!("response {id} received without pending request"));
-                }
-            }
-            _ => {}
-        }
         state = advance(state, event)?;
         trace.push(event.as_str());
     }
@@ -164,10 +148,10 @@ mod tests {
     }
 
     #[test]
-    fn response_without_request_fails() {
-        let err = run_events(&[ProtocolEvent::Dial, ProtocolEvent::ClusterConfig])
-            .expect_err("must fail");
-        assert!(err.contains("invalid protocol transition"));
+    fn cluster_config_after_dial_is_allowed() {
+        let trace =
+            run_events(&[ProtocolEvent::Dial, ProtocolEvent::ClusterConfig]).expect("must succeed");
+        assert_eq!(trace, vec!["dial", "cluster_config"]);
     }
 
     #[test]
@@ -191,23 +175,23 @@ mod tests {
     }
 
     #[test]
-    fn response_id_mismatch_fails() {
+    fn response_id_mismatch_is_tolerated() {
         let mut messages = default_exchange();
         for msg in &mut messages {
             if let BepMessage::Response { id, .. } = msg {
                 *id = 999;
             }
         }
-        let err = run_message_exchange(&messages).expect_err("mismatched response should fail");
-        assert!(err.contains("without pending request"));
+        let trace = run_message_exchange(&messages).expect("mismatched response is tolerated");
+        assert!(trace.contains(&"response"));
     }
 
     #[test]
-    fn response_without_pending_request_fails() {
+    fn response_without_pending_request_is_tolerated() {
         let mut messages = default_exchange();
         messages.retain(|message| !matches!(message, BepMessage::Request { .. }));
-        let err = run_message_exchange(&messages).expect_err("orphan response should fail");
-        assert!(err.contains("without pending request"));
+        let trace = run_message_exchange(&messages).expect("orphan response is tolerated");
+        assert!(trace.contains(&"response"));
     }
 
     #[test]

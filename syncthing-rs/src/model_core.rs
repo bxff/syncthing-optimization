@@ -9,6 +9,7 @@ use crate::folder_core;
 use crate::folder_modes::FolderMode;
 use crate::protocol::run_message_exchange;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
@@ -649,7 +650,18 @@ impl model {
         let global = db.count_global(folder_id)?;
         let need = db.count_need(folder_id, device)?;
         let sequence = db.get_device_sequence(folder_id, device)?;
-        Ok(newFolderCompletion(global, need, sequence, &state))
+        let mut completion = newFolderCompletion(global, need, sequence, &state);
+        let downloaded = self
+            .deviceStatRefs
+            .get(device)
+            .and_then(|m| m.get(&format!("downloaded_bytes:{folder_id}")))
+            .copied()
+            .unwrap_or_default();
+        if downloaded > 0 {
+            completion.NeedBytes = completion.NeedBytes.saturating_sub(downloaded);
+            completion.setCompletionPct();
+        }
+        Ok(completion)
     }
 
     pub(crate) fn CurrentFolderFile(&self, folder_id: &str, path: &str) -> Option<db::FileInfo> {
@@ -907,6 +919,27 @@ impl model {
             return false;
         }
         !is_internal_request_path(name)
+            && !matches_any_ignore_pattern(name, self.folderIgnores.get(folder))
+    }
+
+    fn ensure_remote_index_allowed(&self, device: &str, folder_id: &str) -> Result<(), String> {
+        let cfg = self
+            .folderCfgs
+            .get(folder_id)
+            .ok_or_else(|| ErrFolderMissing.to_string())?;
+        if cfg.paused {
+            return Err(ErrFolderPaused.to_string());
+        }
+        let is_self = device == "local" || device == self.id;
+        if !is_self && !cfg.shared_with(device) {
+            return Err(format!("folder {folder_id} is not shared with {device}"));
+        }
+        if !self.folderRunners.contains_key(folder_id)
+            || !self.foldersRunning.get(folder_id).copied().unwrap_or(false)
+        {
+            return Err(ErrFolderNotRunning.to_string());
+        }
+        Ok(())
     }
 
     pub(crate) fn RequestGlobalData(
@@ -958,14 +991,16 @@ impl model {
                 Ok(None)
             }
             BepMessage::Index { folder, files } => {
+                self.ensure_remote_index_allowed(device, folder)?;
                 let converted = files
                     .iter()
                     .map(|file| fileInfoFromIndexEntry(folder, file))
                     .collect::<Vec<_>>();
-                self.IndexFromDevice(folder, device, &converted)?;
+                self.IndexFromDeviceFull(folder, device, &converted)?;
                 Ok(None)
             }
             BepMessage::IndexUpdate { folder, files } => {
+                self.ensure_remote_index_allowed(device, folder)?;
                 let converted = files
                     .iter()
                     .map(|file| fileInfoFromIndexEntry(folder, file))
@@ -997,7 +1032,9 @@ impl model {
                         data: Vec::new(),
                     }));
                 }
-                if !self.request_hash_matches(folder, name, *offset, hash) {
+                let enforce_metadata_hash = !is_hex_sha256(hash);
+                if enforce_metadata_hash && !self.request_hash_matches(folder, name, *offset, hash)
+                {
                     return Ok(Some(BepMessage::Response {
                         id: *id,
                         code: 1,
@@ -1006,12 +1043,23 @@ impl model {
                     }));
                 }
                 match self.RequestData(folder, name, *offset, *size as usize) {
-                    Ok(data) => Ok(Some(BepMessage::Response {
-                        id: *id,
-                        code: 0,
-                        data_len: data.len() as u32,
-                        data,
-                    })),
+                    Ok(data) => {
+                        if is_hex_sha256(hash) && !sha256_hex_matches(hash, &data) {
+                            let _ = self.ScheduleForceRescan(folder, &[name.clone()]);
+                            return Ok(Some(BepMessage::Response {
+                                id: *id,
+                                code: 1,
+                                data_len: 0,
+                                data: Vec::new(),
+                            }));
+                        }
+                        Ok(Some(BepMessage::Response {
+                            id: *id,
+                            code: 0,
+                            data_len: data.len() as u32,
+                            data,
+                        }))
+                    }
                     Err(_) => Ok(Some(BepMessage::Response {
                         id: *id,
                         code: 1,
@@ -1045,6 +1093,16 @@ impl model {
                     .map(|update| format!("{folder}:{}:{}", update.name, update.version))
                     .collect::<Vec<_>>();
                 self.deviceDownloads.insert(device.to_string(), entries);
+                let downloaded = updates
+                    .iter()
+                    .map(|update| {
+                        i64::try_from(update.block_indexes.len())
+                            .unwrap_or(i64::MAX)
+                            .saturating_mul(i64::from(update.block_size.max(0)))
+                    })
+                    .sum::<i64>();
+                let stats = self.deviceStatRefs.entry(device.to_string()).or_default();
+                stats.insert(format!("downloaded_bytes:{folder}"), downloaded.max(0));
                 Ok(None)
             }
             BepMessage::Ping { timestamp_ms } => {
@@ -1335,7 +1393,22 @@ impl model {
     }
 
     pub(crate) fn Index(&mut self, folder_id: &str, files: &[db::FileInfo]) -> Result<(), String> {
-        self.IndexFromDevice(folder_id, "remote", files)
+        self.IndexFromDeviceFull(folder_id, "remote", files)
+    }
+
+    pub(crate) fn IndexFromDeviceFull(
+        &mut self,
+        folder_id: &str,
+        device: &str,
+        files: &[db::FileInfo],
+    ) -> Result<(), String> {
+        let mut db = self
+            .sdb
+            .write()
+            .map_err(|_| "db lock poisoned".to_string())?;
+        db.drop_all_files(folder_id, device)?;
+        db.update(folder_id, device, files.to_vec())?;
+        Ok(())
     }
 
     pub(crate) fn IndexFromDevice(
@@ -1952,6 +2025,88 @@ fn is_internal_request_path(path: &str) -> bool {
         || clean.starts_with(".stversions/")
 }
 
+fn matches_any_ignore_pattern(path: &str, patterns: Option<&Vec<String>>) -> bool {
+    let Some(patterns) = patterns else {
+        return false;
+    };
+    let clean_path = path.trim_start_matches('/');
+    patterns.iter().any(|pattern| {
+        let mut p = pattern.trim();
+        if p.is_empty() || p.starts_with('#') {
+            return false;
+        }
+        if let Some(rest) = p.strip_prefix('!') {
+            p = rest.trim();
+            if p.is_empty() {
+                return false;
+            }
+            return false;
+        }
+        let p = p.trim_start_matches('/');
+        wildcard_match(p, clean_path)
+    })
+}
+
+fn wildcard_match(pattern: &str, value: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if !pattern.contains('*') {
+        return pattern == value;
+    }
+
+    let parts = pattern.split('*').collect::<Vec<_>>();
+    if parts.is_empty() {
+        return true;
+    }
+
+    let starts_with_wildcard = pattern.starts_with('*');
+    let ends_with_wildcard = pattern.ends_with('*');
+
+    let mut remaining = value;
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if i == 0 && !starts_with_wildcard {
+            if !remaining.starts_with(part) {
+                return false;
+            }
+            remaining = &remaining[part.len()..];
+            continue;
+        }
+        if i == parts.len() - 1 && !ends_with_wildcard {
+            return remaining.ends_with(part);
+        }
+        match remaining.find(part) {
+            Some(pos) => remaining = &remaining[pos + part.len()..],
+            None => return false,
+        }
+    }
+    true
+}
+
+fn is_hex_sha256(value: &str) -> bool {
+    value.len() == 64 && value.as_bytes().iter().all(|b| b.is_ascii_hexdigit())
+}
+
+fn sha256_hex_matches(expected_hex: &str, data: &[u8]) -> bool {
+    if !is_hex_sha256(expected_hex) {
+        return false;
+    }
+    let digest = Sha256::digest(data);
+    digest
+        .iter()
+        .zip(expected_hex.as_bytes().chunks_exact(2))
+        .all(|(byte, pair)| {
+            std::str::from_utf8(pair)
+                .ok()
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+                .map(|expected| *byte == expected)
+                .unwrap_or(false)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2283,7 +2438,18 @@ mod tests {
         fs::create_dir_all(&root).expect("mkdir");
 
         let mut m = NewModel();
-        m.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+        let mut cfg = newFolderConfiguration("default", &root.to_string_lossy());
+        cfg.devices.push(crate::config::FolderDeviceConfiguration {
+            device_id: "peer-a".to_string(),
+            introduced_by: String::new(),
+            encryption_password: String::new(),
+        });
+        cfg.devices.push(crate::config::FolderDeviceConfiguration {
+            device_id: "peer-b".to_string(),
+            introduced_by: String::new(),
+            encryption_password: String::new(),
+        });
+        m.newFolder(cfg);
         let err = m
             .RequestData("default", "../etc/passwd", 0, 16)
             .expect_err("must reject");
@@ -2412,7 +2578,18 @@ mod tests {
         fs::create_dir_all(&root).expect("mkdir");
 
         let mut m = NewModel();
-        m.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+        let mut cfg = newFolderConfiguration("default", &root.to_string_lossy());
+        cfg.devices.push(crate::config::FolderDeviceConfiguration {
+            device_id: "peer-a".to_string(),
+            introduced_by: String::new(),
+            encryption_password: String::new(),
+        });
+        cfg.devices.push(crate::config::FolderDeviceConfiguration {
+            device_id: "peer-b".to_string(),
+            introduced_by: String::new(),
+            encryption_password: String::new(),
+        });
+        m.newFolder(cfg);
         let fi = db::FileInfo {
             folder: "default".to_string(),
             path: "a.txt".to_string(),
@@ -2734,7 +2911,18 @@ mod tests {
         fs::create_dir_all(&root).expect("mkdir");
 
         let mut m = NewModel();
-        m.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+        let mut cfg = newFolderConfiguration("default", &root.to_string_lossy());
+        cfg.devices.push(crate::config::FolderDeviceConfiguration {
+            device_id: "peer-a".to_string(),
+            introduced_by: String::new(),
+            encryption_password: String::new(),
+        });
+        cfg.devices.push(crate::config::FolderDeviceConfiguration {
+            device_id: "peer-b".to_string(),
+            introduced_by: String::new(),
+            encryption_password: String::new(),
+        });
+        m.newFolder(cfg);
 
         m.ApplyBepMessage(
             "peer-a",

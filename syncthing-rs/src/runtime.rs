@@ -1576,20 +1576,14 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             if let Ok(read_dir) = fs::read_dir(&root) {
                 for entry in read_dir.flatten().take(200) {
                     let path = entry.path();
-                    entries.push(json!({
-                        "name": entry.file_name().to_string_lossy().to_string(),
-                        "path": path.display().to_string(),
-                        "directory": path.is_dir(),
-                    }));
+                    entries.push(path.display().to_string());
                 }
             }
-            entries.sort_by(|a, b| {
-                a["name"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .cmp(b["name"].as_str().unwrap_or_default())
-            });
-            ApiReply::json(200, json!({ "current": current, "entries": entries }))
+            entries.sort();
+            ApiReply::json(
+                200,
+                Value::Array(entries.into_iter().map(Value::String).collect()),
+            )
         }
         "/rest/system/error" => match method {
             Method::Get => {
@@ -2035,7 +2029,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 };
                 let mut devices = state.device_configs.values().cloned().collect::<Vec<_>>();
                 devices.sort_by(|a, b| a["deviceID"].as_str().cmp(&b["deviceID"].as_str()));
-                ApiReply::json(200, json!({"devices": devices, "count": devices.len()}))
+                ApiReply::json(200, Value::Array(devices))
             }
             Method::Post | Method::Put => {
                 let Some(device_id) = params.get("id").or_else(|| params.get("deviceID")) else {
@@ -2330,7 +2324,13 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         },
         "/rest/system/config/folders" => match method {
             Method::Get => match list_config_folders(runtime) {
-                Ok(payload) => ApiReply::json(200, payload),
+                Ok(payload) => {
+                    if let Some(folders) = payload.as_array() {
+                        ApiReply::json(200, json!({"count": folders.len(), "folders": payload}))
+                    } else {
+                        ApiReply::json(200, payload)
+                    }
+                }
                 Err(ApiConfigError::BadRequest(err)) => {
                     ApiReply::json(400, json!({ "error": err }))
                 }
@@ -3905,10 +3905,7 @@ fn list_config_folders(runtime: &DaemonApiRuntime) -> Result<Value, ApiConfigErr
         })
         .collect::<Vec<_>>();
     folders.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
-    Ok(json!({
-        "count": folders.len(),
-        "folders": folders,
-    }))
+    Ok(Value::Array(folders))
 }
 
 fn add_config_folder(
@@ -5135,6 +5132,15 @@ fn run_parity_peer_probe_inprocess(model: &Arc<RwLock<model>>) -> Result<(), Str
     let mut guard = model
         .write()
         .map_err(|_| "model lock poisoned".to_string())?;
+    if let Some(cfg) = guard.folderCfgs.get_mut(DEFAULT_FOLDER_ID) {
+        if !cfg.shared_with("parity-probe") {
+            cfg.devices.push(crate::config::FolderDeviceConfiguration {
+                device_id: "parity-probe".to_string(),
+                introduced_by: String::new(),
+                encryption_password: String::new(),
+            });
+        }
+    }
     guard.ApplyBepMessage(
         "parity-probe",
         &BepMessage::Hello {
@@ -5196,8 +5202,24 @@ fn run_parity_peer_probe(model: &Arc<RwLock<model>>) -> Result<(), String> {
         let (mut stream, peer_addr) = listener
             .accept()
             .map_err(|err| format!("accept parity peer probe connection: {err}"))?;
-        handle_peer_connection(&mut stream, &peer_addr.to_string(), &model_ref)
+        let _ = peer_addr;
+        handle_peer_connection(&mut stream, "parity-probe", &model_ref)
     });
+
+    {
+        let mut guard = model
+            .write()
+            .map_err(|_| "model lock poisoned".to_string())?;
+        if let Some(cfg) = guard.folderCfgs.get_mut(DEFAULT_FOLDER_ID) {
+            if !cfg.shared_with("parity-probe") {
+                cfg.devices.push(crate::config::FolderDeviceConfiguration {
+                    device_id: "parity-probe".to_string(),
+                    introduced_by: String::new(),
+                    encryption_password: String::new(),
+                });
+            }
+        }
+    }
 
     let mut client = TcpStream::connect(addr)
         .map_err(|err| format!("connect parity peer probe client: {err}"))?;
@@ -5654,7 +5676,13 @@ mod tests {
         let model = Arc::new(RwLock::new(NewModel()));
         {
             let mut guard = model.write().expect("lock");
-            guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+            let mut cfg = newFolderConfiguration("default", &root.to_string_lossy());
+            cfg.devices.push(crate::config::FolderDeviceConfiguration {
+                device_id: "peer-a".to_string(),
+                introduced_by: String::new(),
+                encryption_password: String::new(),
+            });
+            guard.newFolder(cfg);
         }
         let runtime = test_api_runtime(model, Vec::new(), 2);
         let reply = build_api_response(&Method::Get, "/rest/system/status", &runtime);
@@ -5839,7 +5867,13 @@ mod tests {
         let model = Arc::new(RwLock::new(NewModel()));
         {
             let mut guard = model.write().expect("lock");
-            guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+            let mut cfg = newFolderConfiguration("default", &root.to_string_lossy());
+            cfg.devices.push(crate::config::FolderDeviceConfiguration {
+                device_id: "peer-a".to_string(),
+                introduced_by: String::new(),
+                encryption_password: String::new(),
+            });
+            guard.newFolder(cfg);
         }
         let runtime = test_api_runtime(model, Vec::new(), 0);
 
@@ -6487,11 +6521,12 @@ mod tests {
         );
         assert_eq!(response.status_code, StatusCode(200));
         let payload: Value = serde_json::from_slice(&response.body).expect("decode json");
-        let names = payload["entries"]
+        let names = payload
             .as_array()
             .expect("entries")
             .iter()
-            .filter_map(|entry| entry["name"].as_str())
+            .filter_map(Value::as_str)
+            .filter_map(|path| path.rsplit('/').next())
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["a.txt", "b.txt", "c.txt"]);
 
@@ -6719,6 +6754,42 @@ mod tests {
     }
 
     #[test]
+    fn api_config_list_endpoints_return_arrays() {
+        let root = temp_root("api-config-list-arrays");
+        fs::create_dir_all(root.join("docs")).expect("mkdir docs");
+        let runtime = test_api_runtime(Arc::new(RwLock::new(NewModel())), Vec::new(), 0);
+
+        let add_folder = build_api_response(
+            &Method::Post,
+            &format!(
+                "/rest/config/folders?id=docs&path={}",
+                root.join("docs").to_string_lossy()
+            ),
+            &runtime,
+        );
+        assert_eq!(add_folder.status_code, StatusCode(200));
+
+        let add_device = build_api_response(
+            &Method::Post,
+            "/rest/config/devices?id=peer-a&address=tcp://peer-a:22000",
+            &runtime,
+        );
+        assert_eq!(add_device.status_code, StatusCode(200));
+
+        let folders = build_api_response(&Method::Get, "/rest/config/folders", &runtime);
+        assert_eq!(folders.status_code, StatusCode(200));
+        let folders_payload: Value = serde_json::from_slice(&folders.body).expect("decode folders");
+        assert!(folders_payload.is_array());
+
+        let devices = build_api_response(&Method::Get, "/rest/config/devices", &runtime);
+        assert_eq!(devices.status_code, StatusCode(200));
+        let devices_payload: Value = serde_json::from_slice(&devices.body).expect("decode devices");
+        assert!(devices_payload.is_array());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn parse_query_decodes_percent_and_plus() {
         let params = parse_query("id=docs&path=%2Ftmp%2Ffolder+one&type=receiveonly");
         assert_eq!(params.get("id").map(String::as_str), Some("docs"));
@@ -6789,7 +6860,13 @@ mod tests {
         let model = Arc::new(RwLock::new(NewModel()));
         {
             let mut guard = model.write().expect("lock");
-            guard.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+            let mut cfg = newFolderConfiguration("default", &root.to_string_lossy());
+            cfg.devices.push(crate::config::FolderDeviceConfiguration {
+                device_id: "peer-a".to_string(),
+                introduced_by: String::new(),
+                encryption_password: String::new(),
+            });
+            guard.newFolder(cfg);
         }
 
         let Some(listener) = bind_loopback_listener_or_skip() else {

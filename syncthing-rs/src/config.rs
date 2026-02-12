@@ -28,9 +28,9 @@ pub(crate) const ErrMarkerMissing: &str = ERR_MARKER_MISSING;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum FolderType {
-    #[serde(rename = "sendreceive", alias = "sendrecv")]
+    #[serde(rename = "sendreceive", alias = "sendrecv", alias = "readwrite")]
     SendReceive,
-    #[serde(rename = "sendonly")]
+    #[serde(rename = "sendonly", alias = "readonly")]
     SendOnly,
     #[serde(rename = "receiveonly", alias = "recvonly")]
     ReceiveOnly,
@@ -58,16 +58,30 @@ pub(crate) enum PullOrder {
 pub(crate) enum BlockPullOrder {
     #[serde(rename = "standard")]
     Standard,
+    #[serde(rename = "random")]
+    Random,
     #[serde(rename = "inOrder", alias = "inorder")]
     InOrder,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub(crate) enum CopyRangeMethod {
+    #[serde(
+        rename = "all",
+        alias = "standard",
+        alias = "allwithfallback",
+        alias = "all_with_fallback",
+        alias = "allWithFallback"
+    )]
     Standard,
-    AllWithFallback,
-    All,
+    #[serde(rename = "ioctl")]
+    Ioctl,
+    #[serde(rename = "copy_file_range", alias = "copyfilerange")]
+    CopyFileRange,
+    #[serde(rename = "sendfile")]
+    Sendfile,
+    #[serde(rename = "duplicate_extents", alias = "duplicateextents")]
+    DuplicateExtents,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -917,14 +931,27 @@ mod tests {
     fn folder_type_and_orders_accept_go_tokens_and_aliases() {
         let canonical: FolderType = serde_json::from_str("\"sendreceive\"").expect("canonical");
         let alias: FolderType = serde_json::from_str("\"sendrecv\"").expect("alias");
+        let legacy: FolderType = serde_json::from_str("\"readwrite\"").expect("legacy");
         assert_eq!(canonical, FolderType::SendReceive);
         assert_eq!(alias, FolderType::SendReceive);
+        assert_eq!(legacy, FolderType::SendReceive);
         assert_eq!(FolderType::ReceiveOnly.as_str(), "receiveonly");
 
         let pull: PullOrder = serde_json::from_str("\"smallestFirst\"").expect("pull order");
         assert_eq!(pull, PullOrder::SmallestFirst);
 
+        let block_random: BlockPullOrder =
+            serde_json::from_str("\"random\"").expect("block pull random");
+        assert_eq!(block_random, BlockPullOrder::Random);
+
         let block: BlockPullOrder = serde_json::from_str("\"inOrder\"").expect("block pull order");
         assert_eq!(block, BlockPullOrder::InOrder);
+
+        let method: CopyRangeMethod =
+            serde_json::from_str("\"copy_file_range\"").expect("copy range method");
+        assert_eq!(method, CopyRangeMethod::CopyFileRange);
+
+        let method_all: CopyRangeMethod = serde_json::from_str("\"all\"").expect("copy range all");
+        assert_eq!(method_all, CopyRangeMethod::Standard);
     }
 }

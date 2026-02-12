@@ -268,6 +268,7 @@ pub(crate) struct PlatformData {
     pub(crate) Freebsd: Option<UnixData>,
     pub(crate) Netbsd: Option<UnixData>,
     pub(crate) Windows: Option<WindowsData>,
+    pub(crate) Xattrs: Option<XattrData>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]

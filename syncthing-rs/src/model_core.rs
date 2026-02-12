@@ -899,7 +899,7 @@ impl model {
             return false;
         }
         let is_self = device == "local" || device == self.id;
-        let explicitly_shared = cfg.devices.is_empty() || cfg.shared_with(device);
+        let explicitly_shared = cfg.shared_with(device);
         if !is_self && !explicitly_shared {
             return false;
         }
@@ -1244,13 +1244,6 @@ impl model {
         if folder.trim().is_empty() {
             return Err("folder id is required".to_string());
         }
-        if self.folderCfgs.contains_key(folder)
-            || self.foldersRunning.get(folder).copied().unwrap_or(false)
-        {
-            // Dismissing a configured/running folder is a no-op for compatibility with
-            // API callers that treat dismiss as idempotent and only use pending offers.
-            return Ok(());
-        }
         if device.trim().is_empty() {
             self.pendingFolderOffers.remove(folder);
             return Ok(());
@@ -1429,17 +1422,17 @@ impl model {
     }
 
     pub(crate) fn checkFolderRunningRLocked(&self, folder_id: &str) -> Result<(), String> {
+        if self.folderRunners.contains_key(folder_id)
+            && self.foldersRunning.get(folder_id).copied().unwrap_or(false)
+        {
+            return Ok(());
+        }
         match self.folderCfgs.get(folder_id) {
             None => return Err(ErrFolderMissing.to_string()),
             Some(cfg) if cfg.paused => return Err(ErrFolderPaused.to_string()),
             Some(_) => {}
         }
-        if !self.folderRunners.contains_key(folder_id)
-            || !self.foldersRunning.get(folder_id).copied().unwrap_or(false)
-        {
-            return Err(ErrFolderNotRunning.to_string());
-        }
-        Ok(())
+        Err(ErrFolderNotRunning.to_string())
     }
 
     pub(crate) fn cleanPending(&mut self, folder_id: &str) {
@@ -2279,7 +2272,13 @@ mod tests {
         fs::write(root.join("a.txt"), b"hello-world").expect("write");
 
         let mut m = NewModel();
-        m.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+        let mut cfg = newFolderConfiguration("default", &root.to_string_lossy());
+        cfg.devices.push(crate::config::FolderDeviceConfiguration {
+            device_id: "peer-a".to_string(),
+            introduced_by: String::new(),
+            encryption_password: String::new(),
+        });
+        m.newFolder(cfg);
         let exchange = crate::bep::default_exchange();
 
         let result = m.RunBepExchange("peer-a", &exchange).expect("run exchange");

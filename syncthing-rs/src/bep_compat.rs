@@ -499,6 +499,12 @@ impl FileInfo {
         if !cmp.IgnorePerms && !PermsEqual(self, other) {
             return false;
         }
+        if !cmp.IgnoreOwnership && !ownershipEqual(&self.Platform, &other.Platform) {
+            return false;
+        }
+        if !cmp.IgnoreXattrs && !xattrsEqual(&self.Platform.Xattrs(), &other.Platform.Xattrs()) {
+            return false;
+        }
         if !cmp.IgnoreFlags && self.LocalFlags != other.LocalFlags {
             return false;
         }
@@ -792,12 +798,17 @@ impl PlatformData {
         if self.Windows.is_none() {
             self.Windows = other.Windows.clone();
         }
+        if self.Xattrs.is_none() {
+            self.Xattrs = other.Xattrs.clone();
+        }
     }
 
-    pub(crate) fn SetXattrs(&mut self, _xattrs: XattrData) {}
+    pub(crate) fn SetXattrs(&mut self, xattrs: XattrData) {
+        self.Xattrs = Some(xattrs);
+    }
 
     pub(crate) fn Xattrs(&self) -> XattrData {
-        XattrData::default()
+        self.Xattrs.clone().unwrap_or_default()
     }
 
     pub(crate) fn toWire(&self) -> Value {
@@ -1235,6 +1246,22 @@ pub(crate) fn windowsOwnershipEqual(a: &WindowsData, b: &WindowsData) -> bool {
     a.OwnerName == b.OwnerName && a.OwnerIsGroup == b.OwnerIsGroup
 }
 
+pub(crate) fn ownershipEqual(a: &PlatformData, b: &PlatformData) -> bool {
+    match (&a.Unix, &b.Unix) {
+        (Some(left), Some(right)) if !unixOwnershipEqual(left, right) => return false,
+        (None, None) => {}
+        (Some(_), None) | (None, Some(_)) => return false,
+        _ => {}
+    }
+    match (&a.Windows, &b.Windows) {
+        (Some(left), Some(right)) if !windowsOwnershipEqual(left, right) => return false,
+        (None, None) => {}
+        (Some(_), None) | (None, Some(_)) => return false,
+        _ => {}
+    }
+    true
+}
+
 pub(crate) fn IsVersionMismatch(local: &Vector, remote: &Vector) -> bool {
     local != remote
 }
@@ -1505,5 +1532,56 @@ mod tests {
             Counters: vec![Counter { Id: 1, Value: 2 }, Counter { Id: 3, Value: 4 }],
         };
         assert_eq!(VectorHash(&v).len(), 32);
+    }
+
+    #[test]
+    fn platform_data_round_trips_xattrs() {
+        let mut p = PlatformData::default();
+        p.SetXattrs(XattrData {
+            Xattrs: vec![Xattr {
+                Name: "user.test".to_string(),
+                Value: b"abc".to_vec(),
+            }],
+        });
+        let x = p.Xattrs();
+        assert_eq!(x.Xattrs.len(), 1);
+        assert_eq!(x.Xattrs[0].Name, "user.test");
+        assert_eq!(x.Xattrs[0].Value, b"abc".to_vec());
+    }
+
+    #[test]
+    fn is_equivalent_optional_checks_xattrs_when_not_ignored() {
+        let mut a = FileInfo {
+            Name: "a.txt".to_string(),
+            ModifiedS: 1,
+            ModifiedNs: 0,
+            ..Default::default()
+        };
+        let mut b = a.clone();
+
+        let mut p1 = PlatformData::default();
+        p1.SetXattrs(XattrData {
+            Xattrs: vec![Xattr {
+                Name: "user.test".to_string(),
+                Value: b"one".to_vec(),
+            }],
+        });
+        let mut p2 = PlatformData::default();
+        p2.SetXattrs(XattrData {
+            Xattrs: vec![Xattr {
+                Name: "user.test".to_string(),
+                Value: b"two".to_vec(),
+            }],
+        });
+        a.Platform = p1;
+        b.Platform = p2;
+
+        assert!(!a.IsEquivalentOptional(&b, &FileInfoComparison::default()));
+
+        let cmp = FileInfoComparison {
+            IgnoreXattrs: true,
+            ..Default::default()
+        };
+        assert!(a.IsEquivalentOptional(&b, &cmp));
     }
 }

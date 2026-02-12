@@ -40,7 +40,7 @@ pub(crate) enum BepMessage {
         name: String,
         offset: u64,
         size: u32,
-        hash: String,
+        hash: Vec<u8>,
     },
     Response {
         id: u32,
@@ -307,7 +307,7 @@ fn encode_payload(message: &BepMessage) -> Result<Vec<u8>, String> {
                 name: name.clone(),
                 offset,
                 size,
-                hash: hash.as_bytes().to_vec(),
+                hash: hash.clone(),
                 from_temporary: false,
                 block_no: 0,
             };
@@ -403,7 +403,7 @@ fn decode_payload(message_type: i32, payload: &[u8]) -> Result<BepMessage, Strin
                 name: msg.name,
                 offset: msg.offset.max(0) as u64,
                 size: msg.size.max(0) as u32,
-                hash: String::from_utf8_lossy(&msg.hash).to_string(),
+                hash: msg.hash,
             })
         }
         MessageType_MESSAGE_TYPE_RESPONSE => {
@@ -584,7 +584,7 @@ pub(crate) fn default_exchange() -> Vec<BepMessage> {
             name: "a.txt".to_string(),
             offset: 0,
             size: 110,
-            hash: "h2".to_string(),
+            hash: b"h2".to_vec(),
         },
         BepMessage::Response {
             id: 1,

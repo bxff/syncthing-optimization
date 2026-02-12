@@ -1037,30 +1037,29 @@ impl model {
                     .get(folder)
                     .map(|cfg| cfg.folder_type == FolderType::ReceiveEncrypted)
                     .unwrap_or(false);
-
-                let enforce_metadata_hash = !is_receive_encrypted && !is_hex_sha256(hash);
-                if enforce_metadata_hash && !self.request_hash_matches(folder, name, *offset, hash)
-                {
-                    return Ok(Some(BepMessage::Response {
-                        id: *id,
-                        code: 1,
-                        data_len: 0,
-                        data: Vec::new(),
-                    }));
-                }
                 match self.RequestData(folder, name, *offset, *size as usize) {
                     Ok(data) => {
-                        if !is_receive_encrypted
-                            && is_hex_sha256(hash)
-                            && !sha256_hex_matches(hash, &data)
-                        {
-                            let _ = self.ScheduleForceRescan(folder, &[name.clone()]);
-                            return Ok(Some(BepMessage::Response {
-                                id: *id,
-                                code: 1,
-                                data_len: 0,
-                                data: Vec::new(),
-                            }));
+                        if !is_receive_encrypted && !hash.is_empty() {
+                            let hash_ok = if hash.len() == 32 {
+                                sha256_bytes_matches(hash, &data)
+                            } else if let Some(hash_str) = std::str::from_utf8(hash).ok() {
+                                if is_hex_sha256(hash_str) {
+                                    sha256_hex_matches(hash_str, &data)
+                                } else {
+                                    self.request_hash_matches(folder, name, *offset, hash_str)
+                                }
+                            } else {
+                                false
+                            };
+                            if !hash_ok {
+                                let _ = self.ScheduleForceRescan(folder, &[name.clone()]);
+                                return Ok(Some(BepMessage::Response {
+                                    id: *id,
+                                    code: 1,
+                                    data_len: 0,
+                                    data: Vec::new(),
+                                }));
+                            }
                         }
                         Ok(Some(BepMessage::Response {
                             id: *id,
@@ -2120,6 +2119,11 @@ fn sha256_hex_matches(expected_hex: &str, data: &[u8]) -> bool {
         })
 }
 
+fn sha256_bytes_matches(expected: &[u8], data: &[u8]) -> bool {
+    let digest = Sha256::digest(data);
+    digest.as_slice() == expected
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2537,7 +2541,7 @@ mod tests {
                     name: "../etc/passwd".to_string(),
                     offset: 0,
                     size: 64,
-                    hash: "h".to_string(),
+                    hash: b"h".to_vec(),
                 },
             )
             .expect("response generated");
@@ -2565,7 +2569,7 @@ mod tests {
                     name: "a.txt".to_string(),
                     offset: 0,
                     size: (MAX_BEP_REQUEST_BYTES as u32) + 1,
-                    hash: "h".to_string(),
+                    hash: b"h".to_vec(),
                 },
             )
             .expect("response generated");
@@ -2630,7 +2634,7 @@ mod tests {
                     name: "a.txt".to_string(),
                     offset: 0,
                     size: 4,
-                    hash: "wrong-hash".to_string(),
+                    hash: b"wrong-hash".to_vec(),
                 },
             )
             .expect("response generated");
@@ -2685,7 +2689,7 @@ mod tests {
                     name: "a.txt".to_string(),
                     offset: 0,
                     size: 4,
-                    hash: "bad".to_string(),
+                    hash: b"bad".to_vec(),
                 },
             )
             .expect("response generated");
@@ -2749,8 +2753,8 @@ mod tests {
                     name: "a.txt".to_string(),
                     offset: 0,
                     size: 5,
-                    hash: "0000000000000000000000000000000000000000000000000000000000000000"
-                        .to_string(),
+                    hash: b"0000000000000000000000000000000000000000000000000000000000000000"
+                        .to_vec(),
                 },
             )
             .expect("response generated");
@@ -2799,7 +2803,7 @@ mod tests {
                     name: "a.txt".to_string(),
                     offset: 0,
                     size: 4,
-                    hash: "".to_string(),
+                    hash: Vec::new(),
                 },
             )
             .expect("response generated");
@@ -2850,7 +2854,7 @@ mod tests {
                     name: "keep.tmp".to_string(),
                     offset: 0,
                     size: 2,
-                    hash: "".to_string(),
+                    hash: Vec::new(),
                 },
             )
             .expect("keep response");
@@ -2868,7 +2872,7 @@ mod tests {
                     name: "drop.tmp".to_string(),
                     offset: 0,
                     size: 2,
-                    hash: "".to_string(),
+                    hash: Vec::new(),
                 },
             )
             .expect("drop response");

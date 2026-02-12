@@ -1095,6 +1095,7 @@ struct ApiRuntimeState {
     log_messages: Vec<Value>,
     log_facilities: BTreeSet<String>,
     log_levels: BTreeMap<String, String>,
+    auth_param_salt: String,
     active_auth_users: BTreeSet<String>,
     active_auth_tokens: BTreeMap<String, String>,
     active_auth_csrf: BTreeMap<String, String>,
@@ -1180,6 +1181,13 @@ impl ApiRuntimeState {
                 ("main".to_string(), "info".to_string()),
                 ("model".to_string(), "info".to_string()),
             ]),
+            auth_param_salt: format!(
+                "{:x}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ),
             active_auth_users: BTreeSet::new(),
             active_auth_tokens: BTreeMap::new(),
             active_auth_csrf: BTreeMap::new(),
@@ -1231,13 +1239,30 @@ fn start_api_server(
             let mut url = request.url().to_string();
             let session_cookie = session_cookie_name(&runtime);
             let csrf_header = csrf_header_name(&runtime);
+            let (token_query_key, csrf_query_key, apikey_query_key) = runtime
+                .state
+                .read()
+                .map(|state| {
+                    (
+                        auth_query_token_key(&state),
+                        auth_query_csrf_key(&state),
+                        auth_query_apikey_key(&state),
+                    )
+                })
+                .unwrap_or_else(|_| {
+                    (
+                        "_auth_token".to_string(),
+                        "_auth_csrf".to_string(),
+                        "_auth_apikey".to_string(),
+                    )
+                });
             if let Some(api_key) = request
                 .headers()
                 .iter()
                 .find(|h| h.field.equiv("X-API-Key"))
                 .map(|h| h.value.to_string())
             {
-                url = append_query_param(&url, "x-api-key", &api_key);
+                url = append_query_param(&url, &apikey_query_key, &api_key);
             }
             if let Some(auth) = request
                 .headers()
@@ -1246,7 +1271,7 @@ fn start_api_server(
                 .map(|h| h.value.to_string())
             {
                 if let Some(token) = auth.strip_prefix("Bearer ") {
-                    url = append_query_param(&url, "_auth_token", token.trim());
+                    url = append_query_param(&url, &token_query_key, token.trim());
                 }
             }
             if let Some(cookie_header) = request
@@ -1258,14 +1283,14 @@ fn start_api_server(
                 if let Some(session_token) = extract_cookie_value(&cookie_header, &session_cookie)
                     .or_else(|| extract_cookie_value(&cookie_header, "sessionid"))
                 {
-                    url = append_query_param(&url, "_auth_token", session_token);
+                    url = append_query_param(&url, &token_query_key, session_token);
                 }
             }
             for header in request.headers() {
                 let field = header.field.to_string();
                 if field.eq_ignore_ascii_case(&csrf_header) {
                     let value = header.value.to_string();
-                    url = append_query_param(&url, "_auth_csrf", value.trim());
+                    url = append_query_param(&url, &csrf_query_key, value.trim());
                     break;
                 }
             }
@@ -1586,7 +1611,8 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 Ok(guard) => guard,
                 Err(_) => return make_api_error(500, "api state lock poisoned"),
             };
-            if let Some(token) = params.get("_auth_token") {
+            let token_key = auth_query_token_key(&state);
+            if let Some(token) = params.get(&token_key) {
                 if let Some(user) = state.active_auth_tokens.get(token).cloned() {
                     state.active_auth_tokens.remove(token);
                     state.active_auth_csrf.remove(token);
@@ -1840,7 +1866,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     "disable",
                 ];
                 for (key, value) in &params {
-                    if reserved.contains(&key.as_str()) {
+                    if reserved.contains(&key.as_str()) || key.starts_with("_auth_") {
                         continue;
                     }
                     if !value.trim().is_empty() {
@@ -3371,6 +3397,18 @@ fn csrf_header_name(runtime: &DaemonApiRuntime) -> String {
     format!("X-CSRF-Token-{}", runtime_short_id(runtime))
 }
 
+fn auth_query_token_key(state: &ApiRuntimeState) -> String {
+    format!("_auth_token_{}", state.auth_param_salt)
+}
+
+fn auth_query_csrf_key(state: &ApiRuntimeState) -> String {
+    format!("_auth_csrf_{}", state.auth_param_salt)
+}
+
+fn auth_query_apikey_key(state: &ApiRuntimeState) -> String {
+    format!("_auth_apikey_{}", state.auth_param_salt)
+}
+
 fn mint_auth_token(user: &str) -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3421,10 +3459,9 @@ fn is_authenticated_request(
         .and_then(Value::as_str)
         .filter(|v| !v.is_empty())
         .map(|expected_key| {
+            let api_key_param = auth_query_apikey_key(&state);
             params
-                .get("x-api-key")
-                .or_else(|| params.get("apiKey"))
-                .or_else(|| params.get("api-key"))
+                .get(&api_key_param)
                 .map(|provided| provided == expected_key)
                 .unwrap_or(false)
         })
@@ -3433,7 +3470,9 @@ fn is_authenticated_request(
         return Ok(true);
     }
 
-    let Some(token) = params.get("_auth_token") else {
+    let token_key = auth_query_token_key(&state);
+    let csrf_key = auth_query_csrf_key(&state);
+    let Some(token) = params.get(&token_key) else {
         return Ok(false);
     };
 
@@ -3459,7 +3498,7 @@ fn is_authenticated_request(
     let Some(expected_csrf) = state.active_auth_csrf.get(token) else {
         return Ok(false);
     };
-    let Some(provided_csrf) = params.get("_auth_csrf") else {
+    let Some(provided_csrf) = params.get(&csrf_key) else {
         return Ok(false);
     };
     Ok(provided_csrf == expected_csrf)
@@ -5796,7 +5835,7 @@ fn run_parity_peer_probe_inprocess(model: &Arc<RwLock<model>>) -> Result<(), Str
                 name: "a.txt".to_string(),
                 offset: 0,
                 size: 5,
-                hash: "".to_string(),
+                hash: Vec::new(),
             },
         )?
         .ok_or_else(|| "peer probe fallback expected response message".to_string())?;
@@ -5881,7 +5920,7 @@ fn run_parity_peer_probe(model: &Arc<RwLock<model>>) -> Result<(), String> {
             name: "a.txt".to_string(),
             offset: 0,
             size: 5,
-            hash: "".to_string(),
+            hash: Vec::new(),
         },
     )?;
 
@@ -5988,6 +6027,16 @@ mod tests {
             }
         }
         None
+    }
+
+    fn auth_query_keys(runtime: &DaemonApiRuntime) -> (String, String) {
+        let state = runtime.state.read().expect("state lock");
+        (auth_query_token_key(&state), auth_query_csrf_key(&state))
+    }
+
+    fn auth_apikey_key(runtime: &DaemonApiRuntime) -> String {
+        let state = runtime.state.read().expect("state lock");
+        auth_query_apikey_key(&state)
     }
 
     fn bind_loopback_listener_or_skip() -> Option<TcpListener> {
@@ -7261,10 +7310,11 @@ mod tests {
         );
         assert_eq!(login.status_code, StatusCode(204));
         let token = session_token_from_set_cookie(&login).expect("session token");
+        let (token_key, _csrf_key) = auth_query_keys(&runtime);
 
         let authorized = build_api_response(
             &Method::Get,
-            &format!("/rest/system/status?_auth_token={token}"),
+            &format!("/rest/system/status?{token_key}={token}"),
             &runtime,
         );
         assert_eq!(authorized.status_code, StatusCode(200));
@@ -7310,6 +7360,7 @@ mod tests {
         let csrf = header_value(&login, "X-CSRF-Token")
             .expect("csrf token")
             .to_string();
+        let (token_key, csrf_key) = auth_query_keys(&runtime);
 
         let bad_logout = build_api_response(
             &Method::Post,
@@ -7320,14 +7371,14 @@ mod tests {
 
         let good_logout = build_api_response(
             &Method::Post,
-            &format!("/rest/noauth/auth/logout?user=alice&_auth_token={token}&_auth_csrf={csrf}"),
+            &format!("/rest/noauth/auth/logout?user=alice&{token_key}={token}&{csrf_key}={csrf}"),
             &runtime,
         );
         assert_eq!(good_logout.status_code, StatusCode(204));
 
         let still_auth = build_api_response(
             &Method::Get,
-            &format!("/rest/system/status?_auth_token={token}"),
+            &format!("/rest/system/status?{token_key}={token}"),
             &runtime,
         );
         assert_eq!(still_auth.status_code, StatusCode(401));
@@ -7352,24 +7403,25 @@ mod tests {
         let csrf = header_value(&login, "X-CSRF-Token")
             .expect("csrf token")
             .to_string();
+        let (token_key, csrf_key) = auth_query_keys(&runtime);
 
         let get_ok = build_api_response(
             &Method::Get,
-            &format!("/rest/system/status?_auth_token={token}"),
+            &format!("/rest/system/status?{token_key}={token}"),
             &runtime,
         );
         assert_eq!(get_ok.status_code, StatusCode(200));
 
         let write_missing_csrf = build_api_response(
             &Method::Post,
-            &format!("/rest/db/scan?folder=default&_auth_token={token}"),
+            &format!("/rest/db/scan?folder=default&{token_key}={token}"),
             &runtime,
         );
         assert_eq!(write_missing_csrf.status_code, StatusCode(401));
 
         let write_ok = build_api_response(
             &Method::Post,
-            &format!("/rest/db/scan?folder=default&_auth_token={token}&_auth_csrf={csrf}"),
+            &format!("/rest/db/scan?folder=default&{token_key}={token}&{csrf_key}={csrf}"),
             &runtime,
         );
         assert_ne!(write_ok.status_code, StatusCode(401));
@@ -7425,9 +7477,11 @@ mod tests {
         let unauthorized = build_api_response(&Method::Get, "/rest/system/status", &runtime);
         assert_eq!(unauthorized.status_code, StatusCode(401));
 
+        let api_key_param = auth_apikey_key(&runtime);
+
         let authorized = build_api_response(
             &Method::Get,
-            "/rest/system/status?x-api-key=secret-key",
+            &format!("/rest/system/status?{api_key_param}=secret-key"),
             &runtime,
         );
         assert_eq!(authorized.status_code, StatusCode(200));
@@ -7821,7 +7875,7 @@ mod tests {
                 name: "../escape".to_string(),
                 offset: 0,
                 size: 128,
-                hash: "h".to_string(),
+                hash: b"h".to_vec(),
             },
         )
         .expect("write request");
@@ -7946,7 +8000,7 @@ mod tests {
                 name: "ok.txt".to_string(),
                 offset: 0,
                 size: 2,
-                hash: "h".to_string(),
+                hash: b"h".to_vec(),
             },
         )
         .expect("write request");

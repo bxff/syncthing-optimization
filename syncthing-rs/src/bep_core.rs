@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
 
-use crc32fast::Hasher;
+use crate::bep::{decode_frame, encode_frame, BepMessage, DownloadProgressEntry, IndexEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -361,48 +361,227 @@ pub(crate) enum WireMessage {
 }
 
 pub(crate) fn encode_wire_message(message: &WireMessage) -> Result<Vec<u8>, String> {
-    let payload = serde_json::to_vec(message).map_err(|err| format!("serialize message: {err}"))?;
-    if payload.len() > u32::MAX as usize {
-        return Err(format!("payload too large: {}", payload.len()));
-    }
-
-    let mut hasher = Hasher::new();
-    hasher.update(&payload);
-    let checksum = hasher.finalize();
-
-    let mut out = Vec::with_capacity(payload.len() + 8);
-    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-    out.extend_from_slice(&checksum.to_le_bytes());
-    out.extend_from_slice(&payload);
-    Ok(out)
+    let bep = wire_to_bep(message)?;
+    encode_frame(&bep)
 }
 
 pub(crate) fn decode_wire_message(frame: &[u8]) -> Result<WireMessage, String> {
-    if frame.len() < 8 {
-        return Err("frame too short".to_string());
-    }
+    let bep = decode_frame(frame)?;
+    bep_to_wire(&bep)
+}
 
-    let len = u32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]) as usize;
-    let checksum = u32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
-    if frame.len() != len + 8 {
-        return Err(format!(
-            "invalid frame length: header={len} body={} total={}",
-            frame.len().saturating_sub(8),
-            frame.len()
-        ));
+fn wire_to_bep(message: &WireMessage) -> Result<BepMessage, String> {
+    match message {
+        WireMessage::Hello(hello) => Ok(BepMessage::Hello {
+            device_name: hello.DeviceName.clone(),
+            client_name: format!(
+                "{}|{}|{}|{}",
+                hello.ClientName, hello.ClientVersion, hello.NumConnections, hello.Timestamp
+            ),
+        }),
+        WireMessage::ClusterConfig(cfg) => Ok(BepMessage::ClusterConfig {
+            folders: cfg.Folders.iter().map(|f| f.Id.clone()).collect(),
+        }),
+        WireMessage::Index(index) => Ok(BepMessage::Index {
+            folder: index.Folder.clone(),
+            files: index.Files.iter().map(fileinfo_to_index_entry).collect(),
+        }),
+        WireMessage::IndexUpdate(update) => Ok(BepMessage::IndexUpdate {
+            folder: update.Folder.clone(),
+            files: update.Files.iter().map(fileinfo_to_index_entry).collect(),
+        }),
+        WireMessage::Request(req) => Ok(BepMessage::Request {
+            id: req.Id.max(0) as u32,
+            folder: req.Folder.clone(),
+            name: req.Name.clone(),
+            offset: req.Offset.max(0) as u64,
+            size: req.Size.max(0) as u32,
+            hash: req.Hash.clone(),
+        }),
+        WireMessage::Response(resp) => Ok(BepMessage::Response {
+            id: resp.Id.max(0) as u32,
+            code: resp.Code.max(0) as u32,
+            data_len: resp.Data.len() as u32,
+            data: resp.Data.clone(),
+        }),
+        WireMessage::DownloadProgress(progress) => Ok(BepMessage::DownloadProgress {
+            folder: progress.Folder.clone(),
+            updates: progress
+                .Updates
+                .iter()
+                .map(|u| DownloadProgressEntry {
+                    name: u.Name.clone(),
+                    version: u
+                        .Version
+                        .as_ref()
+                        .and_then(|v| v.Counters.iter().map(|c| c.Value.max(0) as u64).max())
+                        .unwrap_or_default(),
+                    block_indexes: u
+                        .BlockIndexes
+                        .iter()
+                        .map(|idx| (*idx).max(0) as u32)
+                        .collect(),
+                    block_size: u.BlockSize.max(0) as u32,
+                    update_type: if u.UpdateType == FileDownloadProgressUpdateTypeForget {
+                        "forget".to_string()
+                    } else {
+                        "append".to_string()
+                    },
+                })
+                .collect(),
+        }),
+        WireMessage::Ping(_) => Ok(BepMessage::Ping { timestamp_ms: 0 }),
+        WireMessage::Close(close) => Ok(BepMessage::Close {
+            reason: close.Reason.clone(),
+        }),
     }
+}
 
-    let payload = &frame[8..];
-    let mut hasher = Hasher::new();
-    hasher.update(payload);
-    let observed = hasher.finalize();
-    if observed != checksum {
-        return Err(format!(
-            "checksum mismatch: expected={checksum} observed={observed}"
-        ));
+fn bep_to_wire(message: &BepMessage) -> Result<WireMessage, String> {
+    match message {
+        BepMessage::Hello {
+            device_name,
+            client_name,
+        } => {
+            let mut hello = Hello {
+                DeviceName: device_name.clone(),
+                ClientName: client_name.clone(),
+                ..Default::default()
+            };
+            let parts = client_name.splitn(4, '|').collect::<Vec<_>>();
+            if parts.len() == 4 {
+                hello.ClientName = parts[0].to_string();
+                hello.ClientVersion = parts[1].to_string();
+                hello.NumConnections = parts[2].parse::<i32>().unwrap_or_default();
+                hello.Timestamp = parts[3].parse::<i64>().unwrap_or_default();
+            }
+            Ok(WireMessage::Hello(hello))
+        }
+        BepMessage::ClusterConfig { folders } => Ok(WireMessage::ClusterConfig(ClusterConfig {
+            Folders: folders
+                .iter()
+                .map(|id| Folder {
+                    Id: id.clone(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        })),
+        BepMessage::Index { folder, files } => Ok(WireMessage::Index(Index {
+            Folder: folder.clone(),
+            Files: files.iter().map(index_entry_to_fileinfo).collect(),
+            LastSequence: files.iter().map(|f| f.sequence as i64).max().unwrap_or(0),
+        })),
+        BepMessage::IndexUpdate { folder, files } => Ok(WireMessage::IndexUpdate(IndexUpdate {
+            Folder: folder.clone(),
+            Files: files.iter().map(index_entry_to_fileinfo).collect(),
+            LastSequence: files.iter().map(|f| f.sequence as i64).max().unwrap_or(0),
+            PrevSequence: 0,
+        })),
+        BepMessage::Request {
+            id,
+            folder,
+            name,
+            offset,
+            size,
+            hash,
+        } => Ok(WireMessage::Request(Request {
+            Id: *id as i32,
+            Folder: folder.clone(),
+            Name: name.clone(),
+            Offset: *offset as i64,
+            Size: *size as i32,
+            Hash: hash.clone(),
+            FromTemporary: false,
+            BlockNo: 0,
+        })),
+        BepMessage::Response { id, code, data, .. } => Ok(WireMessage::Response(Response {
+            Id: *id as i32,
+            Code: *code as i32,
+            Data: data.clone(),
+        })),
+        BepMessage::DownloadProgress { folder, updates } => {
+            Ok(WireMessage::DownloadProgress(DownloadProgress {
+                Folder: folder.clone(),
+                Updates: updates
+                    .iter()
+                    .map(|u| FileDownloadProgressUpdate {
+                        Name: u.name.clone(),
+                        Version: Some(Vector {
+                            Counters: vec![Counter {
+                                Id: 0,
+                                Value: u.version as i64,
+                            }],
+                        }),
+                        BlockIndexes: u.block_indexes.iter().map(|idx| *idx as i32).collect(),
+                        BlockSize: u.block_size as i32,
+                        UpdateType: if u.update_type.eq_ignore_ascii_case("forget") {
+                            FileDownloadProgressUpdateTypeForget
+                        } else {
+                            FileDownloadProgressUpdateTypeAppend
+                        },
+                    })
+                    .collect(),
+            }))
+        }
+        BepMessage::Ping { .. } => Ok(WireMessage::Ping(Ping {})),
+        BepMessage::Close { reason } => Ok(WireMessage::Close(Close {
+            Reason: reason.clone(),
+        })),
     }
+}
 
-    serde_json::from_slice(payload).map_err(|err| format!("decode message: {err}"))
+fn fileinfo_to_index_entry(file: &FileInfo) -> IndexEntry {
+    IndexEntry {
+        path: file.Name.clone(),
+        sequence: file.Sequence.max(0) as u64,
+        deleted: file.Deleted,
+        size: file.Size.max(0) as u64,
+        block_hashes: file.Blocks.iter().map(|b| encode_hex(&b.Hash)).collect(),
+    }
+}
+
+fn index_entry_to_fileinfo(entry: &IndexEntry) -> FileInfo {
+    FileInfo {
+        Name: entry.path.clone(),
+        Sequence: entry.sequence as i64,
+        Deleted: entry.deleted,
+        Size: entry.size as i64,
+        Blocks: entry
+            .block_hashes
+            .iter()
+            .map(|h| BlockInfo {
+                Hash: decode_hex_or_utf8(h),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+fn decode_hex_or_utf8(value: &str) -> Vec<u8> {
+    if value.len() % 2 == 0 && value.as_bytes().iter().all(|b| b.is_ascii_hexdigit()) {
+        let mut out = Vec::with_capacity(value.len() / 2);
+        for pair in value.as_bytes().chunks_exact(2) {
+            if let Ok(hex) = std::str::from_utf8(pair) {
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    out.push(byte);
+                    continue;
+                }
+            }
+            return value.as_bytes().to_vec();
+        }
+        return out;
+    }
+    value.as_bytes().to_vec()
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push_str(&format!("{:02x}", b));
+    }
+    out
 }
 
 pub(crate) fn apply_index_update(index: &mut Index, update: &IndexUpdate) -> Result<(), String> {

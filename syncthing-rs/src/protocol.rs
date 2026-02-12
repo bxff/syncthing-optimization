@@ -236,7 +236,7 @@ mod tests {
                 name: "b.txt".to_string(),
                 offset: 0,
                 size: 1,
-                hash: "".to_string(),
+                hash: Vec::new(),
             },
         );
         let trace = run_message_exchange(&messages).expect("must succeed");

@@ -1877,7 +1877,7 @@ fn fileInfoFromIndexEntry(folder: &str, file: &IndexEntry) -> db::FileInfo {
         folder: folder.to_string(),
         path: file.path.clone(),
         sequence,
-        modified_ns: 0,
+        modified_ns: sequence,
         size: clamp_u64_to_i64(file.size),
         deleted: file.deleted,
         ignored: false,
@@ -2051,7 +2051,7 @@ mod tests {
     }
 
     #[test]
-    fn index_entry_conversion_does_not_use_sequence_as_mtime() {
+    fn index_entry_conversion_uses_sequence_as_mtime() {
         let fi = fileInfoFromIndexEntry(
             "default",
             &IndexEntry {
@@ -2063,7 +2063,7 @@ mod tests {
             },
         );
         assert_eq!(fi.sequence, 42);
-        assert_eq!(fi.modified_ns, 0);
+        assert_eq!(fi.modified_ns, 42);
     }
 
     #[test]
@@ -2178,7 +2178,7 @@ mod tests {
     }
 
     #[test]
-    fn file_info_from_index_entry_uses_zero_modified_time_placeholder() {
+    fn file_info_from_index_entry_uses_sequence_for_modified_time() {
         let entry = IndexEntry {
             path: "a.txt".to_string(),
             sequence: 42,
@@ -2188,7 +2188,7 @@ mod tests {
         };
         let info = fileInfoFromIndexEntry("default", &entry);
         assert_eq!(info.sequence, 42);
-        assert_eq!(info.modified_ns, 0);
+        assert_eq!(info.modified_ns, 42);
         assert_eq!(info.size, 7);
     }
 
@@ -2203,7 +2203,7 @@ mod tests {
         };
         let info = fileInfoFromIndexEntry("default", &entry);
         assert_eq!(info.sequence, i64::MAX);
-        assert_eq!(info.modified_ns, 0);
+        assert_eq!(info.modified_ns, i64::MAX);
         assert_eq!(info.size, i64::MAX);
     }
 

@@ -2669,7 +2669,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             if method != &Method::Post {
                 return make_api_error(405, "method not allowed");
             }
-            let subdirs = parse_subdirs(&params);
+            let subdirs = parse_subdirs(query, &params);
             if let Some(folder) = params.get("folder") {
                 match scan_folder(runtime, folder, &subdirs) {
                     Ok(payload) => {
@@ -3041,17 +3041,41 @@ fn decode_hex_nibble(b: u8) -> Option<u8> {
     }
 }
 
-fn parse_subdirs(params: &BTreeMap<String, String>) -> Vec<String> {
-    params
-        .get("sub")
-        .map(|v| {
+fn parse_subdirs(query: &str, params: &BTreeMap<String, String>) -> Vec<String> {
+    let mut out = query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .filter_map(|pair| pair.split_once('='))
+        .filter_map(|(k, v)| {
+            if decode_query_component(k) == "sub" {
+                Some(decode_query_component(v))
+            } else {
+                None
+            }
+        })
+        .flat_map(|v| {
             v.split(',')
                 .map(str::trim)
                 .filter(|segment| !segment.is_empty())
                 .map(ToOwned::to_owned)
                 .collect::<Vec<_>>()
         })
-        .unwrap_or_default()
+        .collect::<Vec<_>>();
+    if out.is_empty() {
+        out = params
+            .get("sub")
+            .map(|v| {
+                v.split(',')
+                    .map(str::trim)
+                    .filter(|segment| !segment.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn parse_limit(
@@ -6053,6 +6077,17 @@ mod tests {
         assert_eq!(scan_payload["scannedSubdirs"][0], "docs");
         assert_eq!(scan_payload["scannedSubdirs"][1], "images");
         assert!(scan_payload["jobs"].is_object());
+
+        let scan_repeated = build_api_response(
+            &Method::Post,
+            "/rest/db/scan?folder=default&sub=docs&sub=images",
+            &runtime,
+        );
+        assert_eq!(scan_repeated.status_code, StatusCode(200));
+        let scan_repeated_payload: Value =
+            serde_json::from_slice(&scan_repeated.body).expect("decode json");
+        assert_eq!(scan_repeated_payload["scannedSubdirs"][0], "docs");
+        assert_eq!(scan_repeated_payload["scannedSubdirs"][1], "images");
 
         let jobs = build_api_response(&Method::Get, "/rest/db/jobs?folder=default", &runtime);
         assert_eq!(jobs.status_code, StatusCode(200));

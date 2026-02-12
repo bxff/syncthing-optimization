@@ -74,7 +74,10 @@ pub(crate) fn walk_deterministic(
                         rel_dir.join(&name)
                     };
                     let abs_path = root.join(&rel_path);
-                    let meta = fs::symlink_metadata(&abs_path)?;
+                    let meta = match fs::symlink_metadata(&abs_path) {
+                        Ok(meta) => meta,
+                        Err(_) => continue,
+                    };
                     if meta.is_dir() {
                         push_items.push(WorkItem::Dir(rel_path));
                     } else if meta.is_file() || meta.file_type().is_symlink() {
@@ -100,8 +103,14 @@ fn sorted_child_names(dir: &Path, cfg: &WalkConfig) -> io::Result<(Vec<String>, 
     let mut spill_stats = SpillStats::default();
 
     for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().to_string();
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let name = match entry.file_name().into_string() {
+            Ok(name) => name,
+            Err(_) => continue,
+        };
         chunk.push(name);
         if chunk.len() >= threshold {
             let spill_path = spill_chunk(&mut chunk, cfg, spill_paths.len())?;
@@ -188,7 +197,7 @@ fn read_spill_name(reader: &mut BufReader<File>) -> io::Result<Option<String>> {
 }
 
 fn path_to_slash_string(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    path.to_string_lossy().to_string()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

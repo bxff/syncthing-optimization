@@ -12,10 +12,20 @@ pub(crate) type IndexId = u64;
 pub(crate) type LocalFlags = u32;
 pub(crate) type DbStream<'a, T> = Box<dyn Iterator<Item = Result<T, String>> + 'a>;
 
-pub(crate) const FLAG_LOCAL_RECEIVE_ONLY: LocalFlags = 1 << 0;
-pub(crate) const FLAG_LOCAL_INVALID: LocalFlags = 1 << 1;
-pub(crate) const FLAG_LOCAL_CONFLICT: LocalFlags = 1 << 2;
-pub(crate) const FLAG_LOCAL_MUST_RESCAN: LocalFlags = 1 << 3;
+pub(crate) const FLAG_LOCAL_UNSUPPORTED: LocalFlags = 1 << 0;
+pub(crate) const FLAG_LOCAL_IGNORED: LocalFlags = 1 << 1;
+pub(crate) const FLAG_LOCAL_MUST_RESCAN: LocalFlags = 1 << 2;
+pub(crate) const FLAG_LOCAL_RECEIVE_ONLY: LocalFlags = 1 << 3;
+pub(crate) const FLAG_LOCAL_GLOBAL: LocalFlags = 1 << 4;
+pub(crate) const FLAG_LOCAL_NEEDED: LocalFlags = 1 << 5;
+pub(crate) const FLAG_LOCAL_REMOTE_INVALID: LocalFlags = 1 << 6;
+pub(crate) const FLAG_LOCAL_INVALID: LocalFlags = FLAG_LOCAL_UNSUPPORTED
+    | FLAG_LOCAL_IGNORED
+    | FLAG_LOCAL_MUST_RESCAN
+    | FLAG_LOCAL_RECEIVE_ONLY
+    | FLAG_LOCAL_REMOTE_INVALID;
+pub(crate) const FLAG_LOCAL_CONFLICT: LocalFlags =
+    FLAG_LOCAL_UNSUPPORTED | FLAG_LOCAL_IGNORED | FLAG_LOCAL_RECEIVE_ONLY;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PullOrder {
@@ -1912,7 +1922,7 @@ mod tests {
         let avail = db
             .get_global_availability("default", "same.txt")
             .expect("availability");
-        assert_eq!(avail, vec!["dev-a".to_string(), "dev-b".to_string()]);
+        assert_eq!(avail, vec!["dev-b".to_string()]);
     }
 
     #[test]

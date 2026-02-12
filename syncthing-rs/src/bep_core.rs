@@ -64,13 +64,13 @@ pub(crate) const MessageType_MESSAGE_TYPE_DOWNLOAD_PROGRESS: i32 = 5;
 pub(crate) const MessageType_MESSAGE_TYPE_PING: i32 = 6;
 pub(crate) const MessageType_MESSAGE_TYPE_CLOSE: i32 = 7;
 
-pub(crate) const FlagLocalIgnored: u32 = 1 << 0;
-pub(crate) const FlagLocalMustRescan: u32 = 1 << 1;
-pub(crate) const FlagLocalReceiveOnly: u32 = 1 << 2;
-pub(crate) const FlagLocalRemoteInvalid: u32 = 1 << 3;
-pub(crate) const FlagLocalNeeded: u32 = 1 << 4;
-pub(crate) const FlagLocalUnsupported: u32 = 1 << 5;
-pub(crate) const FlagLocalGlobal: u32 = 1 << 6;
+pub(crate) const FlagLocalUnsupported: u32 = 1 << 0;
+pub(crate) const FlagLocalIgnored: u32 = 1 << 1;
+pub(crate) const FlagLocalMustRescan: u32 = 1 << 2;
+pub(crate) const FlagLocalReceiveOnly: u32 = 1 << 3;
+pub(crate) const FlagLocalGlobal: u32 = 1 << 4;
+pub(crate) const FlagLocalNeeded: u32 = 1 << 5;
+pub(crate) const FlagLocalRemoteInvalid: u32 = 1 << 6;
 pub(crate) const LocalAllFlags: u32 = FlagLocalIgnored
     | FlagLocalMustRescan
     | FlagLocalReceiveOnly
@@ -78,8 +78,13 @@ pub(crate) const LocalAllFlags: u32 = FlagLocalIgnored
     | FlagLocalNeeded
     | FlagLocalUnsupported
     | FlagLocalGlobal;
-pub(crate) const LocalConflictFlags: u32 = FlagLocalReceiveOnly | FlagLocalRemoteInvalid;
-pub(crate) const LocalInvalidFlags: u32 = FlagLocalUnsupported | FlagLocalRemoteInvalid;
+pub(crate) const LocalConflictFlags: u32 =
+    FlagLocalUnsupported | FlagLocalIgnored | FlagLocalReceiveOnly;
+pub(crate) const LocalInvalidFlags: u32 = FlagLocalUnsupported
+    | FlagLocalIgnored
+    | FlagLocalMustRescan
+    | FlagLocalReceiveOnly
+    | FlagLocalRemoteInvalid;
 
 pub(crate) const HelloMessageMagic: u32 = 0x2EA7D90B;
 pub(crate) const Version13HelloMagic: u32 = 0x9F79BC40;

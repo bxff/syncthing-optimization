@@ -5,6 +5,7 @@
 use crate::bep_core::*;
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::sync::OnceLock;
@@ -471,7 +472,7 @@ impl FileInfo {
     }
 
     pub(crate) fn HasPermissionBits(&self) -> bool {
-        self.Permissions != 0
+        !self.NoPermissions
     }
 
     pub(crate) fn InConflictWith(&self, other: &Self) -> bool {
@@ -574,9 +575,8 @@ impl FileInfo {
     }
 
     pub(crate) fn ShouldConflict(&self, other: &Self) -> bool {
-        self.Name == other.Name
-            && self.Sequence == other.Sequence
-            && self.VersionHash != other.VersionHash
+        let _ = other;
+        self.LocalFlags & LocalConflictFlags != 0
     }
 
     pub(crate) fn ToWire(&self) -> Value {
@@ -1034,7 +1034,16 @@ impl readWriter {
     }
 }
 
-pub(crate) static BlockSizes: [i32; 4] = [128, 1024, 131_072, 1_048_576];
+pub(crate) static BlockSizes: [i32; 8] = [
+    128 * 1024,
+    256 * 1024,
+    512 * 1024,
+    1024 * 1024,
+    2 * 1024 * 1024,
+    4 * 1024 * 1024,
+    8 * 1024 * 1024,
+    16 * 1024 * 1024,
+];
 pub(crate) static Compression_name: [&str; 3] = ["never", "always", "metadata"];
 pub(crate) static Compression_value: [i32; 3] =
     [CompressionNever, CompressionAlways, CompressionMetadata];
@@ -1172,7 +1181,10 @@ pub(crate) static sha256OfEmptyBlock: [u8; 32] = [
 ];
 
 pub(crate) fn blocksEqual(a: &[BlockInfo], b: &[BlockInfo]) -> bool {
-    a == b
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .all(|(left, right)| left.Hash == right.Hash)
 }
 
 pub(crate) fn BlockSize(file: &FileInfo) -> i32 {
@@ -1184,17 +1196,18 @@ pub(crate) fn BlocksHash(file: &FileInfo) -> Vec<u8> {
         return file.BlocksHash.clone();
     }
 
-    let mut hash = crc32fast::Hasher::new();
+    let mut hash = Sha256::new();
     for block in &file.Blocks {
         hash.update(&block.Hash);
-        hash.update(&block.Offset.to_le_bytes());
-        hash.update(&block.Size.to_le_bytes());
     }
-    hash.finalize().to_le_bytes().to_vec()
+    hash.finalize().to_vec()
 }
 
 pub(crate) fn ModTimeEqual(a: &FileInfo, b: &FileInfo, window_ns: i64) -> bool {
-    (a.ModTime() - b.ModTime()).abs() <= window_ns
+    if a.ModTime() == b.ModTime() {
+        return true;
+    }
+    (a.ModTime() - b.ModTime()).abs() < window_ns
 }
 
 pub(crate) fn PermsEqual(a: &FileInfo, b: &FileInfo) -> bool {
@@ -1202,10 +1215,12 @@ pub(crate) fn PermsEqual(a: &FileInfo, b: &FileInfo) -> bool {
 }
 
 pub(crate) fn VectorHash(v: &Vector) -> Vec<u8> {
-    let data = serde_json::to_vec(v).unwrap_or_default();
-    let mut hasher = crc32fast::Hasher::new();
-    hasher.update(&data);
-    hasher.finalize().to_le_bytes().to_vec()
+    let mut hash = Sha256::new();
+    for counter in &v.Counters {
+        hash.update(counter.Id.to_be_bytes());
+        hash.update(counter.Value.to_be_bytes());
+    }
+    hash.finalize().to_vec()
 }
 
 pub(crate) fn xattrsEqual(a: &XattrData, b: &XattrData) -> bool {
@@ -1245,7 +1260,11 @@ pub(crate) fn fileInfoFromWireWithBlocks(v: &FileInfo) -> FileInfo {
     v.clone()
 }
 pub(crate) fn FileInfoFromWire(v: &FileInfo) -> FileInfo {
-    v.clone()
+    let mut out = v.clone();
+    if out.Invalid {
+        out.LocalFlags |= FlagLocalRemoteInvalid;
+    }
+    out
 }
 pub(crate) fn folderFromWire(v: &Folder) -> Folder {
     v.clone()
@@ -1383,7 +1402,7 @@ mod tests {
         let round = readHello(&frame).expect("read hello");
         assert_eq!(round.ClientVersion, h.ClientVersion);
 
-        assert_eq!(BlockSizes[0], 128);
+        assert_eq!(BlockSizes[0], 128 * 1024);
         assert!(TestOldHelloMsgs());
         assert!(TestVersion14Hello());
     }
@@ -1417,5 +1436,74 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(h.Magic(), HelloMessageMagic);
+    }
+
+    #[test]
+    fn should_conflict_uses_local_conflict_flags() {
+        let mut a = FileInfo {
+            Name: "a.txt".to_string(),
+            ..Default::default()
+        };
+        let b = a.clone();
+        assert!(!a.ShouldConflict(&b));
+        a.LocalFlags = LocalConflictFlags;
+        assert!(a.ShouldConflict(&b));
+    }
+
+    #[test]
+    fn has_permission_bits_respects_no_permissions_flag() {
+        let mut fi = FileInfo {
+            Permissions: 0,
+            NoPermissions: false,
+            ..Default::default()
+        };
+        assert!(fi.HasPermissionBits());
+        fi.NoPermissions = true;
+        assert!(!fi.HasPermissionBits());
+    }
+
+    #[test]
+    fn mod_time_equal_is_strict_at_window_boundary() {
+        let a = FileInfo {
+            ModifiedS: 10,
+            ModifiedNs: 0,
+            ..Default::default()
+        };
+        let b = FileInfo {
+            ModifiedS: 10,
+            ModifiedNs: 50,
+            ..Default::default()
+        };
+        assert!(!ModTimeEqual(&a, &b, 50));
+        assert!(ModTimeEqual(&a, &b, 51));
+    }
+
+    #[test]
+    fn file_info_from_wire_maps_invalid_to_remote_invalid_flag() {
+        let wire = FileInfo {
+            Invalid: true,
+            LocalFlags: 0,
+            ..Default::default()
+        };
+        let out = FileInfoFromWire(&wire);
+        assert!(out.LocalFlags & FlagLocalRemoteInvalid != 0);
+    }
+
+    #[test]
+    fn blocks_hash_and_vector_hash_are_sha256_length() {
+        let fi = FileInfo {
+            Blocks: vec![BlockInfo {
+                Hash: vec![1, 2, 3],
+                Offset: 0,
+                Size: 3,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(BlocksHash(&fi).len(), 32);
+
+        let v = Vector {
+            Counters: vec![Counter { Id: 1, Value: 2 }, Counter { Id: 3, Value: 4 }],
+        };
+        assert_eq!(VectorHash(&v).len(), 32);
     }
 }

@@ -2138,6 +2138,11 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     .map(|value| value.trim())
                     .filter(|value| !value.is_empty())
                     .map(|value| value.to_string());
+                if let Some(filter) = device_filter.as_deref() {
+                    if normalize_syncthing_device_id(filter).is_none() {
+                        return make_api_error(400, "invalid device id");
+                    }
+                }
                 let guard = match runtime.model.read() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "model lock poisoned"),
@@ -6048,6 +6053,13 @@ mod tests {
                 .as_u64()
                 .is_some()
         );
+
+        let invalid_pending_folders = build_api_response(
+            &Method::Get,
+            "/rest/cluster/pending/folders?device=bad",
+            &runtime,
+        );
+        assert_eq!(invalid_pending_folders.status_code, StatusCode(400));
 
         let _ = fs::remove_dir_all(root);
     }

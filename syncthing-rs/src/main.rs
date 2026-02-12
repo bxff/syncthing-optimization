@@ -29,7 +29,12 @@ fn main() {
     }
 
     if matches!(args[1].as_str(), "-h" | "--help" | "help") {
-        usage();
+        print_usage(false);
+        return;
+    }
+
+    if args[1].starts_with('-') {
+        run_daemon_command(&args[1..]);
         return;
     }
 
@@ -37,7 +42,7 @@ fn main() {
         "scenario" => {
             if args.len() != 3 {
                 eprintln!("scenario requires exactly one id");
-                usage();
+                print_usage(true);
                 process::exit(2);
             }
             match run_scenario_snapshot(&args[2]) {
@@ -56,7 +61,7 @@ fn main() {
         "daemon-scenario" => {
             if args.len() != 3 {
                 eprintln!("daemon-scenario requires exactly one id");
-                usage();
+                print_usage(true);
                 process::exit(2);
             }
             match run_daemon_scenario_snapshot(&args[2]) {
@@ -75,7 +80,7 @@ fn main() {
         "interop-scenario" => {
             if args.len() != 3 {
                 eprintln!("interop-scenario requires exactly one id");
-                usage();
+                print_usage(true);
                 process::exit(2);
             }
             match run_peer_interop_scenario_snapshot(&args[2]) {
@@ -99,13 +104,17 @@ fn main() {
         "daemon" | "serve" => run_daemon_command(&args[2..]),
         _ => {
             eprintln!("unknown command: {}", args[1]);
-            usage();
+            print_usage(true);
             process::exit(2);
         }
     }
 }
 
 fn run_daemon_command(args: &[String]) {
+    if args.len() == 1 && matches!(args[0].as_str(), "-h" | "--help" | "help") {
+        print_usage(false);
+        return;
+    }
     match parse_daemon_args(args) {
         Ok(cfg) => {
             if let Err(err) = run_daemon(cfg) {
@@ -115,19 +124,30 @@ fn run_daemon_command(args: &[String]) {
         }
         Err(err) => {
             eprintln!("invalid daemon arguments: {err}");
-            usage();
+            print_usage(true);
             process::exit(2);
         }
     }
 }
 
-fn usage() {
-    eprintln!("usage:");
-    eprintln!("  syncthing-rs scenario <scenario-id>");
-    eprintln!("  syncthing-rs daemon-scenario <scenario-id>");
-    eprintln!("  syncthing-rs interop-scenario <scenario-id>");
-    eprintln!("  syncthing-rs scenario-list");
-    eprintln!(
-        "  syncthing-rs [daemon|serve] (--folder <id>:<path> ... | --folder-path <path> [--folder-id <id>] | --config <path.json>) [--listen <addr>] [--api-listen <addr>] [--db-root <path>] [--memory-max-mb <n>] [--max-peers <n>] [--once]"
-    );
+fn print_usage(stderr: bool) {
+    if stderr {
+        eprintln!("usage:");
+        eprintln!("  syncthing-rs scenario <scenario-id>");
+        eprintln!("  syncthing-rs daemon-scenario <scenario-id>");
+        eprintln!("  syncthing-rs interop-scenario <scenario-id>");
+        eprintln!("  syncthing-rs scenario-list");
+        eprintln!(
+            "  syncthing-rs [daemon|serve] (--folder <id>:<path> ... | --folder-path <path> [--folder-id <id>] | --config <path.json>) [--listen <addr>] [--api-listen <addr>] [--db-root <path>] [--memory-max-mb <n>] [--max-peers <n>] [--once]"
+        );
+    } else {
+        println!("usage:");
+        println!("  syncthing-rs scenario <scenario-id>");
+        println!("  syncthing-rs daemon-scenario <scenario-id>");
+        println!("  syncthing-rs interop-scenario <scenario-id>");
+        println!("  syncthing-rs scenario-list");
+        println!(
+            "  syncthing-rs [daemon|serve] (--folder <id>:<path> ... | --folder-path <path> [--folder-id <id>] | --config <path.json>) [--listen <addr>] [--api-listen <addr>] [--db-root <path>] [--memory-max-mb <n>] [--max-peers <n>] [--once]"
+        );
+    }
 }

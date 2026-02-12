@@ -1225,6 +1225,14 @@ fn start_api_server(
                     url = append_query_param(&url, "token", token.trim());
                 }
             }
+            if let Some(lang) = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Accept-Language"))
+                .map(|h| h.value.to_string())
+            {
+                url = append_query_param(&url, "accept-language", lang.trim());
+            }
             let reply = build_api_response(request.method(), &url, &runtime);
             let mut response = Response::from_data(reply.body).with_status_code(reply.status_code);
             if let Ok(content_type) =
@@ -2125,6 +2133,11 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         },
         "/rest/cluster/pending/folders" => match method {
             Method::Get => {
+                let device_filter = params
+                    .get("device")
+                    .map(|value| value.trim())
+                    .filter(|value| !value.is_empty())
+                    .map(|value| value.to_string());
                 let guard = match runtime.model.read() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "model lock poisoned"),
@@ -2144,7 +2157,13 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     for device_id in offered_by_devices
                         .into_iter()
                         .map(|id| id.trim().to_string())
-                        .filter(|id| !id.is_empty())
+                        .filter(|id| {
+                            !id.is_empty()
+                                && device_filter
+                                    .as_ref()
+                                    .map(|filter| id == filter)
+                                    .unwrap_or(true)
+                        })
                     {
                         offered_by.insert(
                             device_id.clone(),
@@ -2155,7 +2174,9 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                             }),
                         );
                     }
-                    payload.insert(folder_id, json!({"offeredBy": offered_by}));
+                    if !offered_by.is_empty() {
+                        payload.insert(folder_id, json!({"offeredBy": offered_by}));
+                    }
                 }
                 ApiReply::json(200, Value::Object(payload))
             }
@@ -2247,8 +2268,9 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 return make_api_error(405, "method not allowed");
             }
             let raw = params
-                .get("accept")
+                .get("accept-language")
                 .cloned()
+                .or_else(|| params.get("accept").cloned())
                 .unwrap_or_else(|| "en-us".to_string());
             ApiReply::json(200, json!(parse_accept_language_values(&raw)))
         }

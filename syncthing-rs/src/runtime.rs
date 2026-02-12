@@ -6554,14 +6554,14 @@ mod tests {
         let add_payload: Value = serde_json::from_slice(&add.body).expect("decode json");
         assert_eq!(add_payload["added"], true);
         assert_eq!(add_payload["folder"]["id"], "docs");
-        assert_eq!(add_payload["folder"]["folderType"], "recvonly");
+        assert_eq!(add_payload["folder"]["folderType"], "receiveonly");
 
         let list = build_api_response(&Method::Get, "/rest/system/config/folders", &runtime);
         assert_eq!(list.status_code, StatusCode(200));
         let list_payload: Value = serde_json::from_slice(&list.body).expect("decode json");
         assert_eq!(list_payload["count"], 1);
         assert_eq!(list_payload["folders"][0]["id"], "docs");
-        assert_eq!(list_payload["folders"][0]["folderType"], "recvonly");
+        assert_eq!(list_payload["folders"][0]["folderType"], "receiveonly");
         assert_eq!(list_payload["folders"][0]["memoryPolicy"], "throttle");
 
         let restart = build_api_response(

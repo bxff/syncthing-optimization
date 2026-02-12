@@ -26,29 +26,38 @@ pub(crate) const ErrPathMissing: &str = ERR_PATH_MISSING;
 pub(crate) const ErrMarkerMissing: &str = ERR_MARKER_MISSING;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub(crate) enum FolderType {
+    #[serde(rename = "sendreceive", alias = "sendrecv")]
     SendReceive,
+    #[serde(rename = "sendonly")]
     SendOnly,
+    #[serde(rename = "receiveonly", alias = "recvonly")]
     ReceiveOnly,
+    #[serde(rename = "receiveencrypted", alias = "recvenc")]
     ReceiveEncrypted,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub(crate) enum PullOrder {
+    #[serde(rename = "random")]
     Random,
+    #[serde(rename = "alphabetic")]
     Alphabetic,
+    #[serde(rename = "smallestFirst", alias = "smallestfirst")]
     SmallestFirst,
+    #[serde(rename = "largestFirst", alias = "largestfirst")]
     LargestFirst,
+    #[serde(rename = "oldestFirst", alias = "oldestfirst")]
     OldestFirst,
+    #[serde(rename = "newestFirst", alias = "newestfirst")]
     NewestFirst,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub(crate) enum BlockPullOrder {
+    #[serde(rename = "standard")]
     Standard,
+    #[serde(rename = "inOrder", alias = "inorder")]
     InOrder,
 }
 
@@ -282,10 +291,10 @@ impl Default for FolderConfiguration {
 impl FolderType {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
-            Self::SendReceive => "sendrecv",
+            Self::SendReceive => "sendreceive",
             Self::SendOnly => "sendonly",
-            Self::ReceiveOnly => "recvonly",
-            Self::ReceiveEncrypted => "recvenc",
+            Self::ReceiveOnly => "receiveonly",
+            Self::ReceiveEncrypted => "receiveencrypted",
         }
     }
 
@@ -865,5 +874,20 @@ mod tests {
         assert_eq!(cfg.memory_pull_page_items, 1024);
         assert_eq!(cfg.memory_scan_spill_threshold_entries, 10_000);
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn folder_type_and_orders_accept_go_tokens_and_aliases() {
+        let canonical: FolderType = serde_json::from_str("\"sendreceive\"").expect("canonical");
+        let alias: FolderType = serde_json::from_str("\"sendrecv\"").expect("alias");
+        assert_eq!(canonical, FolderType::SendReceive);
+        assert_eq!(alias, FolderType::SendReceive);
+        assert_eq!(FolderType::ReceiveOnly.as_str(), "receiveonly");
+
+        let pull: PullOrder = serde_json::from_str("\"smallestFirst\"").expect("pull order");
+        assert_eq!(pull, PullOrder::SmallestFirst);
+
+        let block: BlockPullOrder = serde_json::from_str("\"inOrder\"").expect("block pull order");
+        assert_eq!(block, BlockPullOrder::InOrder);
     }
 }

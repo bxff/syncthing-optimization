@@ -1200,7 +1200,26 @@ fn start_api_server(
     let server = Server::http(addr).map_err(|err| format!("listen api {addr}: {err}"))?;
     let handle = thread::spawn(move || {
         for request in server.incoming_requests() {
-            let reply = build_api_response(request.method(), request.url(), &runtime);
+            let mut url = request.url().to_string();
+            if let Some(api_key) = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("X-API-Key"))
+                .map(|h| h.value.to_string())
+            {
+                url = append_query_param(&url, "x-api-key", &api_key);
+            }
+            if let Some(auth) = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Authorization"))
+                .map(|h| h.value.to_string())
+            {
+                if let Some(token) = auth.strip_prefix("Bearer ") {
+                    url = append_query_param(&url, "token", token.trim());
+                }
+            }
+            let reply = build_api_response(request.method(), &url, &runtime);
             let mut response = Response::from_data(reply.body).with_status_code(reply.status_code);
             if let Ok(content_type) =
                 Header::from_bytes(&b"Content-Type"[..], reply.content_type.as_bytes())
@@ -1851,9 +1870,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                         "ldap" => &mut state.ldap,
                         _ => return make_api_error(404, "not found"),
                     };
-                    for (k, v) in &params {
-                        target[k] = Value::from(v.clone());
-                    }
+                    apply_query_overrides(target, &params);
                     let value = target.clone();
                     drop(state);
                     append_event(runtime, "ConfigSaved", json!({"section": section}), false);
@@ -1890,9 +1907,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     } else {
                         &mut state.default_device
                     };
-                    for (k, v) in &params {
-                        target[k] = Value::from(v.clone());
-                    }
+                    apply_query_overrides(target, &params);
                     let value = target.clone();
                     drop(state);
                     append_event(
@@ -2931,6 +2946,61 @@ fn parse_query(query: &str) -> BTreeMap<String, String> {
     out
 }
 
+fn append_query_param(url: &str, key: &str, value: &str) -> String {
+    let separator = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{separator}{key}={value}")
+}
+
+fn apply_query_overrides(target: &mut Value, params: &BTreeMap<String, String>) {
+    if !target.is_object() {
+        return;
+    }
+    for (k, raw) in params {
+        let existing = target.get(k);
+        target[k] = coerce_query_value(existing, raw);
+    }
+}
+
+fn coerce_query_value(existing: Option<&Value>, raw: &str) -> Value {
+    if let Some(existing) = existing {
+        if existing.is_boolean() {
+            return Value::Bool(parse_xml_bool(raw));
+        }
+        if existing.as_i64().is_some() {
+            if let Ok(v) = raw.parse::<i64>() {
+                return Value::from(v);
+            }
+        }
+        if existing.as_u64().is_some() {
+            if let Ok(v) = raw.parse::<u64>() {
+                return Value::from(v);
+            }
+        }
+        if existing.as_f64().is_some() {
+            if let Ok(v) = raw.parse::<f64>() {
+                if let Some(num) = serde_json::Number::from_f64(v) {
+                    return Value::Number(num);
+                }
+            }
+        }
+        if let Some(arr) = existing.as_array() {
+            if arr.iter().all(Value::is_string) {
+                let items = raw
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|part| !part.is_empty())
+                    .map(|part| Value::String(part.to_string()))
+                    .collect::<Vec<_>>();
+                return Value::Array(items);
+            }
+        }
+    }
+    if let Ok(parsed) = serde_json::from_str::<Value>(raw) {
+        return parsed;
+    }
+    Value::String(raw.to_string())
+}
+
 fn decode_query_component(value: &str) -> String {
     let mut out = Vec::with_capacity(value.len());
     let bytes = value.as_bytes();
@@ -3052,7 +3122,13 @@ fn auth_required(state: &ApiRuntimeState) -> bool {
         .get("password")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    !user.is_empty() || !password.is_empty()
+    let api_key = state
+        .gui
+        .get("apiKey")
+        .or_else(|| state.gui.get("apikey"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    !user.is_empty() || !password.is_empty() || !api_key.is_empty()
 }
 
 fn mint_auth_token(user: &str) -> String {
@@ -3074,6 +3150,31 @@ fn is_authenticated_request(
     if !auth_required(&state) {
         return Ok(true);
     }
+
+    if let Some(expected_key) = state
+        .gui
+        .get("apiKey")
+        .or_else(|| state.gui.get("apikey"))
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
+    {
+        if params
+            .get("x-api-key")
+            .or_else(|| params.get("apiKey"))
+            .or_else(|| params.get("api-key"))
+            .map(|provided| provided == expected_key)
+            .unwrap_or(false)
+        {
+            return Ok(true);
+        }
+    }
+
+    if let Some(token) = params.get("token") {
+        if params.get("user").is_none() {
+            return Ok(state.active_auth_tokens.contains_key(token));
+        }
+    }
+
     let Some(user) = params.get("user") else {
         return Ok(false);
     };
@@ -6623,6 +6724,25 @@ mod tests {
     }
 
     #[test]
+    fn api_allows_api_key_auth_when_configured() {
+        let runtime = test_api_runtime(Arc::new(RwLock::new(NewModel())), Vec::new(), 0);
+        {
+            let mut state = runtime.state.write().expect("state lock");
+            state.gui["apiKey"] = json!("secret-key");
+        }
+
+        let unauthorized = build_api_response(&Method::Get, "/rest/system/status", &runtime);
+        assert_eq!(unauthorized.status_code, StatusCode(401));
+
+        let authorized = build_api_response(
+            &Method::Get,
+            "/rest/system/status?x-api-key=secret-key",
+            &runtime,
+        );
+        assert_eq!(authorized.status_code, StatusCode(200));
+    }
+
+    #[test]
     fn api_health_and_service_helpers_match_expected_shapes() {
         let runtime = test_api_runtime(Arc::new(RwLock::new(NewModel())), Vec::new(), 0);
 
@@ -6787,6 +6907,29 @@ mod tests {
         assert!(devices_payload.is_array());
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn api_config_option_updates_preserve_value_types() {
+        let runtime = test_api_runtime(Arc::new(RwLock::new(NewModel())), Vec::new(), 0);
+
+        let update = build_api_response(
+            &Method::Put,
+            "/rest/config/options?maxSendKbps=1&globalAnnounceEnabled=false&listenAddresses=tcp://0.0.0.0:22000,quic://0.0.0.0:22000",
+            &runtime,
+        );
+        assert_eq!(update.status_code, StatusCode(200));
+
+        let read_back = build_api_response(&Method::Get, "/rest/config/options", &runtime);
+        assert_eq!(read_back.status_code, StatusCode(200));
+        let payload: Value = serde_json::from_slice(&read_back.body).expect("decode options");
+        assert_eq!(payload["maxSendKbps"], 1);
+        assert_eq!(payload["globalAnnounceEnabled"], false);
+        assert!(payload["listenAddresses"].is_array());
+        assert_eq!(
+            payload["listenAddresses"],
+            json!(["tcp://0.0.0.0:22000", "quic://0.0.0.0:22000"])
+        );
     }
 
     #[test]

@@ -58,8 +58,6 @@ fn advance(state: ProtocolState, event: ProtocolEvent) -> Result<ProtocolState, 
 
     match (state, event) {
         (S::Start, E::Dial) => Ok(S::Dialed),
-        // Hello is exchanged out of band in Go; tolerate it but do not require it.
-        (S::Dialed, E::Hello) => Ok(S::Dialed),
         (S::Dialed, E::ClusterConfig) => Ok(S::Ready),
         (S::Ready, E::ClusterConfig) => Ok(S::Ready),
         (S::Ready, E::Index) => Ok(S::Ready),
@@ -75,10 +73,9 @@ fn advance(state: ProtocolState, event: ProtocolEvent) -> Result<ProtocolState, 
     }
 }
 
-pub(crate) fn default_sequence() -> [ProtocolEvent; 10] {
+pub(crate) fn default_sequence() -> [ProtocolEvent; 9] {
     [
         ProtocolEvent::Dial,
-        ProtocolEvent::Hello,
         ProtocolEvent::ClusterConfig,
         ProtocolEvent::Index,
         ProtocolEvent::IndexUpdate,
@@ -110,6 +107,10 @@ pub(crate) fn run_message_exchange(messages: &[BepMessage]) -> Result<Vec<&'stat
     let mut pending_requests: BTreeSet<u32> = BTreeSet::new();
 
     for message in messages {
+        if matches!(message, BepMessage::Hello { .. }) {
+            trace.push(ProtocolEvent::Hello.as_str());
+            continue;
+        }
         match message {
             BepMessage::Request { id, .. } => {
                 pending_requests.insert(*id);
@@ -124,6 +125,12 @@ pub(crate) fn run_message_exchange(messages: &[BepMessage]) -> Result<Vec<&'stat
         let event = event_from_message(message);
         state = advance(state, event)?;
         trace.push(event.as_str());
+    }
+
+    if !pending_requests.is_empty() {
+        return Err(format!(
+            "connection closed with pending requests: {pending_requests:?}"
+        ));
     }
 
     Ok(trace)
@@ -141,7 +148,6 @@ mod tests {
             trace,
             vec![
                 "dial",
-                "hello",
                 "cluster_config",
                 "index",
                 "index_update",
@@ -188,15 +194,15 @@ mod tests {
     }
 
     #[test]
-    fn response_id_mismatch_is_tolerated() {
+    fn response_id_mismatch_fails_due_to_pending_request() {
         let mut messages = default_exchange();
         for msg in &mut messages {
             if let BepMessage::Response { id, .. } = msg {
                 *id = 999;
             }
         }
-        let trace = run_message_exchange(&messages).expect("mismatched response is tolerated");
-        assert!(trace.contains(&"response"));
+        let err = run_message_exchange(&messages).expect_err("must fail");
+        assert!(err.contains("pending requests"));
     }
 
     #[test]
@@ -208,7 +214,15 @@ mod tests {
     }
 
     #[test]
-    fn second_request_while_pending_is_allowed() {
+    fn unresolved_request_fails_exchange() {
+        let mut messages = default_exchange();
+        messages.retain(|message| !matches!(message, BepMessage::Response { .. }));
+        let err = run_message_exchange(&messages).expect_err("must fail on pending requests");
+        assert!(err.contains("pending requests"));
+    }
+
+    #[test]
+    fn second_request_while_pending_requires_matching_responses() {
         let mut messages = default_exchange();
         let response_idx = messages
             .iter()
@@ -222,11 +236,11 @@ mod tests {
                 name: "b.txt".to_string(),
                 offset: 0,
                 size: 1,
-                hash: "h3".to_string(),
+                hash: "".to_string(),
             },
         );
-        let trace = run_message_exchange(&messages).expect("multiple pending requests are allowed");
-        assert!(trace.iter().filter(|event| **event == "request").count() >= 2);
+        let err = run_message_exchange(&messages).expect_err("must fail");
+        assert!(err.contains("pending requests"));
     }
 
     #[test]

@@ -34,6 +34,11 @@ fn main() {
         return;
     }
 
+    if matches!(args[1].as_str(), "--version" | "version") {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
     if args[1].starts_with('-') {
         run_daemon_command(&args[1..]);
         return;
@@ -44,7 +49,7 @@ fn main() {
             if args.len() != 3 {
                 eprintln!("scenario requires exactly one id");
                 print_usage(true);
-                process::exit(2);
+                process::exit(1);
             }
             match run_scenario_snapshot(&args[2]) {
                 Ok(out) => {
@@ -63,7 +68,7 @@ fn main() {
             if args.len() != 3 {
                 eprintln!("daemon-scenario requires exactly one id");
                 print_usage(true);
-                process::exit(2);
+                process::exit(1);
             }
             match run_daemon_scenario_snapshot(&args[2]) {
                 Ok(out) => {
@@ -82,7 +87,7 @@ fn main() {
             if args.len() != 3 {
                 eprintln!("interop-scenario requires exactly one id");
                 print_usage(true);
-                process::exit(2);
+                process::exit(1);
             }
             match run_peer_interop_scenario_snapshot(&args[2]) {
                 Ok(out) => {
@@ -102,11 +107,11 @@ fn main() {
                 println!("{id}");
             }
         }
-        "daemon" | "serve" => run_daemon_command(&args[2..]),
+        "serve" => run_daemon_command(&args[2..]),
         _ => {
             eprintln!("unknown command: {}", args[1]);
             print_usage(true);
-            process::exit(2);
+            process::exit(1);
         }
     }
 }
@@ -126,7 +131,7 @@ fn run_daemon_command(args: &[String]) {
         Err(err) => {
             eprintln!("invalid daemon arguments: {err}");
             print_usage(true);
-            process::exit(2);
+            process::exit(1);
         }
     }
 }

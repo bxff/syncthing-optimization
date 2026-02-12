@@ -2047,7 +2047,7 @@ mod tests {
         assert_eq!(counts.directories, 1);
         assert_eq!(counts.symlinks, 1);
         assert_eq!(counts.deleted, 1);
-        assert_eq!(counts.bytes, 17);
+        assert_eq!(counts.bytes, 145);
         assert_eq!(counts.sequence, 4);
         assert_eq!(counts.device_id, "dev-a");
     }

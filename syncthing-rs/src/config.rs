@@ -28,13 +28,13 @@ pub(crate) const ErrMarkerMissing: &str = ERR_MARKER_MISSING;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum FolderType {
-    #[serde(rename = "sendrecv", alias = "sendreceive", alias = "readwrite")]
+    #[serde(rename = "sendreceive", alias = "sendrecv", alias = "readwrite")]
     SendReceive,
     #[serde(rename = "sendonly", alias = "readonly")]
     SendOnly,
-    #[serde(rename = "recvonly", alias = "receiveonly")]
+    #[serde(rename = "receiveonly", alias = "recvonly")]
     ReceiveOnly,
-    #[serde(rename = "recvenc", alias = "receiveencrypted")]
+    #[serde(rename = "receiveencrypted", alias = "recvenc")]
     ReceiveEncrypted,
 }
 
@@ -66,14 +66,15 @@ pub(crate) enum BlockPullOrder {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum CopyRangeMethod {
+    #[serde(rename = "standard")]
+    Standard,
     #[serde(
         rename = "all",
-        alias = "standard",
         alias = "allwithfallback",
         alias = "all_with_fallback",
         alias = "allWithFallback"
     )]
-    Standard,
+    AllWithFallback,
     #[serde(rename = "ioctl")]
     Ioctl,
     #[serde(rename = "copy_file_range", alias = "copyfilerange")]
@@ -136,6 +137,7 @@ impl Size {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct FolderDeviceConfiguration {
     pub(crate) device_id: String,
     pub(crate) introduced_by: String,
@@ -143,12 +145,15 @@ pub(crate) struct FolderDeviceConfiguration {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct XattrFilterEntry {
+    #[serde(rename = "match")]
     pub(crate) match_pattern: String,
     pub(crate) permit: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct XattrFilter {
     pub(crate) entries: Vec<XattrFilterEntry>,
     pub(crate) max_single_entry_size: usize,
@@ -188,6 +193,7 @@ impl XattrFilter {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub(crate) struct FolderConfiguration {
     pub(crate) id: String,
     pub(crate) label: String,
@@ -306,10 +312,10 @@ impl Default for FolderConfiguration {
 impl FolderType {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
-            Self::SendReceive => "sendrecv",
+            Self::SendReceive => "sendreceive",
             Self::SendOnly => "sendonly",
-            Self::ReceiveOnly => "recvonly",
-            Self::ReceiveEncrypted => "recvenc",
+            Self::ReceiveOnly => "receiveonly",
+            Self::ReceiveEncrypted => "receiveencrypted",
         }
     }
 
@@ -899,7 +905,7 @@ mod tests {
             "fs_watcher_timeout_s":0.0,
             "ignore_perms":false,
             "auto_normalize":true,
-            "min_disk_free":{"bytes":100},
+            "minDiskFree":{"bytes":100},
             "copiers":1,
             "puller_max_pending_kib":1,
             "hashers":1,
@@ -990,7 +996,7 @@ mod tests {
 
     #[test]
     fn folder_type_and_orders_accept_go_tokens_and_aliases() {
-        let canonical: FolderType = serde_json::from_str("\"sendrecv\"").expect("canonical");
+        let canonical: FolderType = serde_json::from_str("\"sendreceive\"").expect("canonical");
         let alias: FolderType = serde_json::from_str("\"sendrecv\"").expect("alias");
         let alias_long: FolderType = serde_json::from_str("\"sendreceive\"").expect("long alias");
         let legacy: FolderType = serde_json::from_str("\"readwrite\"").expect("legacy");
@@ -998,7 +1004,7 @@ mod tests {
         assert_eq!(alias, FolderType::SendReceive);
         assert_eq!(alias_long, FolderType::SendReceive);
         assert_eq!(legacy, FolderType::SendReceive);
-        assert_eq!(FolderType::ReceiveOnly.as_str(), "recvonly");
+        assert_eq!(FolderType::ReceiveOnly.as_str(), "receiveonly");
 
         let pull: PullOrder = serde_json::from_str("\"smallestFirst\"").expect("pull order");
         assert_eq!(pull, PullOrder::SmallestFirst);
@@ -1015,6 +1021,6 @@ mod tests {
         assert_eq!(method, CopyRangeMethod::CopyFileRange);
 
         let method_all: CopyRangeMethod = serde_json::from_str("\"all\"").expect("copy range all");
-        assert_eq!(method_all, CopyRangeMethod::Standard);
+        assert_eq!(method_all, CopyRangeMethod::AllWithFallback);
     }
 }

@@ -339,12 +339,13 @@ impl Store {
         folder: &str,
         prefix: &str,
     ) -> Vec<FileMetadata> {
+        let normalized_prefix = normalize_path(prefix);
         let mut out = Vec::new();
         if let Some(device_store) = self.files.get(folder) {
             for (device, path_store) in device_store {
                 for (path_key, value) in path_store {
                     if let Some(file) = file_from_parts(folder, device, path_key, value) {
-                        if file.path.starts_with(prefix) {
+                        if file.path.starts_with(&normalized_prefix) {
                             out.push(file);
                         }
                     }
@@ -573,10 +574,11 @@ impl Store {
             };
         }
 
+        let normalized_prefix = normalize_prefix(prefix);
         let mut items = Vec::with_capacity(limit.saturating_add(1));
         let start_path_key = match start_after_path {
             Some(path) => encode_path_key(path),
-            None => encode_path_key(prefix),
+            None => encode_path_key(&normalized_prefix),
         };
         let range_start = match start_after_path {
             Some(_) => Bound::Excluded(start_path_key),
@@ -591,8 +593,8 @@ impl Store {
                 let Some(file) = file_from_parts(folder, device, entry_path_key, value) else {
                     continue;
                 };
-                if !file.path.starts_with(prefix) {
-                    if compare_path_order(&file.path, prefix) == Ordering::Greater {
+                if !file.path.starts_with(&normalized_prefix) {
+                    if compare_path_order(&file.path, &normalized_prefix) == Ordering::Greater {
                         break;
                     }
                     continue;
@@ -1478,9 +1480,12 @@ pub(crate) fn decode_path_key(path_key: &str) -> Option<String> {
 }
 
 pub(crate) fn normalize_path(path: &str) -> String {
-    path.nfc()
-        .collect::<String>()
-        .replace('\\', "/")
+    let normalized = path.nfc().collect::<String>();
+    #[cfg(windows)]
+    let normalized = normalized.replace('\\', "/");
+    #[cfg(not(windows))]
+    let normalized = normalized;
+    normalized
         .trim_matches('/')
         .split('/')
         .filter(|segment| !segment.is_empty())
@@ -1490,6 +1495,19 @@ pub(crate) fn normalize_path(path: &str) -> String {
 
 pub(crate) fn compare_path_order(a: &str, b: &str) -> Ordering {
     encode_path_key(a).cmp(&encode_path_key(b))
+}
+
+fn path_matches_prefix(path: &str, prefix: &str) -> bool {
+    path.starts_with(prefix)
+}
+
+fn normalize_prefix(prefix: &str) -> String {
+    let normalized = prefix.nfc().collect::<String>();
+    #[cfg(windows)]
+    let normalized = normalized.replace('\\', "/");
+    #[cfg(not(windows))]
+    let normalized = normalized;
+    normalized
 }
 
 fn finalize_page(mut items: Vec<FileMetadata>, limit: usize) -> FilePage {
@@ -1666,6 +1684,11 @@ fn runtime_hashes_from_stored_block_hashes(hashes: &StoredBlockHashes) -> Vec<St
 }
 
 fn stored_from_file(file: &FileMetadata) -> StoredFileMetadata {
+    let size = if file.file_type == "directory" {
+        128
+    } else {
+        file.size
+    };
     StoredFileMetadata {
         sequence: file.sequence,
         deleted: file.deleted,
@@ -1673,7 +1696,7 @@ fn stored_from_file(file: &FileMetadata) -> StoredFileMetadata {
         local_flags: file.local_flags,
         file_type: CompactFileType::from_str(&file.file_type),
         modified_ns: file.modified_ns,
-        size: file.size,
+        size,
         block_hashes: stored_block_hashes_from_runtime_hashes(&file.block_hashes),
     }
 }

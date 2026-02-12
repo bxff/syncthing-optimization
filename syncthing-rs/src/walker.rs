@@ -76,11 +76,16 @@ pub(crate) fn walk_deterministic(
                     let abs_path = root.join(&rel_path);
                     let meta = match fs::symlink_metadata(&abs_path) {
                         Ok(meta) => meta,
-                        Err(_) => continue,
+                        Err(err) => {
+                            return Err(io::Error::new(
+                                err.kind(),
+                                format!("stat {}: {err}", abs_path.display()),
+                            ))
+                        }
                     };
                     if meta.is_dir() {
                         push_items.push(WorkItem::Dir(rel_path));
-                    } else if meta.is_file() || meta.file_type().is_symlink() {
+                    } else if meta.is_file() || (meta.file_type().is_symlink() && !cfg!(windows)) {
                         push_items.push(WorkItem::File(path_to_slash_string(&rel_path)));
                     }
                 }
@@ -105,11 +110,21 @@ fn sorted_child_names(dir: &Path, cfg: &WalkConfig) -> io::Result<(Vec<String>, 
     for entry in fs::read_dir(dir)? {
         let entry = match entry {
             Ok(entry) => entry,
-            Err(_) => continue,
+            Err(err) => {
+                return Err(io::Error::new(
+                    err.kind(),
+                    format!("read dir {} entry: {err}", dir.display()),
+                ))
+            }
         };
         let name = match entry.file_name().into_string() {
             Ok(name) => name,
-            Err(_) => continue,
+            Err(raw) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("non-utf8 filename in {}: {:?}", dir.display(), raw),
+                ))
+            }
         };
         chunk.push(name);
         if chunk.len() >= threshold {

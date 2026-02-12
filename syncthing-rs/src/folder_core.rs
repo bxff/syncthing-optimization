@@ -862,6 +862,20 @@ impl folder {
             let mut local_updates = Vec::with_capacity(needed_batch.len());
             for global in &needed_batch {
                 if let Err(err) = apply_remote_file_to_disk(&folder_root, global) {
+                    if cfg!(not(unix))
+                        && global.file_type == db::FileInfoType::Symlink
+                        && err.contains(errIncompatibleSymlink)
+                    {
+                        let mut unsupported = global.clone();
+                        unsupported.folder = self.config.id.clone();
+                        unsupported.local_flags |= db::FLAG_LOCAL_UNSUPPORTED;
+                        local_updates.push(unsupported);
+                        self.errorsMut.push(FileError {
+                            Path: global.path.clone(),
+                            Err: err,
+                        });
+                        continue;
+                    }
                     self.errorsMut.push(FileError {
                         Path: global.path.clone(),
                         Err: err.clone(),
@@ -1562,6 +1576,18 @@ fn process_scanned_file(
     };
 
     if let Some(existing) = current_local.clone() {
+        let existing_symlink_target = if is_symlink {
+            existing.block_hashes.first().map(String::as_str)
+        } else {
+            None
+        };
+        let current_symlink_target = if is_symlink {
+            fs::read_link(&abs)
+                .ok()
+                .map(|p| p.to_string_lossy().to_string())
+        } else {
+            None
+        };
         if existing.path == relative_path
             && !existing.deleted
             && !existing.ignored
@@ -1569,6 +1595,7 @@ fn process_scanned_file(
             && existing.file_type == file_type
             && existing.modified_ns == modified_ns
             && existing.size == size
+            && existing_symlink_target == current_symlink_target.as_deref()
         {
             *current_local = cursor.next(db, folder_id, LOCAL_DEVICE_ID)?;
             return Ok(());
@@ -1576,7 +1603,10 @@ fn process_scanned_file(
     }
 
     let block_hashes = if is_symlink {
-        Vec::new()
+        vec![fs::read_link(&abs)
+            .map_err(|e| format!("read symlink {}: {e}", abs.display()))?
+            .to_string_lossy()
+            .to_string()]
     } else {
         hash_file_blocks(&abs)?
     };
@@ -1703,7 +1733,12 @@ fn estimate_needed_batch_runtime_bytes(files: &[db::FileInfo]) -> usize {
 }
 
 fn apply_remote_file_to_disk(root: &Path, file: &db::FileInfo) -> Result<(), String> {
-    let abs = safe_join_relative_path(root, &file.path)?;
+    let abs = match file.file_type {
+        db::FileInfoType::Directory => safe_join_relative_path(root, &file.path)?,
+        db::FileInfoType::File | db::FileInfoType::Symlink => {
+            safe_join_relative_path_allow_leaf_symlink(root, &file.path)?
+        }
+    };
     if file.deleted {
         return delete_path_if_exists(&abs);
     }
@@ -1837,7 +1872,7 @@ fn ensure_directory_path(path: &Path) -> Result<(), String> {
 fn write_sparse_file(path: &Path, size: i64) -> Result<(), String> {
     let size = usize::try_from(size).map_err(|_| format!("invalid file size: {size}"))?;
     if path.exists() && path.is_dir() {
-        fs::remove_dir_all(path).map_err(|e| format!("remove dir {}: {e}", path.display()))?;
+        return Err(errUnexpectedDirOnFileDel.to_string());
     }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
@@ -1943,7 +1978,8 @@ impl sendReceiveFolder {
         let disk_mtime = file_modified_ns(&meta)?;
         if expected.file_type != disk_type
             || expected.size != disk_size
-            || expected.modified_ns != disk_mtime
+            || (expected.file_type != db::FileInfoType::Directory
+                && expected.modified_ns != disk_mtime)
         {
             return Err(errModified.to_string());
         }
@@ -2029,7 +2065,6 @@ impl sendReceiveFolder {
         if path.is_empty() {
             return Err(errDirNotEmpty.to_string());
         }
-        self.checkToBeDeleted(path)?;
         let Some(abs) = self.resolve_abs_path_for_delete(path)? else {
             return Ok(());
         };
@@ -2063,8 +2098,12 @@ impl sendReceiveFolder {
                 if !meta.is_dir() {
                     return Err(errUnexpectedDirOnFileDel.to_string());
                 }
-                fs::remove_dir_all(&abs)
-                    .map_err(|e| format!("remove dir tree {}: {e}", abs.display()))?;
+                let mut entries =
+                    fs::read_dir(&abs).map_err(|e| format!("read dir {}: {e}", abs.display()))?;
+                if entries.next().is_some() {
+                    return Err(errDirNotEmpty.to_string());
+                }
+                fs::remove_dir(&abs).map_err(|e| format!("remove dir {}: {e}", abs.display()))?;
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => return Err(format!("stat {}: {err}", abs.display())),
@@ -2418,7 +2457,7 @@ impl receiveOnlyFolder {
                         local.deleted = true;
                         local.local_flags &= !db::FLAG_LOCAL_RECEIVE_ONLY;
                         local.block_hashes.clear();
-                        disk_deletes.push(local.path.clone());
+                        disk_deletes.push(local);
                     } else {
                         let mut merged = global;
                         merged.local_flags &= !db::FLAG_LOCAL_RECEIVE_ONLY;
@@ -2431,17 +2470,44 @@ impl receiveOnlyFolder {
                 Ok(None) => continue,
                 Err(err) => return Err(format!("lookup global {}: {err}", local.path)),
             }
-            local.sequence = sequence;
-            sequence = sequence.saturating_add(1);
-            updates.push(local);
-        }
-        if !updates.is_empty() {
-            db.update(&folder_id, LOCAL_DEVICE_ID, updates)
-                .map_err(|e| format!("persist receive-only revert: {e}"))?;
         }
         drop(db);
-        for path in disk_deletes {
-            self.sendReceiveFolder.deleteItemOnDisk(&path)?;
+
+        let mut delete_updates = Vec::new();
+        for mut local in disk_deletes {
+            let delete_result = match self
+                .sendReceiveFolder
+                .resolve_abs_path_for_delete(&local.path)
+            {
+                Ok(Some(abs)) => delete_path_if_exists(&abs),
+                Ok(None) => Ok(()),
+                Err(err) => Err(err),
+            };
+            match delete_result {
+                Ok(()) => {
+                    local.sequence = sequence;
+                    sequence = sequence.saturating_add(1);
+                    delete_updates.push(local);
+                }
+                Err(err) => {
+                    let pull_err = self.sendReceiveFolder.newPullError(&local.path, &err);
+                    self.sendReceiveFolder.tempPullErrors.push(pull_err.clone());
+                    self.sendReceiveFolder.folder.errorsMut.push(pull_err);
+                }
+            }
+        }
+
+        if !delete_updates.is_empty() {
+            updates.extend(delete_updates);
+        }
+        if !updates.is_empty() {
+            self.sendReceiveFolder
+                .folder
+                .db
+                .write()
+                .map_err(|_| "db lock poisoned".to_string())?
+                .update(&folder_id, LOCAL_DEVICE_ID, updates)
+                .map_err(|e| format!("persist receive-only revert: {e}"))?;
         }
         self.sendReceiveFolder.folder.SchedulePull();
         Ok(())
@@ -2979,9 +3045,11 @@ mod tests {
             .deleteDirOnDisk("dir/sub")
             .expect_err("must reject non-empty dir");
         assert_eq!(err, errDirNotEmpty);
-        f.deleteDirOnDiskHandleChildren("dir/sub")
-            .expect("recursive delete");
-        assert!(!root.join("dir").join("sub").exists());
+        let err = f
+            .deleteDirOnDiskHandleChildren("dir/sub")
+            .expect_err("must keep non-empty dir");
+        assert_eq!(err, errDirNotEmpty);
+        assert!(root.join("dir").join("sub").exists());
 
         let _ = fs::remove_dir_all(root);
     }

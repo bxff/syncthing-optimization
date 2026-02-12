@@ -1421,7 +1421,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             if method != &Method::Get {
                 return make_api_error(405, "method not allowed");
             }
-            ApiReply::json(200, json!({ "status": "ok" }))
+            ApiReply::json(200, json!({ "status": "OK" }))
         }
         "/rest/noauth/auth/password" => {
             if method != &Method::Post {
@@ -2222,14 +2222,20 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 return make_api_error(405, "method not allowed");
             }
             let input = params.get("id").cloned().unwrap_or_default();
-            let normalized = input.trim().to_ascii_lowercase();
-            ApiReply::json(200, json!({"id": input, "normalized": normalized}))
+            match normalize_syncthing_device_id(&input) {
+                Some(id) => ApiReply::json(200, json!({"id": id})),
+                None => ApiReply::json(200, json!({"error": "invalid device id"})),
+            }
         }
         "/rest/svc/lang" => {
             if method != &Method::Get {
                 return make_api_error(405, "method not allowed");
             }
-            ApiReply::json(200, json!({"lang": "en-US"}))
+            let raw = params
+                .get("accept")
+                .cloned()
+                .unwrap_or_else(|| "en-us".to_string());
+            ApiReply::json(200, json!(parse_accept_language_values(&raw)))
         }
         "/rest/svc/report" => {
             if method != &Method::Get {
@@ -2456,7 +2462,17 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             };
             let global = bool_param(&params, "global").unwrap_or(false);
             match folder_file(runtime, folder, file, global) {
-                Ok(payload) => ApiReply::json(200, payload),
+                Ok(payload) => {
+                    if payload
+                        .get("exists")
+                        .and_then(Value::as_bool)
+                        .is_some_and(|exists| !exists)
+                    {
+                        ApiReply::json(404, json!({ "error": "no such object in the index" }))
+                    } else {
+                        ApiReply::json(200, payload)
+                    }
+                }
                 Err(ApiFolderStatusError::MissingFolder) => ApiReply::json(
                     404,
                     json!({ "error": "folder not found", "folder": folder }),
@@ -2975,6 +2991,44 @@ fn parse_limit(
 
 fn bool_param(params: &BTreeMap<String, String>, key: &str) -> Option<bool> {
     params.get(key).map(|v| parse_xml_bool(v))
+}
+
+fn parse_accept_language_values(raw: &str) -> Vec<String> {
+    let mut weighted = raw
+        .split(',')
+        .filter_map(|entry| {
+            let part = entry.trim();
+            if part.is_empty() {
+                return None;
+            }
+            let mut bits = part.split(';');
+            let lang = bits.next()?.trim().to_ascii_lowercase();
+            if lang.is_empty() {
+                return None;
+            }
+            let mut weight = 1.0_f64;
+            for bit in bits {
+                let bit = bit.trim();
+                if let Some(rest) = bit.strip_prefix("q=") {
+                    if let Ok(parsed) = rest.parse::<f64>() {
+                        weight = parsed;
+                    }
+                }
+            }
+            Some((lang, weight))
+        })
+        .collect::<Vec<_>>();
+    weighted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut out = Vec::new();
+    for (lang, _) in weighted {
+        if !out.contains(&lang) {
+            out.push(lang);
+        }
+    }
+    if out.is_empty() {
+        out.push("en-us".to_string());
+    }
+    out
 }
 
 fn auth_required(state: &ApiRuntimeState) -> bool {
@@ -4117,6 +4171,28 @@ pub(crate) fn run_parity_probe(with_peer_interop: bool) -> Result<(), String> {
                 DEFAULT_FOLDER_ID,
                 &folder_path.to_string_lossy(),
             ));
+            guard.ScanFolder(DEFAULT_FOLDER_ID)?;
+            guard
+                .sdb
+                .write()
+                .map_err(|_| "db lock poisoned".to_string())?
+                .update(
+                    DEFAULT_FOLDER_ID,
+                    "local",
+                    vec![crate::db::FileInfo {
+                        folder: DEFAULT_FOLDER_ID.to_string(),
+                        path: "a.txt".to_string(),
+                        sequence: 1,
+                        modified_ns: 1,
+                        size: 11,
+                        deleted: false,
+                        ignored: false,
+                        local_flags: 0,
+                        file_type: crate::db::FileInfoType::File,
+                        block_hashes: vec!["h1".to_string()],
+                    }],
+                )
+                .map_err(|err| format!("seed api probe db: {err}"))?;
         }
         let runtime = DaemonApiRuntime {
             model: model.clone(),
@@ -4713,8 +4789,8 @@ pub(crate) fn run_api_surface_probe() -> Result<ApiSurfaceProbeResult, String> {
             (
                 "GET /rest/db/file",
                 Method::Get,
-                "/rest/db/file?folder=default&file=a.txt".to_string(),
-                200,
+                "/rest/db/file?folder=default&file=missing.txt".to_string(),
+                404,
             ),
             (
                 "GET /rest/db/ignores",
@@ -4964,7 +5040,7 @@ fn required_api_probe_keys(endpoint: &str) -> &'static [&'static str] {
             "sequence",
             "remoteState",
         ],
-        "GET /rest/db/file" => &["local", "global", "availability"],
+        "GET /rest/db/file" => &["error"],
         "GET /rest/db/ignores" => &["ignore", "expanded", "error"],
         "GET /rest/db/jobs" => &["folder", "state", "jobs"],
         "GET /rest/db/localchanged" => &["files", "page", "perpage"],
@@ -5957,9 +6033,9 @@ mod tests {
             "/rest/db/file?folder=default&file=missing.txt",
             &runtime,
         );
-        assert_eq!(missing.status_code, StatusCode(200));
+        assert_eq!(missing.status_code, StatusCode(404));
         let missing_payload: Value = serde_json::from_slice(&missing.body).expect("decode json");
-        assert_eq!(missing_payload["exists"], false);
+        assert_eq!(missing_payload["error"], "no such object in the index");
 
         let _ = fs::remove_dir_all(root);
     }
@@ -6171,10 +6247,10 @@ mod tests {
             "/rest/db/file?folder=default&file=a.txt",
             &runtime,
         );
-        assert_eq!(file_after.status_code, StatusCode(200));
+        assert_eq!(file_after.status_code, StatusCode(404));
         let file_after_payload: Value =
             serde_json::from_slice(&file_after.body).expect("decode json");
-        assert_eq!(file_after_payload["exists"], false);
+        assert_eq!(file_after_payload["error"], "no such object in the index");
 
         let _ = fs::remove_dir_all(root);
     }
@@ -6431,6 +6507,32 @@ mod tests {
             &runtime,
         );
         assert_eq!(still_auth.status_code, StatusCode(200));
+    }
+
+    #[test]
+    fn api_health_and_service_helpers_match_expected_shapes() {
+        let runtime = test_api_runtime(Arc::new(RwLock::new(NewModel())), Vec::new(), 0);
+
+        let health = build_api_response(&Method::Get, "/rest/noauth/health", &runtime);
+        assert_eq!(health.status_code, StatusCode(200));
+        let health_payload: Value = serde_json::from_slice(&health.body).expect("decode health");
+        assert_eq!(health_payload["status"], "OK");
+
+        let deviceid = build_api_response(&Method::Get, "/rest/svc/deviceid?id=peer-a", &runtime);
+        assert_eq!(deviceid.status_code, StatusCode(200));
+        let device_payload: Value =
+            serde_json::from_slice(&deviceid.body).expect("decode device id");
+        assert!(device_payload.get("error").is_some());
+
+        let lang = build_api_response(
+            &Method::Get,
+            "/rest/svc/lang?accept=sv-SE,en-US;q=0.8",
+            &runtime,
+        );
+        assert_eq!(lang.status_code, StatusCode(200));
+        let lang_payload: Value = serde_json::from_slice(&lang.body).expect("decode lang");
+        assert_eq!(lang_payload[0], "sv-se");
+        assert_eq!(lang_payload[1], "en-us");
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use crate::bep::BepMessage;
+use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProtocolEvent {
@@ -19,10 +20,7 @@ enum ProtocolState {
     Start,
     Dialed,
     HelloDone,
-    ClusterConfigured,
-    IndexSent,
-    Live,
-    AwaitingResponse,
+    Ready,
     Closed,
 }
 
@@ -62,19 +60,18 @@ fn advance(state: ProtocolState, event: ProtocolEvent) -> Result<ProtocolState, 
     match (state, event) {
         (S::Start, E::Dial) => Ok(S::Dialed),
         (S::Dialed, E::Hello) => Ok(S::HelloDone),
-        (S::HelloDone, E::ClusterConfig) => Ok(S::ClusterConfigured),
-        (S::ClusterConfigured, E::Index) => Ok(S::IndexSent),
-        (S::IndexSent, E::IndexUpdate) => Ok(S::Live),
-        (S::Live, E::Request) => Ok(S::AwaitingResponse),
-        (S::AwaitingResponse, E::Response) => Ok(S::Live),
-        (S::Live, E::DownloadProgress) => Ok(S::Live),
-        (S::AwaitingResponse, E::DownloadProgress) => Ok(S::AwaitingResponse),
-        (S::Live, E::Ping) => Ok(S::Live),
-        (S::Live, E::IndexUpdate) => Ok(S::Live),
-        (S::AwaitingResponse, E::Ping) => Ok(S::AwaitingResponse),
-        (S::AwaitingResponse, E::IndexUpdate) => Ok(S::AwaitingResponse),
-        (S::Live, E::Close) => Ok(S::Closed),
-        (S::AwaitingResponse, E::Close) => Ok(S::Closed),
+        (S::HelloDone, E::ClusterConfig) => Ok(S::Ready),
+        (S::Ready, E::ClusterConfig) => Ok(S::Ready),
+        (S::Ready, E::Index) => Ok(S::Ready),
+        (S::Ready, E::IndexUpdate) => Ok(S::Ready),
+        (S::Ready, E::Request) => Ok(S::Ready),
+        (S::Ready, E::Response) => Ok(S::Ready),
+        (S::Ready, E::DownloadProgress) => Ok(S::Ready),
+        (S::Ready, E::Ping) => Ok(S::Ready),
+        (S::Start, E::Close)
+        | (S::Dialed, E::Close)
+        | (S::HelloDone, E::Close)
+        | (S::Ready, E::Close) => Ok(S::Closed),
         _ => Err(format!(
             "invalid protocol transition: {state:?} + {event:?}"
         )),
@@ -113,28 +110,16 @@ pub(crate) fn event_from_message(message: &BepMessage) -> ProtocolEvent {
 pub(crate) fn run_message_exchange(messages: &[BepMessage]) -> Result<Vec<&'static str>, String> {
     let mut state = ProtocolState::Dialed;
     let mut trace = vec![ProtocolEvent::Dial.as_str()];
-    let mut pending_request: Option<u32> = None;
+    let mut pending_requests: BTreeSet<u32> = BTreeSet::new();
 
     for message in messages {
         let event = event_from_message(message);
         match message {
             BepMessage::Request { id, .. } => {
-                if let Some(existing) = pending_request {
-                    return Err(format!(
-                        "request {id} received while request {existing} is still pending"
-                    ));
-                }
-                pending_request = Some(*id);
+                pending_requests.insert(*id);
             }
             BepMessage::Response { id, .. } => {
-                let expected = pending_request
-                    .take()
-                    .ok_or_else(|| format!("response {id} received without pending request"))?;
-                if *id != expected {
-                    return Err(format!(
-                        "response id mismatch: expected={expected} received={id}"
-                    ));
-                }
+                pending_requests.remove(id);
             }
             _ => {}
         }
@@ -178,15 +163,8 @@ mod tests {
 
     #[test]
     fn response_without_request_fails() {
-        let err = run_events(&[
-            ProtocolEvent::Dial,
-            ProtocolEvent::Hello,
-            ProtocolEvent::ClusterConfig,
-            ProtocolEvent::Index,
-            ProtocolEvent::IndexUpdate,
-            ProtocolEvent::Response,
-        ])
-        .expect_err("must fail");
+        let err = run_events(&[ProtocolEvent::Dial, ProtocolEvent::ClusterConfig])
+            .expect_err("must fail");
         assert!(err.contains("invalid protocol transition"));
     }
 
@@ -211,27 +189,27 @@ mod tests {
     }
 
     #[test]
-    fn response_id_mismatch_fails() {
+    fn response_id_mismatch_is_ignored() {
         let mut messages = default_exchange();
         for msg in &mut messages {
             if let BepMessage::Response { id, .. } = msg {
                 *id = 999;
             }
         }
-        let err = run_message_exchange(&messages).expect_err("must fail");
-        assert!(err.contains("response id mismatch"));
+        let trace = run_message_exchange(&messages).expect("mismatched response should be ignored");
+        assert!(trace.contains(&"response"));
     }
 
     #[test]
-    fn response_without_pending_request_fails_with_specific_error() {
+    fn response_without_pending_request_is_ignored() {
         let mut messages = default_exchange();
         messages.retain(|message| !matches!(message, BepMessage::Request { .. }));
-        let err = run_message_exchange(&messages).expect_err("must fail");
-        assert!(err.contains("received without pending request"));
+        let trace = run_message_exchange(&messages).expect("orphan response should be ignored");
+        assert!(trace.contains(&"response"));
     }
 
     #[test]
-    fn second_request_while_pending_fails() {
+    fn second_request_while_pending_is_allowed() {
         let mut messages = default_exchange();
         let response_idx = messages
             .iter()
@@ -248,7 +226,14 @@ mod tests {
                 hash: "h3".to_string(),
             },
         );
-        let err = run_message_exchange(&messages).expect_err("must fail");
-        assert!(err.contains("is still pending"));
+        let trace = run_message_exchange(&messages).expect("multiple pending requests are allowed");
+        assert!(trace.iter().filter(|event| **event == "request").count() >= 2);
+    }
+
+    #[test]
+    fn close_is_allowed_before_ready_state() {
+        let trace =
+            run_events(&[ProtocolEvent::Dial, ProtocolEvent::Close]).expect("close allowed");
+        assert_eq!(trace, vec!["dial", "close"]);
     }
 }

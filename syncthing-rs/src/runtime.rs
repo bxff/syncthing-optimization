@@ -955,10 +955,16 @@ fn parse_folder_type_attr(value: &str) -> Option<FolderType> {
 }
 
 fn extract_xml_attr(line: &str, key: &str) -> Option<String> {
-    let needle = format!("{key}=\"");
-    let start = line.find(&needle)? + needle.len();
+    let dq = format!("{key}=\"");
+    if let Some(start) = line.find(&dq) {
+        let tail = &line[start + dq.len()..];
+        let end = tail.find('"')?;
+        return Some(tail[..end].to_string());
+    }
+    let sq = format!("{key}='");
+    let start = line.find(&sq)? + sq.len();
     let tail = &line[start..];
-    let end = tail.find('"')?;
+    let end = tail.find('\'')?;
     Some(tail[..end].to_string())
 }
 
@@ -2691,7 +2697,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 }
             } else {
                 match scan_all_folders(runtime, &subdirs) {
-                    Ok(()) => ApiReply::bytes(200, Vec::new(), "application/json"),
+                    Ok(()) => ApiReply::json(200, json!({"scanned": true})),
                     Err(ApiFolderStatusError::Internal(err)) => {
                         ApiReply::json(500, json!({ "error": err }))
                     }
@@ -3617,7 +3623,11 @@ fn folder_file(
         "entry": file_info_to_api_record(&file),
         "local": local_record,
         "global": global_record,
-        "availability": if global_file.is_some() { json!(["local"]) } else { json!([]) },
+        "availability": guard
+            .Availability(folder, path)
+            .into_iter()
+            .map(|a| a.ID)
+            .collect::<Vec<_>>(),
     }))
 }
 
@@ -5686,6 +5696,34 @@ mod tests {
     }
 
     #[test]
+    fn parse_syncthing_config_bootstrap_supports_single_quoted_attributes() {
+        let xml = r#"
+<configuration version='51'>
+    <folder id='main' label='Main' path='/tmp/sync' type='receiveonly' paused='true'>
+        <device id='LOCAL-DEVICE' introducedBy=''></device>
+    </folder>
+    <device id='LOCAL-DEVICE' name='Local Device'></device>
+    <gui enabled='true' tls='false'>
+        <address>127.0.0.1:8384</address>
+    </gui>
+</configuration>
+"#;
+
+        let parsed = parse_syncthing_config_bootstrap(xml);
+        assert_eq!(parsed.local_device_id.as_deref(), Some("LOCAL-DEVICE"));
+        assert_eq!(
+            parsed.folder_paths.get("main").map(String::as_str),
+            Some("/tmp/sync")
+        );
+        assert_eq!(
+            parsed.folder_types.get("main"),
+            Some(&FolderType::ReceiveOnly)
+        );
+        assert_eq!(parsed.folder_paused.get("main"), Some(&true));
+        assert_eq!(parsed.gui_use_tls, Some(false));
+    }
+
+    #[test]
     fn parse_syncthing_config_bootstrap_prefers_first_device_when_defaults_missing() {
         let xml = r#"
 <configuration version="51">
@@ -6099,7 +6137,7 @@ mod tests {
     }
 
     #[test]
-    fn api_db_scan_without_folder_scans_all_and_returns_empty_body() {
+    fn api_db_scan_without_folder_scans_all_and_returns_json_ack() {
         let root = temp_root("api-db-scan-all");
         let docs = root.join("docs");
         let media = root.join("media");
@@ -6134,7 +6172,8 @@ mod tests {
 
         let scan = build_api_response(&Method::Post, "/rest/db/scan", &runtime);
         assert_eq!(scan.status_code, StatusCode(200));
-        assert!(scan.body.is_empty());
+        let scan_payload: Value = serde_json::from_slice(&scan.body).expect("decode scan payload");
+        assert_eq!(scan_payload["scanned"], true);
 
         let guard = model.read().expect("lock");
         assert!(guard.Sequence("docs") > 0);

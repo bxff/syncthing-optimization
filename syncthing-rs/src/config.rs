@@ -647,10 +647,16 @@ pub(crate) fn demo_configs() -> Vec<FolderConfiguration> {
 }
 
 fn extract_xml_attr(xml: &str, attr: &str) -> Option<String> {
-    let pattern = format!("{attr}=\"");
-    let start = xml.find(&pattern)? + pattern.len();
+    let dq = format!("{attr}=\"");
+    if let Some(start) = xml.find(&dq) {
+        let rest = &xml[start + dq.len()..];
+        let end = rest.find('"')?;
+        return Some(rest[..end].to_string());
+    }
+    let sq = format!("{attr}='");
+    let start = xml.find(&sq)? + sq.len();
     let rest = &xml[start..];
-    let end = rest.find('"')?;
+    let end = rest.find('\'')?;
     Some(rest[..end].to_string())
 }
 
@@ -949,6 +955,14 @@ mod tests {
         assert_eq!(xml_nested.id, "inner");
         assert_eq!(xml_nested.path, "/tmp/inner");
         assert_eq!(xml_nested.folder_type, FolderType::ReceiveOnly);
+
+        let xml_single_quoted = FolderConfiguration::unmarshal_xml(
+            r#"<folder id='sq' label='Single' path='/tmp/sq' type='sendonly'></folder>"#,
+        )
+        .expect("xml single quoted parse");
+        assert_eq!(xml_single_quoted.id, "sq");
+        assert_eq!(xml_single_quoted.path, "/tmp/sq");
+        assert_eq!(xml_single_quoted.folder_type, FolderType::SendOnly);
     }
 
     #[test]

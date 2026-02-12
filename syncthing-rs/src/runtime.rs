@@ -5118,7 +5118,7 @@ fn run_parity_peer_probe_inprocess(model: &Arc<RwLock<model>>) -> Result<(), Str
                 name: "a.txt".to_string(),
                 offset: 0,
                 size: 5,
-                hash: "probe".to_string(),
+                hash: "".to_string(),
             },
         )?
         .ok_or_else(|| "peer probe fallback expected response message".to_string())?;
@@ -5187,7 +5187,7 @@ fn run_parity_peer_probe(model: &Arc<RwLock<model>>) -> Result<(), String> {
             name: "a.txt".to_string(),
             offset: 0,
             size: 5,
-            hash: "probe".to_string(),
+            hash: "".to_string(),
         },
     )?;
 

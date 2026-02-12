@@ -875,7 +875,7 @@ impl model {
     }
 
     fn request_hash_matches(&self, folder_id: &str, path: &str, offset: u64, hash: &str) -> bool {
-        if hash.trim().is_empty() || hash.len() < 8 {
+        if hash.trim().is_empty() {
             return true;
         }
         let info = self
@@ -889,6 +889,21 @@ impl model {
             .get(index)
             .map(|candidate| candidate == hash)
             .unwrap_or(true)
+    }
+
+    fn request_permitted(&self, device: &str, folder: &str, name: &str) -> bool {
+        let Some(cfg) = self.folderCfgs.get(folder) else {
+            return false;
+        };
+        if cfg.paused {
+            return false;
+        }
+        let is_self = device == "local" || device == self.id;
+        let explicitly_shared = cfg.devices.is_empty() || cfg.shared_with(device);
+        if !is_self && !explicitly_shared {
+            return false;
+        }
+        !is_internal_request_path(name)
     }
 
     pub(crate) fn RequestGlobalData(
@@ -965,6 +980,14 @@ impl model {
                 size,
                 hash,
             } => {
+                if !self.request_permitted(device, folder, name) {
+                    return Ok(Some(BepMessage::Response {
+                        id: *id,
+                        code: 1,
+                        data_len: 0,
+                        data: Vec::new(),
+                    }));
+                }
                 if (*size as usize) > MAX_BEP_REQUEST_BYTES {
                     return Ok(Some(BepMessage::Response {
                         id: *id,
@@ -1922,6 +1945,16 @@ pub(crate) fn without(items: &[String], remove: &[String]) -> Vec<String> {
     items.iter().filter(|i| !rm.contains(i)).cloned().collect()
 }
 
+fn is_internal_request_path(path: &str) -> bool {
+    let clean = path.trim_matches('/');
+    clean == ".stfolder"
+        || clean == ".stignore"
+        || clean == ".stversions"
+        || clean.starts_with(".stfolder/")
+        || clean.starts_with(".stignore/")
+        || clean.starts_with(".stversions/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2386,6 +2419,105 @@ mod tests {
             response,
             Some(BepMessage::Response {
                 id: 11,
+                code: 1,
+                data_len: 0,
+                data: Vec::new(),
+            })
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apply_bep_request_rejects_short_nonempty_hash_mismatch() {
+        let root = std::env::temp_dir().join(format!(
+            "syncthing-rs-bep-request-short-hash-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("mkdir");
+
+        let mut m = NewModel();
+        m.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+        let fi = db::FileInfo {
+            folder: "default".to_string(),
+            path: "a.txt".to_string(),
+            sequence: 1,
+            modified_ns: 1,
+            size: 10,
+            deleted: false,
+            ignored: false,
+            local_flags: 0,
+            file_type: db::FileInfoType::File,
+            block_hashes: vec!["expected-hash".to_string()],
+        };
+        m.sdb
+            .write()
+            .expect("db write")
+            .update("default", "local", vec![fi])
+            .expect("update local");
+
+        let response = m
+            .ApplyBepMessage(
+                "peer-a",
+                &BepMessage::Request {
+                    id: 12,
+                    folder: "default".to_string(),
+                    name: "a.txt".to_string(),
+                    offset: 0,
+                    size: 4,
+                    hash: "bad".to_string(),
+                },
+            )
+            .expect("response generated");
+        assert_eq!(
+            response,
+            Some(BepMessage::Response {
+                id: 12,
+                code: 1,
+                data_len: 0,
+                data: Vec::new(),
+            })
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apply_bep_request_rejects_unshared_device() {
+        let root = std::env::temp_dir().join(format!(
+            "syncthing-rs-bep-request-share-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("mkdir");
+
+        let mut cfg = newFolderConfiguration("default", &root.to_string_lossy());
+        cfg.devices.push(crate::config::FolderDeviceConfiguration {
+            device_id: "peer-b".to_string(),
+            introduced_by: String::new(),
+            encryption_password: String::new(),
+        });
+
+        let mut m = NewModel();
+        m.newFolder(cfg);
+        let response = m
+            .ApplyBepMessage(
+                "peer-a",
+                &BepMessage::Request {
+                    id: 13,
+                    folder: "default".to_string(),
+                    name: "a.txt".to_string(),
+                    offset: 0,
+                    size: 4,
+                    hash: "".to_string(),
+                },
+            )
+            .expect("response generated");
+        assert_eq!(
+            response,
+            Some(BepMessage::Response {
+                id: 13,
                 code: 1,
                 data_len: 0,
                 data: Vec::new(),

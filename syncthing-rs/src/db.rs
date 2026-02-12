@@ -1264,6 +1264,15 @@ impl Db for WalFreeDb {
             folders.insert(meta.folder.clone());
             true
         });
+        for (folder, _) in self.index_ids.keys() {
+            folders.insert(folder.clone());
+        }
+        for (folder, _) in self.index_sequences.keys() {
+            folders.insert(folder.clone());
+        }
+        for (folder, _) in self.mtimes.keys() {
+            folders.insert(folder.clone());
+        }
         Ok(folders.into_iter().collect())
     }
 
@@ -2381,6 +2390,18 @@ mod tests {
             .get_device_file("default", "local", "a.txt")
             .expect("lookup")
             .is_some());
+    }
+
+    #[test]
+    fn list_folders_includes_metadata_only_folders() {
+        let mut db = WalFreeDb::default();
+        db.set_index_id("meta-only", "local", 77)
+            .expect("set index id");
+        db.put_mtime("meta-only", "a.txt", 10, 11)
+            .expect("put mtime");
+
+        let folders = db.list_folders().expect("folders");
+        assert!(folders.contains(&"meta-only".to_string()));
     }
 
     #[test]

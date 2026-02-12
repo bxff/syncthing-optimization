@@ -41,6 +41,7 @@ pub(crate) static errStopped: &str = "model stopped";
 pub(crate) static folderFactories: &str = "folder_factories";
 pub(crate) static underscore_var: &str = "_";
 pub(crate) const MAX_BEP_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const BEP_REQUEST_BLOCK_SIZE: u64 = 128 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Availability {
@@ -777,6 +778,15 @@ impl model {
             .and_then(|db| db.get_global_availability(folder_id, path).ok())
             .unwrap_or_default()
             .into_iter()
+            .filter(|id| {
+                self.connections
+                    .get(id)
+                    .map(|c| c.Connected)
+                    .unwrap_or(false)
+                    && self
+                        .remoteFolderStates
+                        .contains_key(&format!("{id}:{folder_id}"))
+            })
             .map(|id| Availability {
                 ID: id,
                 FromTemporary: false,
@@ -864,6 +874,23 @@ impl model {
         readOffsetIntoBuf(&abs, offset, size)
     }
 
+    fn request_hash_matches(&self, folder_id: &str, path: &str, offset: u64, hash: &str) -> bool {
+        if hash.trim().is_empty() || hash.len() < 8 {
+            return true;
+        }
+        let info = self
+            .CurrentFolderFile(folder_id, path)
+            .or_else(|| self.CurrentGlobalFile(folder_id, path));
+        let Some(info) = info else {
+            return true;
+        };
+        let index = (offset / BEP_REQUEST_BLOCK_SIZE) as usize;
+        info.block_hashes
+            .get(index)
+            .map(|candidate| candidate == hash)
+            .unwrap_or(true)
+    }
+
     pub(crate) fn RequestGlobalData(
         &self,
         folder_id: &str,
@@ -936,9 +963,17 @@ impl model {
                 name,
                 offset,
                 size,
-                hash: _,
+                hash,
             } => {
                 if (*size as usize) > MAX_BEP_REQUEST_BYTES {
+                    return Ok(Some(BepMessage::Response {
+                        id: *id,
+                        code: 1,
+                        data_len: 0,
+                        data: Vec::new(),
+                    }));
+                }
+                if !self.request_hash_matches(folder, name, *offset, hash) {
                     return Ok(Some(BepMessage::Response {
                         id: *id,
                         code: 1,
@@ -1045,6 +1080,7 @@ impl model {
     }
 
     pub(crate) fn ScanFolder(&mut self, folder_id: &str) -> Result<(), String> {
+        self.checkFolderRunningRLocked(folder_id)?;
         self.folderRunners
             .get_mut(folder_id)
             .ok_or_else(|| ErrFolderMissing.to_string())?
@@ -1057,6 +1093,7 @@ impl model {
         folder_id: &str,
         subs: &[String],
     ) -> Result<(), String> {
+        self.checkFolderRunningRLocked(folder_id)?;
         self.folderRunners
             .get_mut(folder_id)
             .ok_or_else(|| ErrFolderMissing.to_string())?
@@ -1069,6 +1106,7 @@ impl model {
         folder_id: &str,
         subs: &[String],
     ) -> Result<(), String> {
+        self.checkFolderRunningRLocked(folder_id)?;
         self.folderRunners
             .get_mut(folder_id)
             .ok_or_else(|| ErrFolderMissing.to_string())?
@@ -2300,6 +2338,139 @@ mod tests {
                 data: Vec::new(),
             })
         );
+    }
+
+    #[test]
+    fn apply_bep_request_rejects_hash_mismatch() {
+        let root = std::env::temp_dir().join(format!(
+            "syncthing-rs-bep-request-hash-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("mkdir");
+
+        let mut m = NewModel();
+        m.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+        let fi = db::FileInfo {
+            folder: "default".to_string(),
+            path: "a.txt".to_string(),
+            sequence: 1,
+            modified_ns: 1,
+            size: 10,
+            deleted: false,
+            ignored: false,
+            local_flags: 0,
+            file_type: db::FileInfoType::File,
+            block_hashes: vec!["expected-hash".to_string()],
+        };
+        m.sdb
+            .write()
+            .expect("db write")
+            .update("default", "local", vec![fi])
+            .expect("update local");
+
+        let response = m
+            .ApplyBepMessage(
+                "peer-a",
+                &BepMessage::Request {
+                    id: 11,
+                    folder: "default".to_string(),
+                    name: "a.txt".to_string(),
+                    offset: 0,
+                    size: 4,
+                    hash: "wrong-hash".to_string(),
+                },
+            )
+            .expect("response generated");
+        assert_eq!(
+            response,
+            Some(BepMessage::Response {
+                id: 11,
+                code: 1,
+                data_len: 0,
+                data: Vec::new(),
+            })
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn availability_filters_unconnected_or_unconfigured_devices() {
+        let root = std::env::temp_dir().join(format!(
+            "syncthing-rs-availability-filter-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("mkdir");
+
+        let mut m = NewModel();
+        m.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+
+        let remote_a = db::FileInfo {
+            folder: "default".to_string(),
+            path: "a.txt".to_string(),
+            sequence: 3,
+            modified_ns: 3,
+            size: 10,
+            deleted: false,
+            ignored: false,
+            local_flags: 0,
+            file_type: db::FileInfoType::File,
+            block_hashes: vec!["h1".to_string()],
+        };
+        let remote_b = remote_a.clone();
+
+        let mut db = m.sdb.write().expect("db write");
+        db.update("default", "peer-a", vec![remote_a])
+            .expect("update peer-a");
+        db.update("default", "peer-b", vec![remote_b])
+            .expect("update peer-b");
+        drop(db);
+
+        m.connections.insert(
+            "peer-a".to_string(),
+            ConnectionStats {
+                Connected: true,
+                ..ConnectionStats::default()
+            },
+        );
+        m.connections.insert(
+            "peer-b".to_string(),
+            ConnectionStats {
+                Connected: false,
+                ..ConnectionStats::default()
+            },
+        );
+        m.remoteFolderStates.insert(
+            "peer-a:default".to_string(),
+            "cluster_configured".to_string(),
+        );
+
+        let availability = m.Availability("default", "a.txt");
+        assert_eq!(availability.len(), 1);
+        assert_eq!(availability[0].ID, "peer-a");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scan_folder_requires_running_folder_state() {
+        let root = std::env::temp_dir().join(format!(
+            "syncthing-rs-scan-running-check-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("mkdir");
+
+        let mut m = NewModel();
+        m.newFolder(newFolderConfiguration("default", &root.to_string_lossy()));
+        m.removeFolder("default");
+
+        let err = m.ScanFolder("default").expect_err("scan should fail");
+        assert_eq!(err, ErrFolderNotRunning);
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

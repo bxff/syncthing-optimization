@@ -1297,11 +1297,18 @@ impl folder {
                 };
                 let block_hashes = if file_type == db::FileInfoType::File {
                     hash_file_blocks(&abs)?
+                } else if file_type == db::FileInfoType::Symlink {
+                    vec![fs::read_link(&abs)
+                        .map_err(|e| format!("read symlink {}: {e}", abs.display()))?
+                        .to_string_lossy()
+                        .to_string()]
                 } else {
                     Vec::new()
                 };
                 let modified_ns = file_modified_ns(&meta)?;
-                let size = if file_type == db::FileInfoType::Directory {
+                let size = if file_type == db::FileInfoType::Directory
+                    || file_type == db::FileInfoType::Symlink
+                {
                     0
                 } else {
                     i64::try_from(meta.len()).unwrap_or(i64::MAX)
@@ -1704,8 +1711,43 @@ fn apply_remote_file_to_disk(root: &Path, file: &db::FileInfo) -> Result<(), Str
     match file.file_type {
         db::FileInfoType::Directory => ensure_directory_path(&abs),
         db::FileInfoType::File => write_sparse_file(&abs, file.size),
-        db::FileInfoType::Symlink => Err("symlink pull entries are not supported".to_string()),
+        db::FileInfoType::Symlink => {
+            let target = file
+                .block_hashes
+                .first()
+                .map(String::as_str)
+                .ok_or_else(|| errIncompatibleSymlink.to_string())?;
+            ensure_symlink_path(&abs, target)
+        }
     }
+}
+
+#[cfg(unix)]
+fn ensure_symlink_path(path: &Path, target: &str) -> Result<(), String> {
+    use std::os::unix::fs::symlink;
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
+    match fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if meta.is_dir() {
+                fs::remove_dir_all(path)
+                    .map_err(|e| format!("remove dir {}: {e}", path.display()))?;
+            } else {
+                fs::remove_file(path)
+                    .map_err(|e| format!("remove file {}: {e}", path.display()))?;
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(format!("stat {}: {err}", path.display())),
+    }
+    symlink(target, path).map_err(|e| format!("create symlink {}: {e}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn ensure_symlink_path(_path: &Path, _target: &str) -> Result<(), String> {
+    Err(errIncompatibleSymlink.to_string())
 }
 
 fn safe_join_relative_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
@@ -2827,9 +2869,10 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn apply_remote_file_rejects_symlink_entries() {
-        let root = temp_root("pull-symlink-reject");
+    fn apply_remote_file_applies_symlink_entries() {
+        let root = temp_root("pull-symlink-apply");
         let file = db::FileInfo {
             folder: "default".to_string(),
             path: "link.txt".to_string(),
@@ -2840,11 +2883,15 @@ mod tests {
             ignored: false,
             local_flags: 0,
             file_type: db::FileInfoType::Symlink,
-            block_hashes: Vec::new(),
+            block_hashes: vec!["target.txt".to_string()],
         };
 
-        let err = apply_remote_file_to_disk(&root, &file).expect_err("must reject symlink pull");
-        assert!(err.contains("symlink pull entries are not supported"));
+        apply_remote_file_to_disk(&root, &file).expect("apply symlink pull");
+        let link_path = root.join("link.txt");
+        let meta = fs::symlink_metadata(&link_path).expect("symlink metadata");
+        assert!(meta.file_type().is_symlink());
+        let target = fs::read_link(&link_path).expect("read symlink target");
+        assert_eq!(target.to_string_lossy(), "target.txt");
 
         let _ = fs::remove_dir_all(root);
     }

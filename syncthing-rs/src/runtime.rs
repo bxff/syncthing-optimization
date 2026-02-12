@@ -1094,6 +1094,7 @@ struct ApiRuntimeState {
     log_facilities: BTreeSet<String>,
     active_auth_users: BTreeSet<String>,
     active_auth_tokens: BTreeMap<String, String>,
+    active_auth_csrf: BTreeMap<String, String>,
 }
 
 impl ApiRuntimeState {
@@ -1169,6 +1170,7 @@ impl ApiRuntimeState {
             log_facilities: BTreeSet::from(["main".to_string(), "model".to_string()]),
             active_auth_users: BTreeSet::new(),
             active_auth_tokens: BTreeMap::new(),
+            active_auth_csrf: BTreeMap::new(),
         }
     }
 }
@@ -1177,6 +1179,7 @@ struct ApiReply {
     status_code: StatusCode,
     body: Vec<u8>,
     content_type: String,
+    headers: Vec<(String, String)>,
 }
 
 impl ApiReply {
@@ -1187,6 +1190,7 @@ impl ApiReply {
             status_code: StatusCode(status_code),
             body,
             content_type: "application/json".to_string(),
+            headers: Vec::new(),
         }
     }
 
@@ -1195,7 +1199,13 @@ impl ApiReply {
             status_code: StatusCode(status_code),
             body,
             content_type: content_type.to_string(),
+            headers: Vec::new(),
         }
+    }
+
+    fn with_header(mut self, name: &str, value: String) -> Self {
+        self.headers.push((name.to_string(), value));
+        self
     }
 }
 
@@ -1205,7 +1215,7 @@ fn start_api_server(
 ) -> Result<thread::JoinHandle<()>, String> {
     let server = Server::http(addr).map_err(|err| format!("listen api {addr}: {err}"))?;
     let handle = thread::spawn(move || {
-        for request in server.incoming_requests() {
+        for mut request in server.incoming_requests() {
             let mut url = request.url().to_string();
             if let Some(api_key) = request
                 .headers()
@@ -1225,6 +1235,24 @@ fn start_api_server(
                     url = append_query_param(&url, "token", token.trim());
                 }
             }
+            if let Some(cookie_header) = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Cookie"))
+                .map(|h| h.value.to_string())
+            {
+                if let Some(session_token) = extract_cookie_value(&cookie_header, "sessionid") {
+                    url = append_query_param(&url, "token", session_token);
+                }
+            }
+            if let Some(csrf) = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("X-CSRF-Token"))
+                .map(|h| h.value.to_string())
+            {
+                url = append_query_param(&url, "csrf", csrf.trim());
+            }
             if let Some(lang) = request
                 .headers()
                 .iter()
@@ -1233,12 +1261,24 @@ fn start_api_server(
             {
                 url = append_query_param(&url, "accept-language", lang.trim());
             }
+
+            let mut body = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut body);
+            if !body.is_empty() {
+                url = append_body_params(&url, request.method(), &body);
+            }
+
             let reply = build_api_response(request.method(), &url, &runtime);
             let mut response = Response::from_data(reply.body).with_status_code(reply.status_code);
             if let Ok(content_type) =
                 Header::from_bytes(&b"Content-Type"[..], reply.content_type.as_bytes())
             {
                 response = response.with_header(content_type);
+            }
+            for (name, value) in reply.headers {
+                if let Ok(header) = Header::from_bytes(name.as_bytes(), value.as_bytes()) {
+                    response = response.with_header(header);
+                }
             }
             let _ = request.respond(response);
         }
@@ -1255,7 +1295,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
     }
 
     if !path.starts_with("/rest/noauth/") {
-        match is_authenticated_request(&params, runtime) {
+        match is_authenticated_request(path, method, &params, runtime) {
             Ok(true) => {}
             Ok(false) => return make_api_error(401, "authentication required"),
             Err(err) => return make_api_error(500, &err),
@@ -1465,6 +1505,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 .cloned()
                 .unwrap_or_else(|| "anonymous".to_string());
             let provided_password = params.get("password").cloned().unwrap_or_default();
+            let stay_logged_in = bool_param(&params, "stayLoggedIn").unwrap_or(false);
             let mut state = match runtime.state.write() {
                 Ok(guard) => guard,
                 Err(_) => return make_api_error(500, "api state lock poisoned"),
@@ -1489,11 +1530,17 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             }
             state.active_auth_users.insert(user.clone());
             let token = mint_auth_token(&user);
+            let csrf = mint_auth_token(&format!("csrf-{user}"));
             state.active_auth_tokens.insert(token.clone(), user.clone());
-            ApiReply::json(
-                200,
-                json!({"authenticated": true, "user": user, "token": token}),
-            )
+            state.active_auth_csrf.insert(token.clone(), csrf.clone());
+            let cookie = if stay_logged_in {
+                format!("sessionid={token}; Path=/; HttpOnly; SameSite=Lax")
+            } else {
+                format!("sessionid={token}; Path=/; HttpOnly; SameSite=Lax")
+            };
+            ApiReply::bytes(204, Vec::new(), "application/json")
+                .with_header("Set-Cookie", cookie)
+                .with_header("X-CSRF-Token", csrf)
         }
         "/rest/noauth/auth/logout" => {
             if method != &Method::Post {
@@ -1518,14 +1565,32 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     return make_api_error(401, "authentication required");
                 }
                 state.active_auth_tokens.remove(token);
+                state.active_auth_csrf.remove(token);
             } else {
-                state.active_auth_tokens.retain(|_, u| u != &user);
+                let removed_tokens = state
+                    .active_auth_tokens
+                    .iter()
+                    .filter_map(|(token, u)| {
+                        if u == &user {
+                            Some(token.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                for token in removed_tokens {
+                    state.active_auth_tokens.remove(&token);
+                    state.active_auth_csrf.remove(&token);
+                }
             }
             let still_logged_in = state.active_auth_tokens.values().any(|u| u == &user);
             if !still_logged_in {
                 state.active_auth_users.remove(&user);
             }
-            ApiReply::json(200, json!({"loggedOut": true, "user": user}))
+            ApiReply::bytes(204, Vec::new(), "application/json").with_header(
+                "Set-Cookie",
+                "sessionid=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0".to_string(),
+            )
         }
         "/rest/system/version" => {
             if method != &Method::Get {
@@ -2217,7 +2282,13 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(0);
             let limit = parse_limit(&params, "limit", 1000, 10_000);
-            api_events(runtime, false, since, limit)
+            let timeout_s = params
+                .get("timeout")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0)
+                .min(60);
+            let event_filter = parse_event_type_filter(params.get("events").map(String::as_str));
+            api_events(runtime, false, since, limit, timeout_s, event_filter)
         }
         "/rest/events/disk" => {
             if method != &Method::Get {
@@ -2228,7 +2299,13 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(0);
             let limit = parse_limit(&params, "limit", 1000, 10_000);
-            api_events(runtime, true, since, limit)
+            let timeout_s = params
+                .get("timeout")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0)
+                .min(60);
+            let event_filter = parse_event_type_filter(params.get("events").map(String::as_str));
+            api_events(runtime, true, since, limit, timeout_s, event_filter)
         }
         "/rest/stats/device" => {
             if method != &Method::Get {
@@ -3203,6 +3280,8 @@ fn mint_auth_token(user: &str) -> String {
 }
 
 fn is_authenticated_request(
+    path: &str,
+    method: &Method,
     params: &BTreeMap<String, String>,
     runtime: &DaemonApiRuntime,
 ) -> Result<bool, String> {
@@ -3214,41 +3293,142 @@ fn is_authenticated_request(
         return Ok(true);
     }
 
-    if let Some(expected_key) = state
+    let authenticated_via_api_key = state
         .gui
         .get("apiKey")
         .or_else(|| state.gui.get("apikey"))
         .and_then(Value::as_str)
         .filter(|v| !v.is_empty())
-    {
-        if params
-            .get("x-api-key")
-            .or_else(|| params.get("apiKey"))
-            .or_else(|| params.get("api-key"))
-            .map(|provided| provided == expected_key)
-            .unwrap_or(false)
-        {
-            return Ok(true);
-        }
+        .map(|expected_key| {
+            params
+                .get("x-api-key")
+                .or_else(|| params.get("apiKey"))
+                .or_else(|| params.get("api-key"))
+                .map(|provided| provided == expected_key)
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    if authenticated_via_api_key {
+        return Ok(true);
     }
 
-    if let Some(token) = params.get("token") {
-        if params.get("user").is_none() {
-            return Ok(state.active_auth_tokens.contains_key(token));
-        }
-    }
-
-    let Some(user) = params.get("user") else {
-        return Ok(false);
-    };
     let Some(token) = params.get("token") else {
         return Ok(false);
     };
-    Ok(state
-        .active_auth_tokens
-        .get(token)
-        .map(|bound_user| bound_user == user)
-        .unwrap_or(false))
+
+    if let Some(user) = params.get("user") {
+        let Some(bound_user) = state.active_auth_tokens.get(token) else {
+            return Ok(false);
+        };
+        if bound_user != user {
+            return Ok(false);
+        }
+    } else if !state.active_auth_tokens.contains_key(token) {
+        return Ok(false);
+    }
+
+    let requires_csrf = method != &Method::Get
+        && path.starts_with("/rest/")
+        && !path.starts_with("/rest/noauth/")
+        && !path.starts_with("/rest/debug/");
+    if !requires_csrf {
+        return Ok(true);
+    }
+
+    let Some(expected_csrf) = state.active_auth_csrf.get(token) else {
+        return Ok(false);
+    };
+    let Some(provided_csrf) = params.get("csrf") else {
+        return Ok(false);
+    };
+    Ok(provided_csrf == expected_csrf)
+}
+
+fn extract_cookie_value<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {
+    cookie_header.split(';').map(str::trim).find_map(|chunk| {
+        let (k, v) = chunk.split_once('=')?;
+        if k.trim().eq_ignore_ascii_case(name) {
+            Some(v.trim())
+        } else {
+            None
+        }
+    })
+}
+
+fn append_body_params(url: &str, method: &Method, body: &[u8]) -> String {
+    let parsed: Value = match serde_json::from_slice(body) {
+        Ok(value) => value,
+        Err(_) => return url.to_string(),
+    };
+    let (path, _) = split_url(url);
+    if path == "/rest/noauth/auth/password" {
+        return append_login_body_params(url, &parsed);
+    }
+    if path.starts_with("/rest/config")
+        && (*method == Method::Post || *method == Method::Put || *method == Method::Patch)
+    {
+        return append_flat_object_params(url, &parsed);
+    }
+    url.to_string()
+}
+
+fn append_login_body_params(url: &str, payload: &Value) -> String {
+    let Some(obj) = payload.as_object() else {
+        return url.to_string();
+    };
+    let mut out = url.to_string();
+    if let Some(user) = obj
+        .get("Username")
+        .or_else(|| obj.get("username"))
+        .and_then(Value::as_str)
+    {
+        out = append_query_param(&out, "user", user);
+    }
+    if let Some(password) = obj
+        .get("Password")
+        .or_else(|| obj.get("password"))
+        .and_then(Value::as_str)
+    {
+        out = append_query_param(&out, "password", password);
+    }
+    if let Some(stay_logged_in) = obj
+        .get("StayLoggedIn")
+        .or_else(|| obj.get("stayLoggedIn"))
+        .and_then(Value::as_bool)
+    {
+        out = append_query_param(
+            &out,
+            "stayLoggedIn",
+            if stay_logged_in { "true" } else { "false" },
+        );
+    }
+    out
+}
+
+fn append_flat_object_params(url: &str, payload: &Value) -> String {
+    let Some(obj) = payload.as_object() else {
+        return url.to_string();
+    };
+    let mut out = url.to_string();
+    for (key, value) in obj {
+        let encoded = match value {
+            Value::String(v) => Some(v.clone()),
+            Value::Bool(v) => Some(v.to_string()),
+            Value::Number(v) => Some(v.to_string()),
+            Value::Array(items) if items.iter().all(Value::is_string) => Some(
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+            _ => None,
+        };
+        if let Some(encoded) = encoded {
+            out = append_query_param(&out, key, &encoded);
+        }
+    }
+    out
 }
 
 fn path_param<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
@@ -3358,11 +3538,46 @@ fn append_event(runtime: &DaemonApiRuntime, event_type: &str, data: Value, disk:
     }
 }
 
-fn api_events(runtime: &DaemonApiRuntime, disk_only: bool, since: u64, limit: usize) -> ApiReply {
-    let state = match runtime.state.read() {
-        Ok(guard) => guard,
-        Err(_) => return make_api_error(500, "api state lock poisoned"),
+fn api_events(
+    runtime: &DaemonApiRuntime,
+    disk_only: bool,
+    since: u64,
+    limit: usize,
+    timeout_s: u64,
+    event_filter: Option<BTreeSet<String>>,
+) -> ApiReply {
+    let deadline = if timeout_s == 0 {
+        None
+    } else {
+        Some(SystemTime::now() + Duration::from_secs(timeout_s))
     };
+
+    loop {
+        let items = match runtime.state.read() {
+            Ok(state) => {
+                collect_events_slice(&state, disk_only, since, limit, event_filter.as_ref())
+            }
+            Err(_) => return make_api_error(500, "api state lock poisoned"),
+        };
+        if !items.is_empty() || timeout_s == 0 {
+            return ApiReply::json(200, Value::Array(items));
+        }
+        if let Some(deadline) = deadline {
+            if SystemTime::now() >= deadline {
+                return ApiReply::json(200, Value::Array(Vec::new()));
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn collect_events_slice(
+    state: &ApiRuntimeState,
+    disk_only: bool,
+    since: u64,
+    limit: usize,
+    event_filter: Option<&BTreeSet<String>>,
+) -> Vec<Value> {
     let source = if disk_only {
         &state.disk_event_log
     } else {
@@ -3371,12 +3586,40 @@ fn api_events(runtime: &DaemonApiRuntime, disk_only: bool, since: u64, limit: us
     let filtered = source
         .iter()
         .filter(|ev| ev.get("id").and_then(Value::as_u64).unwrap_or_default() > since)
+        .filter(|ev| {
+            event_filter
+                .map(|allowed| {
+                    ev.get("type")
+                        .and_then(Value::as_str)
+                        .map(|typ| allowed.contains(&typ.to_ascii_lowercase()))
+                        .unwrap_or(false)
+                })
+                .unwrap_or(true)
+        })
         .cloned()
         .collect::<Vec<_>>();
     let start = filtered.len().saturating_sub(limit);
     let mut items = filtered[start..].to_vec();
     items.sort_by_key(|v| v.get("id").and_then(Value::as_u64).unwrap_or_default());
-    ApiReply::json(200, Value::Array(items))
+    items
+}
+
+fn parse_event_type_filter(raw: Option<&str>) -> Option<BTreeSet<String>> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let set = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    if set.is_empty() {
+        None
+    } else {
+        Some(set)
+    }
 }
 
 fn build_config_document(runtime: &DaemonApiRuntime) -> Result<Value, String> {
@@ -4582,13 +4825,13 @@ pub(crate) fn run_api_surface_probe() -> Result<ApiSurfaceProbeResult, String> {
                 "POST /rest/noauth/auth/password",
                 Method::Post,
                 "/rest/noauth/auth/password?user=probe".to_string(),
-                200,
+                204,
             ),
             (
                 "POST /rest/noauth/auth/logout",
                 Method::Post,
                 "/rest/noauth/auth/logout?user=probe".to_string(),
-                200,
+                204,
             ),
             (
                 "GET /rest/system/error",
@@ -5298,6 +5541,9 @@ fn forbidden_api_probe_keys(endpoint: &str) -> &'static [&'static str] {
 }
 
 fn response_shape(body: &[u8]) -> Result<(String, Vec<String>), String> {
+    if body.is_empty() {
+        return Ok(("empty".to_string(), Vec::new()));
+    }
     let value: Value =
         serde_json::from_slice(body).map_err(|err| format!("decode probe response JSON: {err}"))?;
     match value {
@@ -5526,6 +5772,19 @@ mod tests {
             .expect("read frame")
             .expect("response frame");
         decode_frame(&frame).expect("decode response")
+    }
+
+    fn header_value<'a>(reply: &'a ApiReply, name: &str) -> Option<&'a str> {
+        reply
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    fn session_token_from_set_cookie(reply: &ApiReply) -> Option<String> {
+        let cookie = header_value(reply, "Set-Cookie")?;
+        extract_cookie_value(cookie, "sessionid").map(str::to_string)
     }
 
     fn bind_loopback_listener_or_skip() -> Option<TcpListener> {
@@ -6797,13 +7056,12 @@ mod tests {
             "/rest/noauth/auth/password?user=alice&password=secret",
             &runtime,
         );
-        assert_eq!(login.status_code, StatusCode(200));
-        let login_payload: Value = serde_json::from_slice(&login.body).expect("decode login");
-        let token = login_payload["token"].as_str().expect("login token");
+        assert_eq!(login.status_code, StatusCode(204));
+        let token = session_token_from_set_cookie(&login).expect("session token");
 
         let authorized = build_api_response(
             &Method::Get,
-            &format!("/rest/system/status?user=alice&token={token}"),
+            &format!("/rest/system/status?token={token}"),
             &runtime,
         );
         assert_eq!(authorized.status_code, StatusCode(200));
@@ -6844,8 +7102,11 @@ mod tests {
             "/rest/noauth/auth/password?user=alice&password=secret",
             &runtime,
         );
-        let payload: Value = serde_json::from_slice(&login.body).expect("decode login");
-        let token = payload["token"].as_str().expect("token");
+        assert_eq!(login.status_code, StatusCode(204));
+        let token = session_token_from_set_cookie(&login).expect("token");
+        let csrf = header_value(&login, "X-CSRF-Token")
+            .expect("csrf token")
+            .to_string();
 
         let bad_logout = build_api_response(
             &Method::Post,
@@ -6854,12 +7115,100 @@ mod tests {
         );
         assert_eq!(bad_logout.status_code, StatusCode(401));
 
-        let still_auth = build_api_response(
-            &Method::Get,
-            &format!("/rest/system/status?user=alice&token={token}"),
+        let good_logout = build_api_response(
+            &Method::Post,
+            &format!("/rest/noauth/auth/logout?user=alice&token={token}&csrf={csrf}"),
             &runtime,
         );
-        assert_eq!(still_auth.status_code, StatusCode(200));
+        assert_eq!(good_logout.status_code, StatusCode(204));
+
+        let still_auth = build_api_response(
+            &Method::Get,
+            &format!("/rest/system/status?token={token}"),
+            &runtime,
+        );
+        assert_eq!(still_auth.status_code, StatusCode(401));
+    }
+
+    #[test]
+    fn api_login_sets_cookie_and_csrf_and_enforces_csrf_on_writes() {
+        let runtime = test_api_runtime(Arc::new(RwLock::new(NewModel())), Vec::new(), 0);
+        {
+            let mut state = runtime.state.write().expect("state lock");
+            state.gui["user"] = json!("alice");
+            state.gui["password"] = json!("secret");
+        }
+
+        let login = build_api_response(
+            &Method::Post,
+            "/rest/noauth/auth/password?user=alice&password=secret&stayLoggedIn=true",
+            &runtime,
+        );
+        assert_eq!(login.status_code, StatusCode(204));
+        let token = session_token_from_set_cookie(&login).expect("session token");
+        let csrf = header_value(&login, "X-CSRF-Token")
+            .expect("csrf token")
+            .to_string();
+
+        let get_ok = build_api_response(
+            &Method::Get,
+            &format!("/rest/system/status?token={token}"),
+            &runtime,
+        );
+        assert_eq!(get_ok.status_code, StatusCode(200));
+
+        let write_missing_csrf = build_api_response(
+            &Method::Post,
+            &format!("/rest/db/scan?folder=default&token={token}"),
+            &runtime,
+        );
+        assert_eq!(write_missing_csrf.status_code, StatusCode(401));
+
+        let write_ok = build_api_response(
+            &Method::Post,
+            &format!("/rest/db/scan?folder=default&token={token}&csrf={csrf}"),
+            &runtime,
+        );
+        assert_ne!(write_ok.status_code, StatusCode(401));
+    }
+
+    #[test]
+    fn append_body_params_supports_login_json_payload() {
+        let body = br#"{"Username":"alice","Password":"secret","StayLoggedIn":true}"#;
+        let url = append_body_params("/rest/noauth/auth/password", &Method::Post, body);
+        assert!(url.contains("user=alice"));
+        assert!(url.contains("password=secret"));
+        assert!(url.contains("stayLoggedIn=true"));
+    }
+
+    #[test]
+    fn api_events_supports_type_filter() {
+        let runtime = test_api_runtime(Arc::new(RwLock::new(NewModel())), Vec::new(), 0);
+        append_event(
+            &runtime,
+            "ConfigSaved",
+            json!({"section":"folder","id":"default"}),
+            false,
+        );
+        append_event(
+            &runtime,
+            "DeviceConnected",
+            json!({"device":"peer-a"}),
+            false,
+        );
+
+        let filtered = build_api_response(
+            &Method::Get,
+            "/rest/events?since=0&events=configsaved",
+            &runtime,
+        );
+        assert_eq!(filtered.status_code, StatusCode(200));
+        let payload: Value = serde_json::from_slice(&filtered.body).expect("decode events");
+        let arr = payload.as_array().expect("array");
+        assert!(!arr.is_empty());
+        assert!(arr
+            .iter()
+            .all(|ev| ev["type"].as_str() == Some("ConfigSaved")));
     }
 
     #[test]

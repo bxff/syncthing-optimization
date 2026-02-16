@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use crate::bep::{BepMessage, ClusterConfigFolder, IndexEntry};
-use crate::bep_core::FlagLocalIgnored;
+use crate::bep_core::{FlagLocalIgnored, FlagLocalRemoteInvalid};
 use crate::config::{FolderConfiguration, FolderDeviceConfiguration, FolderType};
 use crate::db::{self, Db};
 use crate::folder_core;
@@ -1052,12 +1052,21 @@ impl model {
                 last_sequence,
             } => {
                 self.ensure_remote_index_allowed(device, folder)?;
-                // M3: Log prev_sequence for anomaly diagnostics
+                // C4: Enforce prev_sequence matching — Go rejects on mismatch.
+                // prev_sequence == 0 means first IndexUpdate after Index (no prior state).
                 if *prev_sequence > 0 {
-                    eprintln!(
-                        "DEBUG: IndexUpdate {}/{} prev_sequence={}",
-                        device, folder, prev_sequence
-                    );
+                    let db = self
+                        .sdb
+                        .read()
+                        .map_err(|_| "db lock poisoned".to_string())?;
+                    let stored_seq = db.get_device_sequence(folder, device).unwrap_or(0);
+                    drop(db);
+                    if stored_seq != *prev_sequence {
+                        return Err(format!(
+                            "C4: IndexUpdate {}/{}: prev_sequence mismatch (stored={}, received={})",
+                            device, folder, stored_seq, prev_sequence
+                        ));
+                    }
                 }
                 let converted = files
                     .iter()
@@ -2519,6 +2528,12 @@ fn fileInfoFromIndexEntry(folder: &str, file: &IndexEntry) -> db::FileInfo {
         .modified_s
         .saturating_mul(1_000_000_000)
         .saturating_add(file.modified_ns as i64);
+    // C2: Map wire invalid to FlagLocalRemoteInvalid (Go's setLocalFlags pattern).
+    // ignored is only set by local scans, not from remote index entries.
+    let mut lf = file.local_flags;
+    if file.invalid {
+        lf |= FlagLocalRemoteInvalid;
+    }
     db::FileInfo {
         folder: folder.to_string(),
         path: file.path.clone(),
@@ -2527,9 +2542,9 @@ fn fileInfoFromIndexEntry(folder: &str, file: &IndexEntry) -> db::FileInfo {
         // A6: size is already i64
         size: file.size,
         deleted: file.deleted,
-        // M2: Map ignored from file.invalid and local_flags context (Go checks Invalid + LocalFlags)
-        ignored: file.invalid || (file.local_flags & FlagLocalIgnored) != 0,
-        local_flags: file.local_flags,
+        // C2: ignored only from local_flags (FlagLocalIgnored), NOT from wire invalid
+        ignored: (lf & FlagLocalIgnored) != 0,
+        local_flags: lf,
         file_type,
         // A3: Extract hash strings from block tuples for db layer
         block_hashes: file.blocks.iter().map(|b| b.hash.clone()).collect(),
@@ -2539,6 +2554,14 @@ fn fileInfoFromIndexEntry(folder: &str, file: &IndexEntry) -> db::FileInfo {
             .iter()
             .map(|(id, val)| (*id as i64, *val as i64))
             .collect(),
+        // C3: Extended metadata passthrough from wire IndexEntry
+        permissions: file.permissions,
+        modified_by: file.modified_by,
+        symlink_target: file.symlink_target.clone(),
+        block_size: file.block_size,
+        blocks_hash: file.blocks_hash.clone(),
+        previous_blocks_hash: file.previous_blocks_hash.clone(),
+        encrypted: file.encrypted.clone(),
     }
 }
 
@@ -2888,6 +2911,13 @@ mod tests {
             file_type: db::FileInfoType::File,
             block_hashes: large_hashes,
             version_counters: Vec::new(),
+            permissions: 0,
+            modified_by: 0,
+            symlink_target: Vec::new(),
+            block_size: 0,
+            blocks_hash: Vec::new(),
+            previous_blocks_hash: Vec::new(),
+            encrypted: Vec::new(),
         };
         m.Index("default", &[remote]).expect("index remote");
         let pull_err = m
@@ -3237,6 +3267,13 @@ mod tests {
             file_type: db::FileInfoType::File,
             block_hashes: vec!["expected-hash".to_string()],
             version_counters: Vec::new(),
+            permissions: 0,
+            modified_by: 0,
+            symlink_target: Vec::new(),
+            block_size: 0,
+            blocks_hash: Vec::new(),
+            previous_blocks_hash: Vec::new(),
+            encrypted: Vec::new(),
         };
         m.sdb
             .write()
@@ -3295,6 +3332,13 @@ mod tests {
             file_type: db::FileInfoType::File,
             block_hashes: vec!["expected-hash".to_string()],
             version_counters: Vec::new(),
+            permissions: 0,
+            modified_by: 0,
+            symlink_target: Vec::new(),
+            block_size: 0,
+            blocks_hash: Vec::new(),
+            previous_blocks_hash: Vec::new(),
+            encrypted: Vec::new(),
         };
         m.sdb
             .write()
@@ -3362,6 +3406,13 @@ mod tests {
             file_type: db::FileInfoType::File,
             block_hashes: vec!["expected-hash".to_string()],
             version_counters: Vec::new(),
+            permissions: 0,
+            modified_by: 0,
+            symlink_target: Vec::new(),
+            block_size: 0,
+            blocks_hash: Vec::new(),
+            previous_blocks_hash: Vec::new(),
+            encrypted: Vec::new(),
         };
         m.sdb
             .write()
@@ -3541,6 +3592,13 @@ mod tests {
             file_type: db::FileInfoType::File,
             block_hashes: vec!["h1".to_string()],
             version_counters: Vec::new(),
+            permissions: 0,
+            modified_by: 0,
+            symlink_target: Vec::new(),
+            block_size: 0,
+            blocks_hash: Vec::new(),
+            previous_blocks_hash: Vec::new(),
+            encrypted: Vec::new(),
         };
         let remote_b = remote_a.clone();
 
@@ -3625,6 +3683,13 @@ mod tests {
             file_type: db::FileInfoType::File,
             block_hashes: vec!["h1".to_string()],
             version_counters: Vec::new(),
+            permissions: 0,
+            modified_by: 0,
+            symlink_target: Vec::new(),
+            block_size: 0,
+            blocks_hash: Vec::new(),
+            previous_blocks_hash: Vec::new(),
+            encrypted: Vec::new(),
         };
 
         let mut changed = plain.clone();
@@ -3667,6 +3732,13 @@ mod tests {
             file_type: db::FileInfoType::File,
             block_hashes: vec!["h1".to_string()],
             version_counters: Vec::new(),
+            permissions: 0,
+            modified_by: 0,
+            symlink_target: Vec::new(),
+            block_size: 0,
+            blocks_hash: Vec::new(),
+            previous_blocks_hash: Vec::new(),
+            encrypted: Vec::new(),
         };
 
         let mut db = m.sdb.write().expect("db write");

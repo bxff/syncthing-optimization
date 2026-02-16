@@ -207,6 +207,13 @@ impl Default for dbUpdateJob {
                 file_type: db::FileInfoType::File,
                 block_hashes: Vec::new(),
                 version_counters: Vec::new(),
+                permissions: 0,
+                modified_by: 0,
+                symlink_target: Vec::new(),
+                block_size: 0,
+                blocks_hash: Vec::new(),
+                previous_blocks_hash: Vec::new(),
+                encrypted: Vec::new(),
             },
         }
     }
@@ -1414,6 +1421,13 @@ impl folder {
                     file_type,
                     block_hashes,
                     version_counters: Vec::new(),
+                    permissions: 0,
+                    modified_by: 0,
+                    symlink_target: Vec::new(),
+                    block_size: 0,
+                    blocks_hash: Vec::new(),
+                    previous_blocks_hash: Vec::new(),
+                    encrypted: Vec::new(),
                 }))
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -1675,6 +1689,13 @@ fn process_scanned_file(
             file_type: db::FileInfoType::Directory,
             block_hashes: Vec::new(),
             version_counters: Vec::new(),
+            permissions: 0,
+            modified_by: 0,
+            symlink_target: Vec::new(),
+            block_size: 0,
+            blocks_hash: Vec::new(),
+            previous_blocks_hash: Vec::new(),
+            encrypted: Vec::new(),
         };
         *next_sequence = next_sequence.saturating_add(1);
         updates.push(entry);
@@ -1748,6 +1769,13 @@ fn process_scanned_file(
         file_type,
         block_hashes,
         version_counters: Vec::new(),
+        permissions: 0,
+        modified_by: 0,
+        symlink_target: Vec::new(),
+        block_size: 0,
+        blocks_hash: Vec::new(),
+        previous_blocks_hash: Vec::new(),
+        encrypted: Vec::new(),
     };
     *next_sequence = next_sequence.saturating_add(1);
     stats.files_updated = stats.files_updated.saturating_add(1);
@@ -3130,6 +3158,13 @@ mod tests {
             file_type: db::FileInfoType::File,
             block_hashes: hashes.iter().map(|h| (*h).to_string()).collect(),
             version_counters: Vec::new(),
+            permissions: 0,
+            modified_by: 0,
+            symlink_target: Vec::new(),
+            block_size: 0,
+            blocks_hash: Vec::new(),
+            previous_blocks_hash: Vec::new(),
+            encrypted: Vec::new(),
         }
     }
 
@@ -3338,6 +3373,13 @@ mod tests {
             file_type: db::FileInfoType::Symlink,
             block_hashes: vec!["target.txt".to_string()],
             version_counters: Vec::new(),
+            permissions: 0,
+            modified_by: 0,
+            symlink_target: Vec::new(),
+            block_size: 0,
+            blocks_hash: Vec::new(),
+            previous_blocks_hash: Vec::new(),
+            encrypted: Vec::new(),
         };
 
         apply_remote_file_to_disk(&root, &file).expect("apply symlink pull");
@@ -3394,6 +3436,13 @@ mod tests {
                     file_type: db::FileInfoType::File,
                     block_hashes: Vec::new(),
                     version_counters: Vec::new(),
+                    permissions: 0,
+                    modified_by: 0,
+                    symlink_target: Vec::new(),
+                    block_size: 0,
+                    blocks_hash: Vec::new(),
+                    previous_blocks_hash: Vec::new(),
+                    encrypted: Vec::new(),
                 }],
             )
             .expect("seed local entry");
@@ -3428,6 +3477,13 @@ mod tests {
                     file_type: db::FileInfoType::Directory,
                     block_hashes: Vec::new(),
                     version_counters: Vec::new(),
+                    permissions: 0,
+                    modified_by: 0,
+                    symlink_target: Vec::new(),
+                    block_size: 0,
+                    blocks_hash: Vec::new(),
+                    previous_blocks_hash: Vec::new(),
+                    encrypted: Vec::new(),
                 }],
             )
             .expect("seed local dir entry");
@@ -3546,6 +3602,13 @@ mod tests {
                     file_type: db::FileInfoType::Symlink,
                     block_hashes: Vec::new(),
                     version_counters: Vec::new(),
+                    permissions: 0,
+                    modified_by: 0,
+                    symlink_target: Vec::new(),
+                    block_size: 0,
+                    blocks_hash: Vec::new(),
+                    previous_blocks_hash: Vec::new(),
+                    encrypted: Vec::new(),
                 }],
             )
             .expect("seed local");
@@ -3593,6 +3656,13 @@ mod tests {
                     file_type: db::FileInfoType::File,
                     block_hashes: vec!["h1".to_string()],
                     version_counters: Vec::new(),
+                    permissions: 0,
+                    modified_by: 0,
+                    symlink_target: Vec::new(),
+                    block_size: 0,
+                    blocks_hash: Vec::new(),
+                    previous_blocks_hash: Vec::new(),
+                    encrypted: Vec::new(),
                 }],
             )
             .expect("seed local");
@@ -3638,6 +3708,13 @@ mod tests {
                         file_type: db::FileInfoType::File,
                         block_hashes: vec!["h1".to_string()],
                         version_counters: Vec::new(),
+                        permissions: 0,
+                        modified_by: 0,
+                        symlink_target: Vec::new(),
+                        block_size: 0,
+                        blocks_hash: Vec::new(),
+                        previous_blocks_hash: Vec::new(),
+                        encrypted: Vec::new(),
                     }],
                 )
                 .expect("seed local");
@@ -3657,6 +3734,13 @@ mod tests {
                         file_type: db::FileInfoType::File,
                         block_hashes: vec!["h2".to_string()],
                         version_counters: Vec::new(),
+                        permissions: 0,
+                        modified_by: 0,
+                        symlink_target: Vec::new(),
+                        block_size: 0,
+                        blocks_hash: Vec::new(),
+                        previous_blocks_hash: Vec::new(),
+                        encrypted: Vec::new(),
                     }],
                 )
                 .expect("seed peer");
@@ -3928,6 +4012,13 @@ mod tests {
             file_type: db::FileInfoType::File,
             block_hashes: large_hashes,
             version_counters: Vec::new(),
+            permissions: 0,
+            modified_by: 0,
+            symlink_target: Vec::new(),
+            block_size: 0,
+            blocks_hash: Vec::new(),
+            previous_blocks_hash: Vec::new(),
+            encrypted: Vec::new(),
         };
         dbv.update("default", "remote", vec![remote])
             .expect("update remote");

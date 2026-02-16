@@ -5229,6 +5229,13 @@ pub(crate) fn run_parity_probe(with_peer_interop: bool) -> Result<(), String> {
                         file_type: crate::db::FileInfoType::File,
                         block_hashes: vec!["h1".to_string()],
                         version_counters: Vec::new(),
+                        permissions: 0,
+                        modified_by: 0,
+                        symlink_target: Vec::new(),
+                        block_size: 0,
+                        blocks_hash: Vec::new(),
+                        previous_blocks_hash: Vec::new(),
+                        encrypted: Vec::new(),
                     }],
                 )
                 .map_err(|err| format!("seed api probe db: {err}"))?;
@@ -6424,6 +6431,13 @@ mod tests {
             file_type: db::FileInfoType::File,
             block_hashes: vec!["h".to_string()],
             version_counters: Vec::new(),
+            permissions: 0,
+            modified_by: 0,
+            symlink_target: Vec::new(),
+            block_size: 0,
+            blocks_hash: Vec::new(),
+            previous_blocks_hash: Vec::new(),
+            encrypted: Vec::new(),
         }
     }
 

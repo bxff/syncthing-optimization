@@ -58,6 +58,15 @@ pub(crate) struct FileInfo {
     /// 10.1: Version vector counters (device_short_id, counter_value).
     /// Used for conflict resolution à la Go's Vector.Compare().
     pub(crate) version_counters: Vec<(i64, i64)>,
+    // C3: Extended metadata fields — preserved from wire for full Go parity
+    pub(crate) permissions: u32,
+    pub(crate) modified_by: u64,
+    /// Symlink target as raw bytes (Vec<u8>) for wire fidelity
+    pub(crate) symlink_target: Vec<u8>,
+    pub(crate) block_size: i32,
+    pub(crate) blocks_hash: Vec<u8>,
+    pub(crate) previous_blocks_hash: Vec<u8>,
+    pub(crate) encrypted: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1567,6 +1576,14 @@ fn store_to_file_info(meta: &StoreFileMetadata) -> FileInfo {
             .iter()
             .map(|(id, val)| (*id as i64, *val as i64))
             .collect(),
+        // C3: Extended metadata defaults (not stored in compact store format)
+        permissions: 0,
+        modified_by: 0,
+        symlink_target: Vec::new(),
+        block_size: 0,
+        blocks_hash: Vec::new(),
+        previous_blocks_hash: Vec::new(),
+        encrypted: Vec::new(),
     }
 }
 
@@ -1588,6 +1605,14 @@ fn store_to_file_info_without_blocks(meta: &StoreFileMetadata) -> FileInfo {
             .iter()
             .map(|(id, val)| (*id as i64, *val as i64))
             .collect(),
+        // C3: Extended metadata defaults (not stored in compact store format)
+        permissions: 0,
+        modified_by: 0,
+        symlink_target: Vec::new(),
+        block_size: 0,
+        blocks_hash: Vec::new(),
+        previous_blocks_hash: Vec::new(),
+        encrypted: Vec::new(),
     }
 }
 
@@ -1942,6 +1967,13 @@ mod tests {
             file_type: FileInfoType::File,
             block_hashes: vec!["h1".to_string(), "h2".to_string()],
             version_counters: Vec::new(),
+            permissions: 0,
+            modified_by: 0,
+            symlink_target: Vec::new(),
+            block_size: 0,
+            blocks_hash: Vec::new(),
+            previous_blocks_hash: Vec::new(),
+            encrypted: Vec::new(),
         }
     }
 
@@ -2712,6 +2744,13 @@ mod tests {
                     file_type: FileInfoType::File,
                     block_hashes: vec!["h1".to_string(), "h2".to_string(), "h3".to_string()],
                     version_counters: Vec::new(),
+                    permissions: 0,
+                    modified_by: 0,
+                    symlink_target: Vec::new(),
+                    block_size: 0,
+                    blocks_hash: Vec::new(),
+                    previous_blocks_hash: Vec::new(),
+                    encrypted: Vec::new(),
                 }],
             )
             .expect("update");
@@ -2747,6 +2786,13 @@ mod tests {
             file_type: FileInfoType::File,
             block_hashes: vec!["hash1".to_string()],
             version_counters: vec![(1, 10), (2, 20), (3, 30)],
+            permissions: 0,
+            modified_by: 0,
+            symlink_target: Vec::new(),
+            block_size: 0,
+            blocks_hash: Vec::new(),
+            previous_blocks_hash: Vec::new(),
+            encrypted: Vec::new(),
         };
 
         let stored = file_info_to_store("default", "local", &info);

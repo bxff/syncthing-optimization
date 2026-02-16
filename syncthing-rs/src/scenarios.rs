@@ -486,6 +486,13 @@ fn scenario_memory_cap_diagnostics() -> Result<Value, String> {
         file_type: db::FileInfoType::File,
         block_hashes: large_hashes,
         version_counters: Vec::new(),
+        permissions: 0,
+        modified_by: 0,
+        symlink_target: Vec::new(),
+        block_size: 0,
+        blocks_hash: Vec::new(),
+        previous_blocks_hash: Vec::new(),
+        encrypted: Vec::new(),
     };
     model.Index("default", &[remote])?;
     let _ = model

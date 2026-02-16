@@ -606,17 +606,18 @@ fn index_entry_to_wire(entry: &IndexEntry) -> pb::FileInfo {
         modified_by: entry.modified_by,
         version: None,
         sequence: entry.sequence as i64,
-        // Block hashes: encode as raw UTF-8 bytes for wire
+        // 11.1: Block hashes — hex-decode for lossless wire round-trip.
         blocks: entry
             .block_hashes
             .iter()
             .map(|hash| pb::BlockInfo {
-                hash: hash.as_bytes().to_vec(),
+                hash: decode_hex_string(hash),
                 offset: 0,
                 size: 0,
             })
             .collect(),
-        symlink_target: entry.symlink_target.as_bytes().to_vec(),
+        // 11.2: Symlink target — hex-decode for lossless wire round-trip.
+        symlink_target: decode_hex_string(&entry.symlink_target),
         blocks_hash: Vec::new(),
         previous_blocks_hash: Vec::new(),
         encrypted: Vec::new(),
@@ -640,10 +641,11 @@ fn index_entry_from_wire(file: &pb::FileInfo) -> IndexEntry {
         sequence: file.sequence.max(0) as u64,
         deleted: file.deleted,
         size: file.size.max(0) as u64,
+        // 11.1: Block hashes — hex-encode for lossless round-trip.
         block_hashes: file
             .blocks
             .iter()
-            .map(|b| String::from_utf8_lossy(&b.hash).to_string())
+            .map(|b| encode_hex_string(&b.hash))
             .collect(),
         file_type: file.r#type,
         permissions: file.permissions,
@@ -653,7 +655,8 @@ fn index_entry_from_wire(file: &pb::FileInfo) -> IndexEntry {
         no_permissions: file.no_permissions,
         invalid: file.invalid,
         local_flags: file.local_flags,
-        symlink_target: String::from_utf8_lossy(&file.symlink_target).to_string(),
+        // 11.2: Symlink target — hex-encode for lossless round-trip.
+        symlink_target: encode_hex_string(&file.symlink_target),
         block_size: file.block_size,
     }
 }
@@ -740,7 +743,7 @@ pub(crate) fn default_exchange() -> Vec<BepMessage> {
                 sequence: 1,
                 deleted: false,
                 size: 100,
-                block_hashes: vec!["h1".to_string()],
+                block_hashes: vec!["aa".to_string()],
                 ..IndexEntry::default()
             }],
         },
@@ -751,7 +754,7 @@ pub(crate) fn default_exchange() -> Vec<BepMessage> {
                 sequence: 2,
                 deleted: false,
                 size: 110,
-                block_hashes: vec!["h2".to_string()],
+                block_hashes: vec!["bb".to_string()],
                 ..IndexEntry::default()
             }],
             prev_sequence: 0,
@@ -762,7 +765,7 @@ pub(crate) fn default_exchange() -> Vec<BepMessage> {
             name: "a.txt".to_string(),
             offset: 0,
             size: 110,
-            hash: b"h2".to_vec(),
+            hash: Vec::new(),
             from_temporary: false,
             block_no: 0,
         },

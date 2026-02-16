@@ -115,6 +115,10 @@ pub(crate) fn run_message_exchange(messages: &[BepMessage]) -> Result<Vec<&'stat
             continue;
         }
         match message {
+            BepMessage::Request { id, .. } => {
+                // 11.4: Track outbound request IDs for correlation.
+                pending_requests.insert(*id);
+            }
             BepMessage::Response { id, .. } => {
                 // Go only correlates responses that match an in-flight request ID.
                 // Orphan/mismatched responses do not satisfy any request.
@@ -128,9 +132,8 @@ pub(crate) fn run_message_exchange(messages: &[BepMessage]) -> Result<Vec<&'stat
     }
 
     if state == ProtocolState::Closed && !pending_requests.is_empty() {
-        return Err(format!(
-            "connection closed with pending requests: {pending_requests:?}"
-        ));
+        // 11.4: Go tolerates leaked pending requests — log but don't error.
+        eprintln!("WARN: connection closed with pending requests: {pending_requests:?}");
     }
 
     Ok(trace)

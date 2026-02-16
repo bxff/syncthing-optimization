@@ -206,6 +206,7 @@ impl Default for dbUpdateJob {
                 local_flags: 0,
                 file_type: db::FileInfoType::File,
                 block_hashes: Vec::new(),
+                version_counters: Vec::new(),
             },
         }
     }
@@ -707,8 +708,55 @@ impl folder {
 
         let mode = self.config.folder_type.to_mode();
         if mode == FolderMode::SendOnly {
+            // 9.4: Go's sendOnlyPull — reconcile metadata.  Walk global state
+            // and, for files already present locally with matching metadata,
+            // bump their local sequence so the global/local views stay in
+            // sync without actually transferring data.
+            let mut reconciled = 0usize;
+            let db = self.db.read().map_err(|_| "db lock poisoned".to_string())?;
+            let page = db
+                .all_needed_global_files_ordered_page(&self.config.id, LOCAL_DEVICE_ID, None, 1000)
+                .unwrap_or_else(|_| db::NeededFilePage {
+                    items: Vec::new(),
+                    next_cursor: None,
+                });
+            drop(db);
+
+            let mut updates = Vec::new();
+            for needed in page.items {
+                let db = self.db.read().map_err(|_| "db lock poisoned".to_string())?;
+                let local =
+                    db.get_device_file_light(&self.config.id, LOCAL_DEVICE_ID, &needed.path);
+                drop(db);
+
+                if let Some(local) = local {
+                    // If the file exists locally with same content, just
+                    // update its sequence to match global.
+                    if !local.deleted
+                        && !needed.deleted
+                        && local.size == needed.size
+                        && local.file_type == needed.file_type
+                    {
+                        let mut entry = needed.clone();
+                        entry.folder = self.config.id.clone();
+                        entry.local_flags = 0;
+                        updates.push(entry);
+                        reconciled += 1;
+                    }
+                }
+            }
+
+            if !updates.is_empty() {
+                let mut db = self
+                    .db
+                    .write()
+                    .map_err(|_| "db lock poisoned".to_string())?;
+                db.update(&self.config.id, LOCAL_DEVICE_ID, updates)
+                    .map_err(|e| format!("send-only reconcile: {e}"))?;
+            }
+
             self.pullStats = PullStats::default();
-            return Ok(0);
+            return Ok(reconciled);
         }
 
         let (estimated, budget) = {
@@ -861,34 +909,45 @@ impl folder {
 
             let mut local_updates = Vec::with_capacity(needed_batch.len());
             for global in &needed_batch {
-                if let Err(err) = apply_remote_file_to_disk(&folder_root, global) {
-                    if cfg!(not(unix))
-                        && global.file_type == db::FileInfoType::Symlink
-                        && err.contains(errIncompatibleSymlink)
-                    {
-                        let mut unsupported = global.clone();
-                        unsupported.folder = self.config.id.clone();
-                        unsupported.local_flags |= db::FLAG_LOCAL_UNSUPPORTED;
-                        local_updates.push(unsupported);
+                match apply_remote_file_to_disk(&folder_root, global) {
+                    Ok(result) => {
+                        let mut applied = global.clone();
+                        applied.folder = self.config.id.clone();
+                        // 9.1: sparse placeholder files need real block data;
+                        // mark with FLAG_LOCAL_NEEDED so they are not treated
+                        // as fully synced.
+                        applied.local_flags = if result.needs_data {
+                            db::FLAG_LOCAL_NEEDED
+                        } else {
+                            0
+                        };
+                        if applied.deleted {
+                            applied.block_hashes.clear();
+                        }
+                        local_updates.push(applied);
+                    }
+                    Err(err) => {
+                        if cfg!(not(unix))
+                            && global.file_type == db::FileInfoType::Symlink
+                            && err.contains(errIncompatibleSymlink)
+                        {
+                            let mut unsupported = global.clone();
+                            unsupported.folder = self.config.id.clone();
+                            unsupported.local_flags |= db::FLAG_LOCAL_UNSUPPORTED;
+                            local_updates.push(unsupported);
+                            self.errorsMut.push(FileError {
+                                Path: global.path.clone(),
+                                Err: err,
+                            });
+                            continue;
+                        }
                         self.errorsMut.push(FileError {
                             Path: global.path.clone(),
-                            Err: err,
+                            Err: err.clone(),
                         });
-                        continue;
+                        return Err(format!("pull apply {}: {err}", global.path));
                     }
-                    self.errorsMut.push(FileError {
-                        Path: global.path.clone(),
-                        Err: err.clone(),
-                    });
-                    return Err(format!("pull apply {}: {err}", global.path));
                 }
-                let mut applied = global.clone();
-                applied.folder = self.config.id.clone();
-                applied.local_flags = 0;
-                if applied.deleted {
-                    applied.block_hashes.clear();
-                }
-                local_updates.push(applied);
             }
 
             if !local_updates.is_empty() {
@@ -1338,6 +1397,7 @@ impl folder {
                     local_flags: 0,
                     file_type,
                     block_hashes,
+                    version_counters: Vec::new(),
                 }))
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -1566,6 +1626,41 @@ fn process_scanned_file(
     let metadata =
         fs::symlink_metadata(&abs).map_err(|e| format!("stat {}: {e}", abs.display()))?;
     let is_symlink = metadata.file_type().is_symlink();
+    let is_dir = metadata.is_dir();
+    // 9.5: Handle directories — emit FileInfo with type Directory, size 0.
+    if is_dir {
+        stats.files_seen = stats.files_seen.saturating_add(1);
+        let modified_ns =
+            file_modified_ns(&metadata).map_err(|e| format!("mtime {}: {e}", abs.display()))?;
+        if let Some(existing) = current_local.clone() {
+            if existing.path == relative_path
+                && existing.file_type == db::FileInfoType::Directory
+                && existing.modified_ns == modified_ns
+                && !existing.deleted
+            {
+                *current_local = cursor.next(db, folder_id, LOCAL_DEVICE_ID)?;
+                return Ok(());
+            }
+        }
+        let entry = db::FileInfo {
+            folder: folder_id.to_string(),
+            path: relative_path.clone(),
+            sequence: *next_sequence,
+            modified_ns,
+            size: 0,
+            deleted: false,
+            ignored: false,
+            local_flags: 0,
+            file_type: db::FileInfoType::Directory,
+            block_hashes: Vec::new(),
+            version_counters: Vec::new(),
+        };
+        *next_sequence = next_sequence.saturating_add(1);
+        updates.push(entry);
+        stats.files_updated = stats.files_updated.saturating_add(1);
+        *current_local = cursor.next(db, folder_id, LOCAL_DEVICE_ID)?;
+        return Ok(());
+    }
     if !metadata.is_file() && !is_symlink {
         return Ok(());
     }
@@ -1631,6 +1726,7 @@ fn process_scanned_file(
         local_flags: 0,
         file_type,
         block_hashes,
+        version_counters: Vec::new(),
     };
     *next_sequence = next_sequence.saturating_add(1);
     stats.files_updated = stats.files_updated.saturating_add(1);
@@ -1741,27 +1837,47 @@ fn estimate_needed_batch_runtime_bytes(files: &[db::FileInfo]) -> usize {
         .sum()
 }
 
-fn apply_remote_file_to_disk(root: &Path, file: &db::FileInfo) -> Result<(), String> {
-    let abs = match file.file_type {
-        db::FileInfoType::Directory => safe_join_relative_path(root, &file.path)?,
-        db::FileInfoType::File | db::FileInfoType::Symlink => {
-            safe_join_relative_path_allow_leaf_symlink(root, &file.path)?
-        }
+/// Apply result indicating whether the file still needs block data.
+struct ApplyResult {
+    /// True when the file was written as a size-only placeholder (needs real
+    /// block fetch + hash verify before it can be considered synced).
+    needs_data: bool,
+}
+
+fn apply_remote_file_to_disk(root: &Path, file: &db::FileInfo) -> Result<ApplyResult, String> {
+    // 9.3: Use safe_join_relative_path for ALL types — never follow leaf
+    // symlinks on the write path.  Deletes use allow_leaf_symlink so we can
+    // remove a symlink that points elsewhere.
+    let abs = if file.deleted {
+        safe_join_relative_path_allow_leaf_symlink(root, &file.path)?
+    } else {
+        safe_join_relative_path(root, &file.path)?
     };
     if file.deleted {
-        return delete_path_if_exists(&abs);
+        delete_path_if_exists(&abs)?;
+        return Ok(ApplyResult { needs_data: false });
     }
 
     match file.file_type {
-        db::FileInfoType::Directory => ensure_directory_path(&abs),
-        db::FileInfoType::File => write_sparse_file(&abs, file.size),
+        db::FileInfoType::Directory => {
+            ensure_directory_path(&abs)?;
+            Ok(ApplyResult { needs_data: false })
+        }
+        db::FileInfoType::File => {
+            // 9.2: temp-file + fsync + atomic rename
+            write_file_atomic(&abs, file.size)?;
+            // 9.1: File written as sparse placeholder — caller should mark
+            // with FLAG_LOCAL_NEEDED until real block fetch + hash verify.
+            Ok(ApplyResult { needs_data: true })
+        }
         db::FileInfoType::Symlink => {
             let target = file
                 .block_hashes
                 .first()
                 .map(String::as_str)
                 .ok_or_else(|| errIncompatibleSymlink.to_string())?;
-            ensure_symlink_path(&abs, target)
+            ensure_symlink_path(&abs, target)?;
+            Ok(ApplyResult { needs_data: false })
         }
     }
 }
@@ -1878,22 +1994,52 @@ fn ensure_directory_path(path: &Path) -> Result<(), String> {
     fs::create_dir_all(path).map_err(|e| format!("create dir {}: {e}", path.display()))
 }
 
-fn write_sparse_file(path: &Path, size: i64) -> Result<(), String> {
+/// 9.2: Write file via temp-file + fsync + atomic rename.
+/// Creates `.syncthing.<name>.tmp` beside the target, writes content (sparse
+/// placeholder for now), fsyncs, then atomically renames to the final path.
+/// On failure the temp file is cleaned up.
+fn write_file_atomic(path: &Path, size: i64) -> Result<(), String> {
     let size = usize::try_from(size).map_err(|_| format!("invalid file size: {size}"))?;
     if path.exists() && path.is_dir() {
         return Err(errUnexpectedDirOnFileDel.to_string());
     }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
-    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("no parent for {}", path.display()))?;
+    fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let tmp_name = format!(".syncthing.{file_name}.tmp");
+    let tmp_path = parent.join(&tmp_name);
+
+    // Write to temp file.
     let file = OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
-        .open(path)
-        .map_err(|e| format!("create file {}: {e}", path.display()))?;
-    file.set_len(size as u64)
-        .map_err(|e| format!("set file size {}: {e}", path.display()))
+        .open(&tmp_path)
+        .map_err(|e| format!("create temp file {}: {e}", tmp_path.display()))?;
+    if let Err(e) = file.set_len(size as u64) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("set file size {}: {e}", tmp_path.display()));
+    }
+    // fsync for crash consistency.
+    if let Err(e) = file.sync_all() {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("fsync {}: {e}", tmp_path.display()));
+    }
+    drop(file);
+
+    // Atomic rename to final path.
+    if let Err(e) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!(
+            "rename {} -> {}: {e}",
+            tmp_path.display(),
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2189,9 +2335,33 @@ impl sendReceiveFolder {
                 if !meta.is_dir() {
                     return Err(errUnexpectedDirOnFileDel.to_string());
                 }
-                let mut entries =
+                // 9.6: Enumerate children.  Remove syncthing temp files;
+                // skip other internal entries (.stfolder, .stignore).  If
+                // any real user files remain the directory is not empty.
+                let entries =
                     fs::read_dir(&abs).map_err(|e| format!("read dir {}: {e}", abs.display()))?;
-                if entries.next().is_some() {
+                let mut has_user_files = false;
+                for entry in entries {
+                    let entry =
+                        entry.map_err(|e| format!("read dir entry {}: {e}", abs.display()))?;
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    // Remove syncthing temp files.
+                    if name_str.starts_with(".syncthing.") && name_str.ends_with(".tmp") {
+                        let child = abs.join(&name);
+                        let _ = fs::remove_file(&child);
+                        continue;
+                    }
+                    // Skip syncthing internal markers.
+                    if name_str == ".stfolder"
+                        || name_str == ".stignore"
+                        || name_str == ".stversions"
+                    {
+                        continue;
+                    }
+                    has_user_files = true;
+                }
+                if has_user_files {
                     return Err(errDirNotEmpty.to_string());
                 }
                 fs::remove_dir(&abs).map_err(|e| format!("remove dir {}: {e}", abs.display()))?;
@@ -2938,6 +3108,7 @@ mod tests {
             local_flags: 0,
             file_type: db::FileInfoType::File,
             block_hashes: hashes.iter().map(|h| (*h).to_string()).collect(),
+            version_counters: Vec::new(),
         }
     }
 
@@ -3145,6 +3316,7 @@ mod tests {
             local_flags: 0,
             file_type: db::FileInfoType::Symlink,
             block_hashes: vec!["target.txt".to_string()],
+            version_counters: Vec::new(),
         };
 
         apply_remote_file_to_disk(&root, &file).expect("apply symlink pull");
@@ -3200,6 +3372,7 @@ mod tests {
                     local_flags: 0,
                     file_type: db::FileInfoType::File,
                     block_hashes: Vec::new(),
+                    version_counters: Vec::new(),
                 }],
             )
             .expect("seed local entry");
@@ -3233,6 +3406,7 @@ mod tests {
                     local_flags: 0,
                     file_type: db::FileInfoType::Directory,
                     block_hashes: Vec::new(),
+                    version_counters: Vec::new(),
                 }],
             )
             .expect("seed local dir entry");
@@ -3350,6 +3524,7 @@ mod tests {
                     local_flags: 0,
                     file_type: db::FileInfoType::Symlink,
                     block_hashes: Vec::new(),
+                    version_counters: Vec::new(),
                 }],
             )
             .expect("seed local");
@@ -3396,6 +3571,7 @@ mod tests {
                     local_flags: db::FLAG_LOCAL_RECEIVE_ONLY | db::FLAG_LOCAL_IGNORED,
                     file_type: db::FileInfoType::File,
                     block_hashes: vec!["h1".to_string()],
+                    version_counters: Vec::new(),
                 }],
             )
             .expect("seed local");
@@ -3440,6 +3616,7 @@ mod tests {
                         local_flags: db::FLAG_LOCAL_RECEIVE_ONLY,
                         file_type: db::FileInfoType::File,
                         block_hashes: vec!["h1".to_string()],
+                        version_counters: Vec::new(),
                     }],
                 )
                 .expect("seed local");
@@ -3458,6 +3635,7 @@ mod tests {
                         local_flags: db::FLAG_LOCAL_RECEIVE_ONLY,
                         file_type: db::FileInfoType::File,
                         block_hashes: vec!["h2".to_string()],
+                        version_counters: Vec::new(),
                     }],
                 )
                 .expect("seed peer");
@@ -3728,6 +3906,7 @@ mod tests {
             local_flags: 0,
             file_type: db::FileInfoType::File,
             block_hashes: large_hashes,
+            version_counters: Vec::new(),
         };
         dbv.update("default", "remote", vec![remote])
             .expect("update remote");

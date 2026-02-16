@@ -281,6 +281,51 @@ impl Store {
         Ok(())
     }
 
+    /// 10.2: Batch upsert — single journal sync for all files.
+    pub(crate) fn upsert_files_batch(&mut self, files: Vec<FileMetadata>) -> io::Result<()> {
+        if files.is_empty() {
+            return Ok(());
+        }
+        // Phase 1: validate budget + prepare journal ops
+        let budget_bytes = self.config.memory_budget_bytes();
+        let mut ops = Vec::with_capacity(files.len());
+        let mut apply_queue: Vec<(String, StoredFileMetadata)> = Vec::with_capacity(files.len());
+
+        for mut file in files {
+            let key = composite_key(&file.folder, &file.device, &file.path);
+            let mut budget_file = stored_from_file(&file);
+            budget_file.block_hashes = in_memory_block_hash_shape(&budget_file.block_hashes);
+            let next_bytes = projected_upsert_memory_bytes(
+                self.approx_memory_bytes,
+                self.stored_for_key(&key),
+                &key,
+                &budget_file,
+            );
+            if budget_bytes > 0 && next_bytes > budget_bytes {
+                return Err(io::Error::new(
+                    ErrorKind::Other,
+                    format!(
+                        "memory budget exceeded on batch upsert: projected={} budget={}",
+                        next_bytes, budget_bytes
+                    ),
+                ));
+            }
+            let persisted = file.clone();
+            file.block_hashes = spill_block_hashes(&self.block_blob_path, &file.block_hashes)?;
+            ops.push(JournalOp::Upsert(persisted));
+            apply_queue.push((key, stored_from_file(&file)));
+        }
+
+        // Phase 2: write all ops with single fsync
+        self.append_ops_batch(&ops)?;
+
+        // Phase 3: apply to in-memory state (only after disk success)
+        for (key, stored) in apply_queue {
+            self.apply_upsert(key, stored);
+        }
+        Ok(())
+    }
+
     pub(crate) fn delete_file(&mut self, folder: &str, device: &str, path: &str) -> io::Result<()> {
         self.append_op(&JournalOp::Delete {
             folder: folder.to_string(),
@@ -811,6 +856,23 @@ impl Store {
             .append(true)
             .open(&self.journal_path)?;
         Self::write_record(&mut file, op)?;
+        file.sync_data()?;
+        self.rotate_active_segment_if_needed()?;
+        Ok(())
+    }
+
+    /// 10.2: Write multiple journal ops then sync once — atomic batch commit.
+    pub(crate) fn append_ops_batch(&mut self, ops: &[JournalOp]) -> io::Result<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.journal_path)?;
+        for op in ops {
+            Self::write_record(&mut file, op)?;
+        }
         file.sync_data()?;
         self.rotate_active_segment_if_needed()?;
         Ok(())

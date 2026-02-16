@@ -55,6 +55,9 @@ pub(crate) struct FileInfo {
     pub(crate) local_flags: LocalFlags,
     pub(crate) file_type: FileInfoType,
     pub(crate) block_hashes: Vec<String>,
+    /// 10.1: Version vector counters (device_short_id, counter_value).
+    /// Used for conflict resolution à la Go's Vector.Compare().
+    pub(crate) version_counters: Vec<(i64, i64)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -670,7 +673,12 @@ impl WalFreeDb {
         Ok(out)
     }
 
-    fn get_device_file_light(&self, folder: &str, device: &str, file: &str) -> Option<FileInfo> {
+    pub(crate) fn get_device_file_light(
+        &self,
+        folder: &str,
+        device: &str,
+        file: &str,
+    ) -> Option<FileInfo> {
         self.store
             .get_file_with_blocks(folder, device, file)
             .ok()
@@ -683,15 +691,18 @@ impl Db for WalFreeDb {
     fn update(&mut self, folder: &str, device: &str, files: Vec<FileInfo>) -> Result<(), String> {
         self.ensure_open()?;
         let mut last_sequence: Option<i64> = None;
+        // 10.2: Collect all encoded files, then batch-write with single fsync.
+        let mut encoded_batch = Vec::with_capacity(files.len());
         for mut file in files {
             file.folder = folder.to_string();
             let seq = file.sequence.max(0);
             last_sequence = Some(last_sequence.unwrap_or(0).max(seq));
-            let encoded = file_info_to_store(folder, device, &file);
-            self.store
-                .upsert_file(encoded)
-                .map_err(|e| format!("persist update: {e}"))?;
+            encoded_batch.push(file_info_to_store(folder, device, &file));
         }
+        self.store
+            .upsert_files_batch(encoded_batch)
+            .map_err(|e| format!("persist batch update: {e}"))?;
+        // 10.3: Persist sequence within the same logical commit boundary.
         if let Some(seq) = last_sequence {
             let key = (folder.to_string(), device.to_string());
             let prev = self.index_sequences.insert(key.clone(), seq);
@@ -1544,6 +1555,7 @@ fn store_to_file_info(meta: &StoreFileMetadata) -> FileInfo {
         local_flags: meta.local_flags,
         file_type: store_to_file_type(&meta.file_type),
         block_hashes: meta.block_hashes.clone(),
+        version_counters: Vec::new(),
     }
 }
 
@@ -1559,6 +1571,7 @@ fn store_to_file_info_without_blocks(meta: &StoreFileMetadata) -> FileInfo {
         local_flags: meta.local_flags,
         file_type: store_to_file_type(&meta.file_type),
         block_hashes: Vec::new(),
+        version_counters: Vec::new(),
     }
 }
 
@@ -1780,6 +1793,24 @@ fn same_file_version_for_availability(a: &FileInfo, b: &FileInfo) -> bool {
 }
 
 fn prefer_global(candidate: &FileInfo, current: &FileInfo) -> bool {
+    // 10.1: Version vector comparison (Go's ConcurrentGreater semantics).
+    // Compare counter totals; the higher total wins.  If tied, compare
+    // individual counters lexicographically.
+    let candidate_total: i64 = candidate.version_counters.iter().map(|c| c.1).sum();
+    let current_total: i64 = current.version_counters.iter().map(|c| c.1).sum();
+    if candidate_total != current_total {
+        return candidate_total > current_total;
+    }
+    // Lexicographic counter comparison for concurrent-but-equal-sum vectors.
+    let cmp = candidate
+        .version_counters
+        .iter()
+        .cmp(current.version_counters.iter());
+    if cmp != std::cmp::Ordering::Equal {
+        return cmp == std::cmp::Ordering::Greater;
+    }
+
+    // Fallback for entries without version vectors (legacy or local-only).
     if candidate.sequence != current.sequence {
         return candidate.sequence > current.sequence;
     }
@@ -1875,6 +1906,7 @@ mod tests {
             local_flags: 0,
             file_type: FileInfoType::File,
             block_hashes: vec!["h1".to_string(), "h2".to_string()],
+            version_counters: Vec::new(),
         }
     }
 
@@ -2644,6 +2676,7 @@ mod tests {
                     local_flags: 0,
                     file_type: FileInfoType::File,
                     block_hashes: vec!["h1".to_string(), "h2".to_string(), "h3".to_string()],
+                    version_counters: Vec::new(),
                 }],
             )
             .expect("update");

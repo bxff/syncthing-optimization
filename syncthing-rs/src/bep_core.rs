@@ -93,6 +93,24 @@ pub(crate) const LocalInvalidFlags: u32 = FlagLocalUnsupported
 pub(crate) const HelloMessageMagic: u32 = 0x2EA7D90B;
 pub(crate) const Version13HelloMagic: u32 = 0x9F79BC40;
 
+/// 11.3: Convert raw device ID bytes to hex string (lossless).
+pub(crate) fn device_id_from_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 11.3: Convert hex-encoded device ID string back to raw bytes.
+#[allow(dead_code)]
+pub(crate) fn device_id_to_bytes(id: &str) -> Vec<u8> {
+    if id.len() % 2 == 0 && id.chars().all(|c| c.is_ascii_hexdigit()) {
+        (0..id.len())
+            .step_by(2)
+            .filter_map(|i| u8::from_str_radix(&id[i..i + 2], 16).ok())
+            .collect()
+    } else {
+        id.as_bytes().to_vec()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub(crate) struct BlockInfo {
     pub(crate) Hash: Vec<u8>,
@@ -499,7 +517,8 @@ fn bep_to_wire(message: &BepMessage) -> Result<WireMessage, String> {
                         .devices
                         .iter()
                         .map(|d| Device {
-                            Id: String::from_utf8_lossy(&d.id).to_string(),
+                            // 11.3: Device IDs are 32-byte binary — hex-encode for lossless round-trip.
+                            Id: device_id_from_bytes(&d.id),
                             Name: d.name.clone(),
                             Addresses: d.addresses.clone(),
                             Compression: d.compression,

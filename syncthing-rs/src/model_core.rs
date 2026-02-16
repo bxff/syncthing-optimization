@@ -1093,10 +1093,20 @@ impl model {
                                 if is_hex_sha256(hash_str) {
                                     sha256_hex_matches(hash_str, &data)
                                 } else {
-                                    self.request_hash_matches(folder, name, *offset, hash_str)
+                                    // 12.3: Try SHA-256 of data before DB-only fallback.
+                                    let digest = Sha256::digest(&data);
+                                    let digest_hex: String =
+                                        digest.iter().map(|b| format!("{b:02x}")).collect();
+                                    if hash_str == digest_hex {
+                                        true
+                                    } else {
+                                        self.request_hash_matches(folder, name, *offset, hash_str)
+                                    }
                                 }
                             } else {
-                                false
+                                // 12.3: Non-UTF-8 hash — compute SHA-256 and compare raw bytes.
+                                let digest = Sha256::digest(&data);
+                                hash == digest.as_slice()
                             };
                             if !hash_ok {
                                 let _ = self.ScheduleForceRescan(folder, &[name.clone()]);
@@ -1555,9 +1565,10 @@ impl model {
         // replay or stale update.
         let max_incoming_seq = files.iter().map(|f| f.sequence).max().unwrap_or(0);
         if max_incoming_seq > 0 && max_incoming_seq <= current_seq {
-            return Err(format!(
-                "index update for {folder_id}/{device}: max incoming sequence {max_incoming_seq} <= current {current_seq}"
-            ));
+            // 12.2: Go logs a warning but still applies the update (lenient handling).
+            eprintln!(
+                "WARN: index update for {folder_id}/{device}: max incoming sequence {max_incoming_seq} <= current {current_seq}"
+            );
         }
 
         self.IndexFromDevice(folder_id, device, files)
@@ -2481,17 +2492,30 @@ pub(crate) fn readOffsetIntoBuf(path: &Path, offset: u64, len: usize) -> Result<
 
 fn fileInfoFromIndexEntry(folder: &str, file: &IndexEntry) -> db::FileInfo {
     let sequence = clamp_u64_to_i64(file.sequence);
+    // 12.1: Map wire file_type i32 to db::FileInfoType.
+    let file_type = match file.file_type {
+        0 => db::FileInfoType::File,
+        1 => db::FileInfoType::Directory,
+        2 | 3 | 4 => db::FileInfoType::Symlink,
+        _ => db::FileInfoType::File,
+    };
+    // 12.1: Reconstruct modified_ns from separate seconds + nanoseconds fields.
+    let modified_ns = file
+        .modified_s
+        .saturating_mul(1_000_000_000)
+        .saturating_add(file.modified_ns as i64);
     db::FileInfo {
         folder: folder.to_string(),
         path: file.path.clone(),
         sequence,
-        modified_ns: sequence,
+        modified_ns,
         size: clamp_u64_to_i64(file.size),
         deleted: file.deleted,
         ignored: false,
-        local_flags: 0,
-        file_type: db::FileInfoType::File,
+        local_flags: file.local_flags,
+        file_type,
         block_hashes: file.block_hashes.clone(),
+        version_counters: Vec::new(),
     }
 }
 
@@ -2751,6 +2775,7 @@ mod tests {
 
     #[test]
     fn index_entry_conversion_uses_sequence_as_mtime() {
+        // 12.1: modified_ns now comes from modified_s/modified_ns fields.
         let fi = fileInfoFromIndexEntry(
             "default",
             &IndexEntry {
@@ -2759,11 +2784,13 @@ mod tests {
                 deleted: false,
                 size: 10,
                 block_hashes: vec!["h1".to_string()],
+                modified_s: 1,
+                modified_ns: 500,
                 ..IndexEntry::default()
             },
         );
         assert_eq!(fi.sequence, 42);
-        assert_eq!(fi.modified_ns, 42);
+        assert_eq!(fi.modified_ns, 1_000_000_500);
     }
 
     #[test]
@@ -2833,6 +2860,7 @@ mod tests {
             local_flags: 0,
             file_type: db::FileInfoType::File,
             block_hashes: large_hashes,
+            version_counters: Vec::new(),
         };
         m.Index("default", &[remote]).expect("index remote");
         let pull_err = m
@@ -2898,33 +2926,40 @@ mod tests {
 
     #[test]
     fn file_info_from_index_entry_uses_sequence_for_modified_time() {
+        // 12.1: modified_ns now reconstructed from modified_s + modified_ns.
         let entry = IndexEntry {
             path: "a.txt".to_string(),
             sequence: 42,
             deleted: false,
             size: 7,
             block_hashes: vec!["h1".to_string()],
+            modified_s: 5,
+            modified_ns: 123,
             ..IndexEntry::default()
         };
         let info = fileInfoFromIndexEntry("default", &entry);
         assert_eq!(info.sequence, 42);
-        assert_eq!(info.modified_ns, 42);
+        assert_eq!(info.modified_ns, 5_000_000_123);
         assert_eq!(info.size, 7);
     }
 
     #[test]
     fn file_info_from_index_entry_clamps_large_numbers() {
+        // 12.1: modified_ns comes from modified_s * 1e9 + modified_ns,
+        // with saturating arithmetic for overflow safety.
         let entry = IndexEntry {
             path: "large.bin".to_string(),
             sequence: u64::MAX,
             deleted: false,
             size: u64::MAX,
             block_hashes: Vec::new(),
+            modified_s: i64::MAX,
+            modified_ns: i32::MAX,
             ..IndexEntry::default()
         };
         let info = fileInfoFromIndexEntry("default", &entry);
         assert_eq!(info.sequence, i64::MAX);
-        assert_eq!(info.modified_ns, i64::MAX);
+        assert_eq!(info.modified_ns, i64::MAX); // saturating overflow
         assert_eq!(info.size, i64::MAX);
     }
 
@@ -3171,6 +3206,7 @@ mod tests {
             local_flags: 0,
             file_type: db::FileInfoType::File,
             block_hashes: vec!["expected-hash".to_string()],
+            version_counters: Vec::new(),
         };
         m.sdb
             .write()
@@ -3228,6 +3264,7 @@ mod tests {
             local_flags: 0,
             file_type: db::FileInfoType::File,
             block_hashes: vec!["expected-hash".to_string()],
+            version_counters: Vec::new(),
         };
         m.sdb
             .write()
@@ -3294,6 +3331,7 @@ mod tests {
             local_flags: 0,
             file_type: db::FileInfoType::File,
             block_hashes: vec!["expected-hash".to_string()],
+            version_counters: Vec::new(),
         };
         m.sdb
             .write()
@@ -3472,6 +3510,7 @@ mod tests {
             local_flags: 0,
             file_type: db::FileInfoType::File,
             block_hashes: vec!["h1".to_string()],
+            version_counters: Vec::new(),
         };
         let remote_b = remote_a.clone();
 
@@ -3555,6 +3594,7 @@ mod tests {
             local_flags: 0,
             file_type: db::FileInfoType::File,
             block_hashes: vec!["h1".to_string()],
+            version_counters: Vec::new(),
         };
 
         let mut changed = plain.clone();
@@ -3596,6 +3636,7 @@ mod tests {
             local_flags: 0,
             file_type: db::FileInfoType::File,
             block_hashes: vec!["h1".to_string()],
+            version_counters: Vec::new(),
         };
 
         let mut db = m.sdb.write().expect("db write");

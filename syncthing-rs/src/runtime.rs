@@ -1333,7 +1333,7 @@ fn start_api_server(
 
 fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) -> ApiReply {
     let (path, query) = split_url(url);
-    let params = parse_query(query);
+    let mut params = parse_query(query);
 
     // 7.2: Auth gate for non-/rest/ routes (GUI protection).
     // Go's auth middleware protects ALL routes; only isNoAuthPath entries bypass.
@@ -1364,6 +1364,10 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             Err(err) => return make_api_error(500, &err),
         }
     }
+
+    // 13.6: Strip _auth_* params AFTER auth check but BEFORE handler dispatch —
+    // handlers must never see injected auth/csrf params.
+    params.retain(|k, _| !k.starts_with("_auth_") && !k.starts_with("_gui_csrf"));
 
     if let Some(folder_id) = path_param(path, "/rest/config/folders/") {
         return match method {
@@ -1861,9 +1865,18 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 Ok(guard) => guard,
                 Err(_) => return make_api_error(500, "api state lock poisoned"),
             };
+            // 13.7: Support `since` filter for log.txt, matching /rest/system/log.
+            let since = params
+                .get("since")
+                .and_then(|v| humantime::parse_rfc3339(v).ok());
+            let mut lines = state.log_lines.clone();
+            if let Some(since) = since {
+                let since_str = humantime::format_rfc3339(since).to_string();
+                lines.retain(|line| line.as_str() > since_str.as_str());
+            }
             ApiReply::bytes(
                 200,
-                state.log_lines.join("\n").into_bytes(),
+                lines.join("\n").into_bytes(),
                 "text/plain; charset=utf-8",
             )
         }
@@ -1982,6 +1995,8 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             if method != &Method::Post {
                 return make_api_error(405, "method not allowed");
             }
+            // 13.4: Set restart flag like shutdown — callers check both.
+            runtime.shutdown_requested.store(true, Ordering::Release);
             append_event(
                 runtime,
                 "ConfigSaved",
@@ -2045,6 +2060,12 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 Err(err) => make_api_error(500, err),
             },
             Method::Post | Method::Put => {
+                // 13.5: Validate body if provided via _body query param.
+                if let Some(body) = params.get("_body") {
+                    if serde_json::from_str::<Value>(body).is_err() {
+                        return make_api_error(400, "invalid JSON in config body");
+                    }
+                }
                 append_event(
                     runtime,
                     "ConfigSaved",
@@ -3530,6 +3551,9 @@ fn maybe_set_csrf_cookie(
 }
 
 fn auth_required(state: &ApiRuntimeState) -> bool {
+    // 13.1: Go checks user != "" && password != "".
+    // API key provides an alternative auth *mechanism* but doesn't gate
+    // whether auth is required.
     let user = state
         .gui
         .get("user")
@@ -3541,13 +3565,7 @@ fn auth_required(state: &ApiRuntimeState) -> bool {
         .get("password")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let api_key = state
-        .gui
-        .get("apiKey")
-        .or_else(|| state.gui.get("apikey"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    !user.is_empty() || !password.is_empty() || !api_key.is_empty()
+    !user.is_empty() && !password.is_empty()
 }
 
 fn runtime_short_id(runtime: &DaemonApiRuntime) -> String {
@@ -3584,20 +3602,34 @@ fn auth_query_apikey_key(state: &ApiRuntimeState) -> String {
     format!("_auth_apikey_{}", state.auth_param_salt)
 }
 
-fn mint_auth_token(user: &str) -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("{}-{}-{nanos}", user, std::process::id())
+fn mint_auth_token(_user: &str) -> String {
+    // 13.3: CSPRNG-based token — 32 random bytes hex-encoded.
+    csprng_hex_token()
 }
 
-fn mint_csrf_token(user: &str) -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("csrf-{}-{}-{nanos}", user, std::process::id())
+fn mint_csrf_token(_user: &str) -> String {
+    // 13.3: CSPRNG-based CSRF token.
+    format!("csrf-{}", csprng_hex_token())
+}
+
+/// 13.3: Generate a 64-char hex token from 32 bytes of /dev/urandom.
+fn csprng_hex_token() -> String {
+    use std::io::Read;
+    let mut buf = [0u8; 32];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        let _ = f.read_exact(&mut buf);
+    } else {
+        // Fallback: timestamp + pid (less secure, but functional)
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let bytes = nanos.to_le_bytes();
+        buf[..16].copy_from_slice(&bytes);
+        let pid = std::process::id().to_le_bytes();
+        buf[16..20].copy_from_slice(&pid);
+    }
+    buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn verify_gui_password(provided_password: &str, expected_password: &str) -> bool {
@@ -4025,6 +4057,11 @@ fn parse_event_type_filter_with_default(
             "pendingfolderschanged",
             "itemstarted",
             "itemfinished",
+            // 13.8: Additional Go default event types.
+            "statechanged",
+            "localchangedetected",
+            "remotechangedetected",
+            "downloadprogress",
         ]
         .into_iter()
         .map(str::to_string)
@@ -5070,6 +5107,7 @@ pub(crate) fn run_parity_probe(with_peer_interop: bool) -> Result<(), String> {
                         local_flags: 0,
                         file_type: crate::db::FileInfoType::File,
                         block_hashes: vec!["h1".to_string()],
+                        version_counters: Vec::new(),
                     }],
                 )
                 .map_err(|err| format!("seed api probe db: {err}"))?;
@@ -6263,6 +6301,7 @@ mod tests {
             local_flags: 0,
             file_type: db::FileInfoType::File,
             block_hashes: vec!["h".to_string()],
+            version_counters: Vec::new(),
         }
     }
 
@@ -7724,6 +7763,9 @@ mod tests {
         let runtime = test_api_runtime(Arc::new(RwLock::new(NewModel())), Vec::new(), 0);
         {
             let mut state = runtime.state.write().expect("state lock");
+            // 13.1: auth_required needs both user AND password.
+            state.gui["user"] = json!("admin");
+            state.gui["password"] = json!("$2a$10$hashed");
             state.gui["apiKey"] = json!("secret-key");
         }
 

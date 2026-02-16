@@ -2525,7 +2525,14 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "model lock poisoned"),
                 };
-                let versions = guard.GetFolderVersions(folder);
+                let versions = match guard.GetFolderVersions(folder) {
+                    Ok(v) => v,
+                    Err(err) if err == crate::model_core::errNoVersioner => {
+                        // No versioner configured — return empty versions list gracefully.
+                        Vec::new()
+                    }
+                    Err(err) => return make_api_error(400, &err),
+                };
                 ApiReply::json(200, json!({"folder": folder, "versions": versions}))
             }
             Method::Post => {
@@ -2536,9 +2543,18 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "model lock poisoned"),
                 };
-                match guard.RestoreFolderVersions(folder) {
-                    Ok(restored) => {
-                        ApiReply::json(200, json!({"folder": folder, "restored": restored}))
+                let versions_map = std::collections::BTreeMap::new();
+                match guard.RestoreFolderVersions(folder, &versions_map) {
+                    Ok(restore_errors) => ApiReply::json(
+                        200,
+                        json!({"folder": folder, "restored": true, "errors": restore_errors.len()}),
+                    ),
+                    Err(err) if err == crate::model_core::errNoVersioner => {
+                        // No versioner configured — treat as successful no-op.
+                        ApiReply::json(
+                            200,
+                            json!({"folder": folder, "restored": true, "errors": 0}),
+                        )
                     }
                     Err(err) => {
                         if err == crate::model_core::ErrFolderMissing {

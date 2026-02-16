@@ -11,7 +11,7 @@ use crate::bep_proto::bep as pb;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 
-const MAX_HEADER_BYTES: usize = 32 * 1024;
+const MAX_HEADER_BYTES: usize = 32_767;
 const MAX_MESSAGE_LEN: usize = 500 * 1_000_000;
 const MAX_HELLO_BYTES: usize = 32_767;
 const COMPRESSION_THRESHOLD_BYTES: usize = 128;
@@ -34,6 +34,8 @@ pub(crate) enum BepMessage {
     Index {
         folder: String,
         files: Vec<IndexEntry>,
+        // B1: wire-preserved last_sequence (end-to-end, not recomputed)
+        last_sequence: i64,
     },
     IndexUpdate {
         folder: String,
@@ -42,18 +44,21 @@ pub(crate) enum BepMessage {
         prev_sequence: i64,
     },
     Request {
-        id: u32,
+        // B2: i32 to preserve negative IDs from Go peers
+        id: i32,
         folder: String,
         name: String,
-        offset: u64,
-        size: u32,
+        // BEP-4: signed values from proto, no .max(0) clamping
+        offset: i64,
+        size: i32,
         hash: Vec<u8>,
         // 8.5: preserve from_temporary and block_no
         from_temporary: bool,
         block_no: i32,
     },
     Response {
-        id: u32,
+        // B2: i32 to preserve negative IDs from Go peers
+        id: i32,
         // 8.7: signed code, don't clamp negatives
         code: i32,
         data_len: u32,
@@ -112,16 +117,20 @@ pub(crate) struct IndexEntry {
     pub(crate) no_permissions: bool,
     pub(crate) invalid: bool,
     pub(crate) local_flags: u32,
+    // 11.2: Symlink target — hex-encode for lossless round-trip.
     pub(crate) symlink_target: String,
     pub(crate) block_size: i32,
+    // BEP-1: Full version vector — list of (id, value) counters
+    pub(crate) version_counters: Vec<(i64, i64)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DownloadProgressEntry {
     pub(crate) name: String,
-    pub(crate) version: u64,
-    pub(crate) block_indexes: Vec<u32>,
-    pub(crate) block_size: u32,
+    // BEP-5: Full version vector, not collapsed max
+    pub(crate) version: Vec<(i64, i64)>,
+    pub(crate) block_indexes: Vec<i32>,
+    pub(crate) block_size: i32,
     pub(crate) update_type: String,
 }
 
@@ -373,12 +382,21 @@ fn encode_payload(message: &BepMessage) -> Result<Vec<u8>, String> {
             };
             proto_encode(&wire, "cluster config")
         }
-        BepMessage::Index { folder, files } => {
-            let last_sequence = files.iter().map(|f| f.sequence as i64).max().unwrap_or(0);
+        BepMessage::Index {
+            folder,
+            files,
+            last_sequence,
+        } => {
+            // B1: use wire-preserved last_sequence, fall back to computed if 0
+            let seq = if *last_sequence != 0 {
+                *last_sequence
+            } else {
+                files.iter().map(|f| f.sequence as i64).max().unwrap_or(0)
+            };
             let wire = pb::Index {
                 folder: folder.clone(),
                 files: files.iter().map(index_entry_to_wire).collect(),
-                last_sequence,
+                last_sequence: seq,
             };
             proto_encode(&wire, "index")
         }
@@ -388,6 +406,7 @@ fn encode_payload(message: &BepMessage) -> Result<Vec<u8>, String> {
             files,
             prev_sequence,
         } => {
+            // B1: use wire-preserved last_sequence from files, fall back to computed
             let last_sequence = files.iter().map(|f| f.sequence as i64).max().unwrap_or(0);
             let wire = pb::IndexUpdate {
                 folder: folder.clone(),
@@ -398,6 +417,7 @@ fn encode_payload(message: &BepMessage) -> Result<Vec<u8>, String> {
             proto_encode(&wire, "index update")
         }
         // 8.5: Request carries from_temporary and block_no
+        // B2: id is i32 — pass through directly
         BepMessage::Request {
             id,
             folder,
@@ -408,13 +428,12 @@ fn encode_payload(message: &BepMessage) -> Result<Vec<u8>, String> {
             from_temporary,
             block_no,
         } => {
-            let id = i32::try_from(*id).map_err(|_| format!("request id too large: {id}"))?;
             let offset = i64::try_from(*offset)
                 .map_err(|_| format!("request offset too large: {offset}"))?;
             let size =
                 i32::try_from(*size).map_err(|_| format!("request size too large: {size}"))?;
             let wire = pb::Request {
-                id,
+                id: *id,
                 folder: folder.clone(),
                 name: name.clone(),
                 offset,
@@ -426,15 +445,15 @@ fn encode_payload(message: &BepMessage) -> Result<Vec<u8>, String> {
             proto_encode(&wire, "request")
         }
         // 8.7: Response code is now i32 — no clamping
+        // B2: id is i32 — pass through directly
         BepMessage::Response {
             id,
             code,
             data,
             data_len: _,
         } => {
-            let id = i32::try_from(*id).map_err(|_| format!("response id too large: {id}"))?;
             let wire = pb::Response {
-                id,
+                id: *id,
                 data: data.clone(),
                 code: *code,
             };
@@ -452,18 +471,23 @@ fn encode_payload(message: &BepMessage) -> Result<Vec<u8>, String> {
                             FileDownloadProgressUpdateType_FILE_DOWNLOAD_PROGRESS_UPDATE_TYPE_APPEND
                         },
                         name: update.name.clone(),
-                        version: Some(pb::Vector {
-                            counters: vec![pb::Counter {
-                                id: 0,
-                                value: update.version,
-                            }],
-                        }),
-                        block_indexes: update
-                            .block_indexes
-                            .iter()
-                            .map(|idx| i32::try_from(*idx).unwrap_or(i32::MAX))
-                            .collect(),
-                        block_size: i32::try_from(update.block_size).unwrap_or(i32::MAX),
+                        // BEP-5: Build version vector from counter pairs
+                        version: if update.version.is_empty() {
+                            None
+                        } else {
+                            Some(pb::Vector {
+                                counters: update
+                                    .version
+                                    .iter()
+                                    .map(|(id, value)| pb::Counter {
+                                        id: *id as u64,
+                                        value: *value as u64,
+                                    })
+                                    .collect(),
+                            })
+                        },
+                        block_indexes: update.block_indexes.clone(),
+                        block_size: update.block_size,
                     })
                     .collect(),
             };
@@ -517,6 +541,8 @@ fn decode_payload(message_type: i32, payload: &[u8]) -> Result<BepMessage, Strin
             Ok(BepMessage::Index {
                 folder: msg.folder,
                 files: msg.files.iter().map(index_entry_from_wire).collect(),
+                // B1: preserve wire last_sequence
+                last_sequence: msg.last_sequence,
             })
         }
         // 8.6: IndexUpdate preserves prev_sequence
@@ -529,24 +555,26 @@ fn decode_payload(message_type: i32, payload: &[u8]) -> Result<BepMessage, Strin
             })
         }
         // 8.5: Request preserves from_temporary and block_no
+        // B2: id passed through as i32 — no clamping
         MessageType_MESSAGE_TYPE_REQUEST => {
             let msg: pb::Request = proto_decode(payload, "request")?;
             Ok(BepMessage::Request {
-                id: msg.id.max(0) as u32,
+                id: msg.id,
                 folder: msg.folder,
                 name: msg.name,
-                offset: msg.offset.max(0) as u64,
-                size: msg.size.max(0) as u32,
+                offset: msg.offset,
+                size: msg.size,
                 hash: msg.hash,
                 from_temporary: msg.from_temporary,
                 block_no: msg.block_no,
             })
         }
         // 8.7: Response code is i32 — don't clamp negatives
+        // B2: id passed through as i32 — no clamping
         MessageType_MESSAGE_TYPE_RESPONSE => {
             let msg: pb::Response = proto_decode(payload, "response")?;
             Ok(BepMessage::Response {
-                id: msg.id.max(0) as u32,
+                id: msg.id,
                 code: msg.code,
                 data_len: msg.data.len() as u32,
                 data: msg.data,
@@ -561,17 +589,19 @@ fn decode_payload(message_type: i32, payload: &[u8]) -> Result<BepMessage, Strin
                     .into_iter()
                     .map(|u| DownloadProgressEntry {
                         name: u.name,
+                        // BEP-5: Preserve full version vector
                         version: u
                             .version
                             .as_ref()
-                            .and_then(|v| v.counters.iter().map(|c| c.value).max())
+                            .map(|v| {
+                                v.counters
+                                    .iter()
+                                    .map(|c| (c.id as i64, c.value as i64))
+                                    .collect()
+                            })
                             .unwrap_or_default(),
-                        block_indexes: u
-                            .block_indexes
-                            .into_iter()
-                            .map(|idx| idx.max(0) as u32)
-                            .collect(),
-                        block_size: u.block_size.max(0) as u32,
+                        block_indexes: u.block_indexes,
+                        block_size: u.block_size,
                         update_type: if u.update_type
                             == FileDownloadProgressUpdateType_FILE_DOWNLOAD_PROGRESS_UPDATE_TYPE_FORGET
                         {
@@ -604,7 +634,21 @@ fn index_entry_to_wire(entry: &IndexEntry) -> pb::FileInfo {
         permissions: entry.permissions,
         modified_s: entry.modified_s,
         modified_by: entry.modified_by,
-        version: None,
+        // BEP-1: Build full version vector from counters
+        version: if entry.version_counters.is_empty() {
+            None
+        } else {
+            Some(pb::Vector {
+                counters: entry
+                    .version_counters
+                    .iter()
+                    .map(|(id, value)| pb::Counter {
+                        id: *id as u64,
+                        value: *value as u64,
+                    })
+                    .collect(),
+            })
+        },
         sequence: entry.sequence as i64,
         // 11.1: Block hashes — hex-decode for lossless wire round-trip.
         blocks: entry
@@ -624,7 +668,8 @@ fn index_entry_to_wire(entry: &IndexEntry) -> pb::FileInfo {
         modified_ns: entry.modified_ns,
         block_size: entry.block_size,
         platform: None,
-        local_flags: entry.local_flags,
+        // BEP-2: local_flags must be 0 on wire — Go strips internal flags
+        local_flags: 0,
         version_hash: Vec::new(),
         inode_change_ns: 0,
         encryption_trailer_size: 0,
@@ -658,6 +703,17 @@ fn index_entry_from_wire(file: &pb::FileInfo) -> IndexEntry {
         // 11.2: Symlink target — hex-encode for lossless round-trip.
         symlink_target: encode_hex_string(&file.symlink_target),
         block_size: file.block_size,
+        // BEP-1: Parse full version vector from wire
+        version_counters: file
+            .version
+            .as_ref()
+            .map(|v| {
+                v.counters
+                    .iter()
+                    .map(|c| (c.id as i64, c.value as i64))
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -746,6 +802,7 @@ pub(crate) fn default_exchange() -> Vec<BepMessage> {
                 block_hashes: vec!["aa".to_string()],
                 ..IndexEntry::default()
             }],
+            last_sequence: 0,
         },
         BepMessage::IndexUpdate {
             folder: "default".to_string(),
@@ -779,7 +836,7 @@ pub(crate) fn default_exchange() -> Vec<BepMessage> {
             folder: "default".to_string(),
             updates: vec![DownloadProgressEntry {
                 name: "a.txt".to_string(),
-                version: 2,
+                version: vec![(0, 2)],
                 block_indexes: vec![0],
                 block_size: 131_072,
                 update_type: "append".to_string(),

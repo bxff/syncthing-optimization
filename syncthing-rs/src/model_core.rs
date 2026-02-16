@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use crate::bep::{BepMessage, ClusterConfigFolder, IndexEntry};
+use crate::bep_core::FlagLocalIgnored;
 use crate::config::{FolderConfiguration, FolderDeviceConfiguration, FolderType};
 use crate::db::{self, Db};
 use crate::folder_core;
@@ -1031,7 +1032,11 @@ impl model {
                 }
                 Ok(None)
             }
-            BepMessage::Index { folder, files } => {
+            BepMessage::Index {
+                folder,
+                files,
+                last_sequence: _,
+            } => {
                 self.ensure_remote_index_allowed(device, folder)?;
                 let converted = files
                     .iter()
@@ -1043,9 +1048,16 @@ impl model {
             BepMessage::IndexUpdate {
                 folder,
                 files,
-                prev_sequence: _,
+                prev_sequence,
             } => {
                 self.ensure_remote_index_allowed(device, folder)?;
+                // M3: Log prev_sequence for anomaly diagnostics
+                if *prev_sequence > 0 {
+                    eprintln!(
+                        "DEBUG: IndexUpdate {}/{} prev_sequence={}",
+                        device, folder, prev_sequence
+                    );
+                }
                 let converted = files
                     .iter()
                     .map(|file| fileInfoFromIndexEntry(folder, file))
@@ -1084,7 +1096,7 @@ impl model {
                     .get(folder)
                     .map(|cfg| cfg.folder_type == FolderType::ReceiveEncrypted)
                     .unwrap_or(false);
-                match self.RequestData(folder, name, *offset, *size as usize) {
+                match self.RequestData(folder, name, *offset as u64, *size as usize) {
                     Ok(data) => {
                         if !is_receive_encrypted && !hash.is_empty() {
                             let hash_ok = if hash.len() == 32 {
@@ -1100,7 +1112,8 @@ impl model {
                                     if hash_str == digest_hex {
                                         true
                                     } else {
-                                        self.request_hash_matches(folder, name, *offset, hash_str)
+                                        // MC-1: No DB-string fallback — only raw SHA-256 digest match.
+                                        false
                                     }
                                 }
                             } else {
@@ -1155,7 +1168,7 @@ impl model {
             BepMessage::DownloadProgress { folder, updates } => {
                 let entries = updates
                     .iter()
-                    .map(|update| format!("{folder}:{}:{}", update.name, update.version))
+                    .map(|update| format!("{folder}:{}:{:?}", update.name, update.version))
                     .collect::<Vec<_>>();
                 self.deviceDownloads.insert(device.to_string(), entries);
                 let downloaded = updates
@@ -2511,7 +2524,8 @@ fn fileInfoFromIndexEntry(folder: &str, file: &IndexEntry) -> db::FileInfo {
         modified_ns,
         size: clamp_u64_to_i64(file.size),
         deleted: file.deleted,
-        ignored: false,
+        // M2: Map ignored from file.invalid and local_flags context (Go checks Invalid + LocalFlags)
+        ignored: file.invalid || (file.local_flags & FlagLocalIgnored) != 0,
         local_flags: file.local_flags,
         file_type,
         block_hashes: file.block_hashes.clone(),
@@ -3104,7 +3118,7 @@ mod tests {
                 data: b"hello-world".to_vec(),
             }
         );
-        assert_eq!(m.DownloadProgress("peer-a"), vec!["default:a.txt:2"]);
+        assert_eq!(m.DownloadProgress("peer-a"), vec!["default:a.txt:[(0, 2)]"]);
         assert_eq!(m.RemoteSequences("default").get("peer-a").copied(), Some(2));
         assert_eq!(m.State("default"), "running");
         assert_eq!(m.PendingDevices(), Vec::<String>::new());
@@ -3154,7 +3168,7 @@ mod tests {
                     folder: "default".to_string(),
                     name: "a.txt".to_string(),
                     offset: 0,
-                    size: (MAX_BEP_REQUEST_BYTES as u32) + 1,
+                    size: (MAX_BEP_REQUEST_BYTES as i32) + 1,
                     hash: b"h".to_vec(),
                     from_temporary: false,
                     block_no: 0,
@@ -3693,6 +3707,7 @@ mod tests {
                     block_hashes: vec!["h1".to_string()],
                     ..IndexEntry::default()
                 }],
+                last_sequence: 0,
             },
         )
         .expect("apply index from peer-a");
@@ -3709,6 +3724,7 @@ mod tests {
                     block_hashes: vec!["h2".to_string()],
                     ..IndexEntry::default()
                 }],
+                last_sequence: 0,
             },
         )
         .expect("apply index from peer-b");

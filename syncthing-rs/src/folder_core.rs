@@ -713,17 +713,33 @@ impl folder {
             // bump their local sequence so the global/local views stay in
             // sync without actually transferring data.
             let mut reconciled = 0usize;
-            let db = self.db.read().map_err(|_| "db lock poisoned".to_string())?;
-            let page = db
-                .all_needed_global_files_ordered_page(&self.config.id, LOCAL_DEVICE_ID, None, 1000)
-                .unwrap_or_else(|_| db::NeededFilePage {
-                    items: Vec::new(),
-                    next_cursor: None,
-                });
-            drop(db);
+            // F3: Paginate through all needed global files, not just the first page
+            let mut cursor = None;
+            let mut all_needed = Vec::new();
+            loop {
+                let db = self.db.read().map_err(|_| "db lock poisoned".to_string())?;
+                let page = db
+                    .all_needed_global_files_ordered_page(
+                        &self.config.id,
+                        LOCAL_DEVICE_ID,
+                        cursor.as_deref(),
+                        1000,
+                    )
+                    .unwrap_or_else(|_| db::NeededFilePage {
+                        items: Vec::new(),
+                        next_cursor: None,
+                    });
+                drop(db);
+                let next = page.next_cursor.clone();
+                all_needed.extend(page.items);
+                if next.is_none() {
+                    break;
+                }
+                cursor = next;
+            }
 
             let mut updates = Vec::new();
-            for needed in page.items {
+            for needed in all_needed {
                 let db = self.db.read().map_err(|_| "db lock poisoned".to_string())?;
                 let local =
                     db.get_device_file_light(&self.config.id, LOCAL_DEVICE_ID, &needed.path);
@@ -1549,11 +1565,16 @@ fn load_scoped_local_files(
 }
 
 fn should_skip_scan_path(path: &str) -> bool {
+    // F5: Skip all internal Syncthing paths matching Go's fs.IsInternal()
     path.starts_with(".stfolder/")
         || path == ".stfolder"
         || path.starts_with(".stscan-spill/")
         || path == ".stscan-spill"
         || path.starts_with(".syncthing.")
+        || path.starts_with(".stignore")
+        || path == ".stignore"
+        || path.starts_with(".stversions/")
+        || path == ".stversions"
 }
 
 fn process_scanned_file(
@@ -1892,8 +1913,8 @@ fn ensure_symlink_path(path: &Path, target: &str) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Ok(meta) => {
             if meta.is_dir() {
-                fs::remove_dir_all(path)
-                    .map_err(|e| format!("remove dir {}: {e}", path.display()))?;
+                // F2: Don't use remove_dir_all for safety — only remove empty dirs
+                fs::remove_dir(path).map_err(|e| format!("remove dir {}: {e}", path.display()))?;
             } else {
                 fs::remove_file(path)
                     .map_err(|e| format!("remove file {}: {e}", path.display()))?;

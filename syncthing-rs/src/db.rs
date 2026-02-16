@@ -1793,24 +1793,48 @@ fn same_file_version_for_availability(a: &FileInfo, b: &FileInfo) -> bool {
 }
 
 fn prefer_global(candidate: &FileInfo, current: &FileInfo) -> bool {
-    // 10.1: Version vector comparison (Go's ConcurrentGreater semantics).
-    // Compare counter totals; the higher total wins.  If tied, compare
-    // individual counters lexicographically.
-    let candidate_total: i64 = candidate.version_counters.iter().map(|c| c.1).sum();
-    let current_total: i64 = current.version_counters.iter().map(|c| c.1).sum();
-    if candidate_total != current_total {
-        return candidate_total > current_total;
-    }
-    // Lexicographic counter comparison for concurrent-but-equal-sum vectors.
-    let cmp = candidate
-        .version_counters
-        .iter()
-        .cmp(current.version_counters.iter());
-    if cmp != std::cmp::Ordering::Equal {
-        return cmp == std::cmp::Ordering::Greater;
+    // D1: True component-wise version vector comparison (Go's ConcurrentGreater).
+    // Build a merged view of all device counters and compare per-device.
+    if !candidate.version_counters.is_empty() || !current.version_counters.is_empty() {
+        let mut candidate_map: std::collections::BTreeMap<i64, i64> =
+            std::collections::BTreeMap::new();
+        let mut current_map: std::collections::BTreeMap<i64, i64> =
+            std::collections::BTreeMap::new();
+        for (device, counter) in &candidate.version_counters {
+            candidate_map.insert(*device, *counter);
+        }
+        for (device, counter) in &current.version_counters {
+            current_map.insert(*device, *counter);
+        }
+        // Collect all device IDs
+        let all_devices: std::collections::BTreeSet<i64> = candidate_map
+            .keys()
+            .chain(current_map.keys())
+            .copied()
+            .collect();
+        let mut has_greater = false;
+        let mut has_lesser = false;
+        for device in &all_devices {
+            let c = candidate_map.get(device).copied().unwrap_or(0);
+            let k = current_map.get(device).copied().unwrap_or(0);
+            if c > k {
+                has_greater = true;
+            } else if c < k {
+                has_lesser = true;
+            }
+        }
+        // ConcurrentGreater: candidate wins if it has at least one greater and no lesser
+        if has_greater && !has_lesser {
+            return true;
+        }
+        if has_lesser && !has_greater {
+            return false;
+        }
+        // Concurrent (has both greater and lesser, or all equal):
+        // Fall through to tie-breaking
     }
 
-    // Fallback for entries without version vectors (legacy or local-only).
+    // Fallback for entries without version vectors or concurrent versions.
     if candidate.sequence != current.sequence {
         return candidate.sequence > current.sequence;
     }

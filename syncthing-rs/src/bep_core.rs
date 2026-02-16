@@ -414,7 +414,8 @@ fn wire_to_bep(message: &WireMessage) -> Result<BepMessage, String> {
                         .Devices
                         .iter()
                         .map(|d| ClusterConfigDevice {
-                            id: d.Id.as_bytes().to_vec(),
+                            // BC1: use device_id_to_bytes for proper 32-byte raw ID
+                            id: device_id_to_bytes(&d.Id),
                             name: d.Name.clone(),
                             addresses: d.Addresses.clone(),
                             compression: d.Compression,
@@ -431,6 +432,7 @@ fn wire_to_bep(message: &WireMessage) -> Result<BepMessage, String> {
         WireMessage::Index(index) => Ok(BepMessage::Index {
             folder: index.Folder.clone(),
             files: index.Files.iter().map(fileinfo_to_index_entry).collect(),
+            last_sequence: index.LastSequence,
         }),
         // 8.6: IndexUpdate preserves prev_sequence
         WireMessage::IndexUpdate(update) => Ok(BepMessage::IndexUpdate {
@@ -439,19 +441,21 @@ fn wire_to_bep(message: &WireMessage) -> Result<BepMessage, String> {
             prev_sequence: update.PrevSequence,
         }),
         // 8.5: Request preserves from_temporary and block_no
+        // B2: id passed through as i32 — no clamping
         WireMessage::Request(req) => Ok(BepMessage::Request {
-            id: req.Id.max(0) as u32,
+            id: req.Id,
             folder: req.Folder.clone(),
             name: req.Name.clone(),
-            offset: req.Offset.max(0) as u64,
-            size: req.Size.max(0) as u32,
+            offset: req.Offset,
+            size: req.Size,
             hash: req.Hash.clone(),
             from_temporary: req.FromTemporary,
             block_no: req.BlockNo,
         }),
         // 8.7: Response code is i32, don't clamp
+        // B2: id passed through as i32 — no clamping
         WireMessage::Response(resp) => Ok(BepMessage::Response {
-            id: resp.Id.max(0) as u32,
+            id: resp.Id,
             code: resp.Code,
             data_len: resp.Data.len() as u32,
             data: resp.Data.clone(),
@@ -466,14 +470,10 @@ fn wire_to_bep(message: &WireMessage) -> Result<BepMessage, String> {
                     version: u
                         .Version
                         .as_ref()
-                        .and_then(|v| v.Counters.iter().map(|c| c.Value.max(0) as u64).max())
+                        .map(|v| v.Counters.iter().map(|c| (c.Id, c.Value)).collect())
                         .unwrap_or_default(),
-                    block_indexes: u
-                        .BlockIndexes
-                        .iter()
-                        .map(|idx| (*idx).max(0) as u32)
-                        .collect(),
-                    block_size: u.BlockSize.max(0) as u32,
+                    block_indexes: u.BlockIndexes.clone(),
+                    block_size: u.BlockSize,
                     update_type: if u.UpdateType == FileDownloadProgressUpdateTypeForget {
                         "forget".to_string()
                     } else {
@@ -535,10 +535,19 @@ fn bep_to_wire(message: &BepMessage) -> Result<WireMessage, String> {
                 .collect(),
             ..Default::default()
         })),
-        BepMessage::Index { folder, files } => Ok(WireMessage::Index(Index {
+        BepMessage::Index {
+            folder,
+            files,
+            last_sequence,
+        } => Ok(WireMessage::Index(Index {
             Folder: folder.clone(),
             Files: files.iter().map(index_entry_to_fileinfo).collect(),
-            LastSequence: files.iter().map(|f| f.sequence as i64).max().unwrap_or(0),
+            // B1: preserve wire last_sequence, fall back to computed
+            LastSequence: if *last_sequence != 0 {
+                *last_sequence
+            } else {
+                files.iter().map(|f| f.sequence as i64).max().unwrap_or(0)
+            },
         })),
         // 8.6: IndexUpdate preserves prev_sequence
         BepMessage::IndexUpdate {
@@ -584,14 +593,22 @@ fn bep_to_wire(message: &BepMessage) -> Result<WireMessage, String> {
                     .iter()
                     .map(|u| FileDownloadProgressUpdate {
                         Name: u.name.clone(),
-                        Version: Some(Vector {
-                            Counters: vec![Counter {
-                                Id: 0,
-                                Value: u.version as i64,
-                            }],
-                        }),
-                        BlockIndexes: u.block_indexes.iter().map(|idx| *idx as i32).collect(),
-                        BlockSize: u.block_size as i32,
+                        Version: if u.version.is_empty() {
+                            None
+                        } else {
+                            Some(Vector {
+                                Counters: u
+                                    .version
+                                    .iter()
+                                    .map(|(id, value)| Counter {
+                                        Id: *id,
+                                        Value: *value,
+                                    })
+                                    .collect(),
+                            })
+                        },
+                        BlockIndexes: u.block_indexes.clone(),
+                        BlockSize: u.block_size,
                         UpdateType: if u.update_type.eq_ignore_ascii_case("forget") {
                             FileDownloadProgressUpdateTypeForget
                         } else {
@@ -617,15 +634,22 @@ fn fileinfo_to_index_entry(file: &FileInfo) -> IndexEntry {
         size: file.Size.max(0) as u64,
         block_hashes: file.Blocks.iter().map(|b| encode_hex(&b.Hash)).collect(),
         file_type: file.Type,
-        permissions: file.Permissions.max(0) as u32,
+        permissions: file.Permissions as u32,
         modified_s: file.ModifiedS,
         modified_ns: file.ModifiedNs,
-        modified_by: file.ModifiedBy.max(0) as u64,
+        modified_by: file.ModifiedBy as u64,
         no_permissions: file.NoPermissions,
         invalid: file.Invalid,
-        local_flags: file.LocalFlags.max(0) as u32,
+        local_flags: file.LocalFlags as u32,
         symlink_target: file.SymlinkTarget.clone(),
         block_size: file.BlockSize,
+        // BEP-1: Parse version vector from FileInfo
+        version_counters: file
+            .Version
+            .Counters
+            .iter()
+            .map(|c| (c.Id, c.Value))
+            .collect(),
     }
 }
 

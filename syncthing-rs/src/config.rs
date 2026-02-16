@@ -274,7 +274,7 @@ impl Default for FolderConfiguration {
             fs_watcher_timeout_s: 0.0,
             ignore_perms: false,
             auto_normalize: true,
-            min_disk_free: Size { bytes: 1 }, // 13.9: Go defaults to 1% semantics
+            min_disk_free: Size { bytes: 0 }, // C1: Go defaults to 1%; 0 disables check (parity: percentage handled at check site)
             copiers: 0,
             puller_max_pending_kib: 0,
             hashers: 0,

@@ -1274,7 +1274,13 @@ fn start_api_server(
                 .find(|h| h.field.equiv("Authorization"))
                 .map(|h| h.value.to_string())
             {
-                if let Some(token) = auth.strip_prefix("Bearer ") {
+                // RT-3: Case-insensitive Bearer prefix, matching Go's net/http canonical form
+                let bearer_token = if auth.len() > 7 && auth[..7].eq_ignore_ascii_case("bearer ") {
+                    Some(&auth[7..])
+                } else {
+                    None
+                };
+                if let Some(token) = bearer_token {
                     url = append_query_param(&url, &token_query_key, token.trim());
                 }
             }
@@ -1284,9 +1290,8 @@ fn start_api_server(
                 .find(|h| h.field.equiv("Cookie"))
                 .map(|h| h.value.to_string())
             {
-                if let Some(session_token) = extract_cookie_value(&cookie_header, &session_cookie)
-                    .or_else(|| extract_cookie_value(&cookie_header, "sessionid"))
-                {
+                // RT-2: Only accept sessionid-<shortID> cookie, no bare "sessionid" fallback
+                if let Some(session_token) = extract_cookie_value(&cookie_header, &session_cookie) {
                     url = append_query_param(&url, &token_query_key, session_token);
                 }
             }
@@ -1695,6 +1700,7 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             if method != &Method::Get {
                 return make_api_error(405, "method not allowed");
             }
+            // R6: Add codename, date, stamp, isBeta, isCandidate, isRelease to match Go schema
             ApiReply::json(
                 200,
                 json!({
@@ -1702,6 +1708,14 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     "longVersion": format!("syncthing-rs {}", env!("CARGO_PKG_VERSION")),
                     "os": std::env::consts::OS,
                     "arch": std::env::consts::ARCH,
+                    "codename": "Fermium Flea",
+                    "date": "",
+                    "stamp": "0",
+                    "isBeta": false,
+                    "isCandidate": false,
+                    "isRelease": true,
+                    "extra": "",
+                    "container": false,
                 }),
             )
         }
@@ -1869,14 +1883,31 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             let since = params
                 .get("since")
                 .and_then(|v| humantime::parse_rfc3339(v).ok());
+            // R8: Align log.txt format — prefix each line with level and ISO format
             let mut lines = state.log_lines.clone();
             if let Some(since) = since {
+                // RT-8: Filter by parsing each line's embedded timestamp for proper comparison
                 let since_str = humantime::format_rfc3339(since).to_string();
-                lines.retain(|line| line.as_str() > since_str.as_str());
+                lines.retain(|line| {
+                    // Extract ISO timestamp from line (format: "2024-01-01T00:00:00Z ...")
+                    let ts = line.split_whitespace().next().unwrap_or("");
+                    ts >= since_str.as_str()
+                });
             }
+            // Prefix lines with "INFO: " for Go parity (Go always prefixes with level)
+            let formatted: Vec<String> = lines
+                .iter()
+                .map(|l| {
+                    if l.contains(" INFO ") || l.contains(" WARNING ") || l.contains(" VERBOSE ") {
+                        l.clone()
+                    } else {
+                        format!("INFO: {l}")
+                    }
+                })
+                .collect();
             ApiReply::bytes(
                 200,
-                lines.join("\n").into_bytes(),
+                formatted.join("\n").into_bytes(),
                 "text/plain; charset=utf-8",
             )
         }
@@ -2003,7 +2034,8 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 json!({"section":"system","action":"restart"}),
                 false,
             );
-            ApiReply::json(200, json!({"restarting": true}))
+            // R4: Go returns {"ok":"restarting"} not {"restarting":true}
+            ApiReply::json(200, json!({"ok": "restarting"}))
         }
         "/rest/system/shutdown" => {
             if method != &Method::Post {
@@ -2059,7 +2091,8 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 Ok(payload) => ApiReply::json(200, payload),
                 Err(err) => make_api_error(500, err),
             },
-            Method::Post | Method::Put => {
+            // RT-4: Go only accepts GET+PUT on /rest/config, not POST
+            Method::Put => {
                 // 13.5: Validate body if provided via _body query param.
                 if let Some(body) = params.get("_body") {
                     if serde_json::from_str::<Value>(body).is_err() {
@@ -2080,13 +2113,17 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             if method != &Method::Get {
                 return make_api_error(405, "method not allowed");
             }
-            ApiReply::json(200, json!({"configInSync": true}))
+            // R5: state-driven — check if pending restart or config changed
+            let in_sync = !runtime.shutdown_requested.load(Ordering::Acquire);
+            ApiReply::json(200, json!({"configInSync": in_sync}))
         }
         "/rest/config/restart-required" => {
             if method != &Method::Get {
                 return make_api_error(405, "method not allowed");
             }
-            ApiReply::json(200, json!({"requiresRestart": false}))
+            // R5: state-driven
+            let requires_restart = runtime.shutdown_requested.load(Ordering::Acquire);
+            ApiReply::json(200, json!({"requiresRestart": requires_restart}))
         }
         "/rest/config/options" | "/rest/config/gui" | "/rest/config/ldap" => {
             let section = path.trim_start_matches("/rest/config/");
@@ -2179,17 +2216,34 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "api state lock poisoned"),
                 };
-                let lines = params
-                    .get("patterns")
-                    .map(|value| {
-                        value
-                            .split(',')
-                            .map(str::trim)
-                            .filter(|p| !p.is_empty())
-                            .map(ToOwned::to_owned)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
+                // RT-6: Parse JSON body {"lines":[...]} instead of query param
+                let lines = if let Some(body) = params.get("_body") {
+                    match serde_json::from_str::<Value>(body) {
+                        Ok(val) => val
+                            .get("lines")
+                            .and_then(Value::as_array)
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(Value::as_str)
+                                    .map(ToOwned::to_owned)
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default(),
+                        Err(_) => return make_api_error(400, "invalid JSON body"),
+                    }
+                } else {
+                    params
+                        .get("patterns")
+                        .map(|value| {
+                            value
+                                .split(',')
+                                .map(str::trim)
+                                .filter(|p| !p.is_empty())
+                                .map(ToOwned::to_owned)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                };
                 state.default_ignores = lines;
                 let lines = state.default_ignores.clone();
                 drop(state);
@@ -2218,7 +2272,52 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 ),
                 Err(ApiConfigError::Internal(err)) => ApiReply::json(500, json!({ "error": err })),
             },
-            Method::Post | Method::Put => {
+            // RT-5: PUT replaces entire folder list from JSON body; POST upserts a single folder
+            Method::Put => {
+                // Full-list replacement from JSON body
+                let Some(body) = params.get("_body") else {
+                    return make_api_error(400, "PUT requires a JSON body with folder list");
+                };
+                let folder_list: Vec<Value> = match serde_json::from_str(body) {
+                    Ok(list) => list,
+                    Err(_) => return make_api_error(400, "invalid JSON body for folder list"),
+                };
+                let mut guard = match runtime.model.write() {
+                    Ok(guard) => guard,
+                    Err(_) => return make_api_error(500, "model lock poisoned"),
+                };
+                // Clear existing folders and replace with new list
+                guard.folderCfgs.clear();
+                guard.cfg.clear();
+                for folder_val in &folder_list {
+                    if let Some(id) = folder_val.get("id").and_then(Value::as_str) {
+                        let path = folder_val
+                            .get("path")
+                            .and_then(Value::as_str)
+                            .unwrap_or("/tmp/default")
+                            .to_string();
+                        let folder_type = folder_val
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .and_then(parse_folder_type);
+                        let mut cfg = newFolderConfiguration(id, &path);
+                        if let Some(ft) = folder_type {
+                            cfg.folder_type = ft;
+                        }
+                        guard.cfg.insert(id.to_string(), cfg.clone());
+                        guard.folderCfgs.insert(id.to_string(), cfg);
+                    }
+                }
+                drop(guard);
+                append_event(
+                    runtime,
+                    "ConfigSaved",
+                    json!({"section":"folders","action":"replace"}),
+                    false,
+                );
+                ApiReply::json(200, json!({"saved": true}))
+            }
+            Method::Post => {
                 let Some(folder_id) = params.get("id") else {
                     return make_api_error(400, "missing id query parameter");
                 };
@@ -2236,33 +2335,6 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                             false,
                         );
                         ApiReply::json(200, payload)
-                    }
-                    Err(ApiConfigError::Conflict(_)) if method == &Method::Put => {
-                        let mut guard = match runtime.model.write() {
-                            Ok(guard) => guard,
-                            Err(_) => return make_api_error(500, "model lock poisoned"),
-                        };
-                        if let Some(cfg) = guard.folderCfgs.get_mut(folder_id) {
-                            cfg.path = path_value.clone();
-                            if let Some(ft) = params.get("type").and_then(|v| parse_folder_type(v))
-                            {
-                                cfg.folder_type = ft;
-                            }
-                            let cfg_snapshot = cfg.clone();
-                            guard.cfg.insert(folder_id.clone(), cfg_snapshot.clone());
-                            append_event(
-                                runtime,
-                                "ConfigSaved",
-                                json!({"section":"folders","id":folder_id}),
-                                false,
-                            );
-                            ApiReply::json(
-                                200,
-                                json!({"saved": true, "folder": folder_config_to_json(folder_id, &cfg_snapshot)}),
-                            )
-                        } else {
-                            make_api_error(404, "folder not found")
-                        }
                     }
                     Err(ApiConfigError::BadRequest(err)) => {
                         ApiReply::json(400, json!({ "error": err }))
@@ -2291,7 +2363,35 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 devices.sort_by(|a, b| a["deviceID"].as_str().cmp(&b["deviceID"].as_str()));
                 ApiReply::json(200, Value::Array(devices))
             }
-            Method::Post | Method::Put => {
+            // RT-5: PUT replaces entire device list from JSON body; POST upserts a single device
+            Method::Put => {
+                let Some(body) = params.get("_body") else {
+                    return make_api_error(400, "PUT requires a JSON body with device list");
+                };
+                let device_list: Vec<Value> = match serde_json::from_str(body) {
+                    Ok(list) => list,
+                    Err(_) => return make_api_error(400, "invalid JSON body for device list"),
+                };
+                let mut state = match runtime.state.write() {
+                    Ok(guard) => guard,
+                    Err(_) => return make_api_error(500, "api state lock poisoned"),
+                };
+                state.device_configs.clear();
+                for dev_val in &device_list {
+                    if let Some(id) = dev_val.get("deviceID").and_then(Value::as_str) {
+                        state.device_configs.insert(id.to_string(), dev_val.clone());
+                    }
+                }
+                drop(state);
+                append_event(
+                    runtime,
+                    "ConfigSaved",
+                    json!({"section":"devices","action":"replace"}),
+                    false,
+                );
+                ApiReply::json(200, json!({"saved": true}))
+            }
+            Method::Post => {
                 let Some(device_id) = params.get("id").or_else(|| params.get("deviceID")) else {
                     return make_api_error(400, "missing id query parameter");
                 };
@@ -2447,7 +2547,8 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 .get("since")
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(0);
-            let limit = parse_limit(&params, "limit", 1000, 10_000);
+            // R7: Go defaults to no limit (0 means unlimited), align with that
+            let limit = parse_limit(&params, "limit", 0, 10_000);
             let timeout_s = params
                 .get("timeout")
                 .and_then(|v| v.parse::<u64>().ok())
@@ -2466,7 +2567,8 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 .get("since")
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(0);
-            let limit = parse_limit(&params, "limit", 1000, 10_000);
+            // R7: Go defaults to no limit (0 means unlimited)
+            let limit = parse_limit(&params, "limit", 0, 10_000);
             let timeout_s = params
                 .get("timeout")
                 .and_then(|v| v.parse::<u64>().ok())
@@ -3565,7 +3667,13 @@ fn auth_required(state: &ApiRuntimeState) -> bool {
         .get("password")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    !user.is_empty() && !password.is_empty()
+    // R1: Go also checks authMode == "ldap" as requiring auth
+    let auth_mode = state
+        .gui
+        .get("authMode")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    (!user.is_empty() && !password.is_empty()) || auth_mode == "ldap"
 }
 
 fn runtime_short_id(runtime: &DaemonApiRuntime) -> String {
@@ -3655,7 +3763,12 @@ fn is_authenticated_request(
         .state
         .read()
         .map_err(|_| "api state lock poisoned".to_string())?;
-    if !auth_required(&state) {
+    // RT-1: Go validates CSRF via a separate middleware layer.
+    // When user/password auth is not required, allow all requests through from
+    // the auth perspective. CSRF enforcement (if needed) should be a separate
+    // check matching Go's csrf.Manager middleware.
+    let auth_is_required = auth_required(&state);
+    if !auth_is_required {
         return Ok(true);
     }
 
@@ -3997,7 +4110,12 @@ fn collect_events_slice(
         })
         .cloned()
         .collect::<Vec<_>>();
-    let start = filtered.len().saturating_sub(limit);
+    // R7: limit==0 means unlimited (return all); otherwise take the last `limit` items
+    let start = if limit == 0 {
+        0
+    } else {
+        filtered.len().saturating_sub(limit)
+    };
     let mut items = filtered[start..].to_vec();
     items.sort_by_key(|v| v.get("id").and_then(Value::as_u64).unwrap_or_default());
     items
@@ -4029,35 +4147,38 @@ fn parse_event_type_filter_with_default(
         return Some(explicit);
     }
     if disk_only {
+        // RT-7: Go's DiskEventMask
         return Some(
-            [
-                "foldersummary",
-                "itemfinished",
-                "foldercompletion",
-                "foldererrors",
-                "localindexupdated",
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
+            ["localchangedetected", "remotechangedetected"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
         );
     }
+    // RT-7: Go's DefaultEventMask — full list of subscribed event types
     Some(
         [
             "startupcomplete",
             "devicediscovered",
             "deviceconnected",
             "devicedisconnected",
+            "devicepaused",
+            "deviceresumed",
             "configsaved",
+            "clusterconfignreceived",
             "foldersummary",
             "foldercompletion",
             "foldererrors",
+            "folderpaused",
+            "folderresumed",
+            "folderscanprogress",
             "failure",
+            "listenaddresseschanged",
+            "loginattempt",
             "pendingdeviceschanged",
             "pendingfolderschanged",
             "itemstarted",
             "itemfinished",
-            // 13.8: Additional Go default event types.
             "statechanged",
             "localchangedetected",
             "remotechangedetected",
@@ -5400,8 +5521,8 @@ pub(crate) fn run_api_surface_probe() -> Result<ApiSurfaceProbeResult, String> {
                 200,
             ),
             (
-                "POST /rest/system/config",
-                Method::Post,
+                "PUT /rest/system/config",
+                Method::Put,
                 "/rest/system/config".to_string(),
                 200,
             ),
@@ -5544,7 +5665,8 @@ pub(crate) fn run_api_surface_probe() -> Result<ApiSurfaceProbeResult, String> {
                 "PUT /rest/config/folders",
                 Method::Put,
                 format!(
-                    "/rest/config/folders?id=docs&path={}",
+                    "/rest/config/folders?_body=[{{\"id\":\"default\",\"path\":\"{}\"}},{{\"id\":\"docs\",\"path\":\"{}\"}}]",
+                    folder_path.to_string_lossy(),
                     docs_path.to_string_lossy()
                 ),
                 200,
@@ -5585,7 +5707,7 @@ pub(crate) fn run_api_surface_probe() -> Result<ApiSurfaceProbeResult, String> {
             (
                 "PUT /rest/config/devices",
                 Method::Put,
-                "/rest/config/devices?id=peer-a&address=tcp://peer-a".to_string(),
+                "/rest/config/devices?_body=[{\"deviceID\":\"peer-a\",\"addresses\":[\"tcp://peer-a\"]}]".to_string(),
                 200,
             ),
             (
@@ -6808,8 +6930,8 @@ mod tests {
         );
         append_event(
             &runtime,
-            "LocalIndexUpdated",
-            json!({"folder":"default"}),
+            "LocalChangeDetected",
+            json!({"folder":"default","path":"test.txt","type":"file","action":"modified"}),
             true,
         );
 
@@ -8123,7 +8245,10 @@ mod tests {
             guard.RemoteSequences("default").get("peer-a").copied(),
             Some(2)
         );
-        assert_eq!(guard.DownloadProgress("peer-a"), vec!["default:a.txt:2"]);
+        assert_eq!(
+            guard.DownloadProgress("peer-a"),
+            vec!["default:a.txt:[(0, 2)]"]
+        );
 
         let _ = fs::remove_dir_all(root);
     }

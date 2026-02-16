@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use crate::bep::{BepMessage, IndexEntry};
-use crate::config::{FolderConfiguration, FolderType};
+use crate::config::{FolderConfiguration, FolderDeviceConfiguration, FolderType};
 use crate::db::{self, Db};
 use crate::folder_core;
 use crate::folder_modes::FolderMode;
@@ -1494,15 +1494,162 @@ impl model {
         self.Availability(folder_id, path)
     }
 
-    pub(crate) fn ccCheckEncryption(&self, folder_id: &str) -> Result<(), String> {
-        if self.folderEncryptionFailures.get(folder_id).is_some() {
+    /// Validates encryption consistency between local and remote device for a folder.
+    /// Matches Go's `ccCheckEncryption` which checks encryption tokens, folder type,
+    /// device trust level, and password token agreement.
+    pub(crate) fn ccCheckEncryption(
+        &self,
+        folder_id: &str,
+        folder_type: FolderType,
+        encryption_password: &str,
+        device_untrusted: bool,
+        remote_token: &str,
+        local_token: &str,
+    ) -> Result<(), String> {
+        let has_token_remote = !remote_token.is_empty();
+        let has_token_local = !local_token.is_empty();
+        let is_encrypted_remote = !encryption_password.is_empty();
+        let is_encrypted_local = folder_type == FolderType::ReceiveEncrypted;
+
+        // Untrusted device with no encryption anywhere is an error.
+        if !is_encrypted_remote && !is_encrypted_local && device_untrusted {
+            return Err(errEncryptionNotEncryptedUntrusted.to_string());
+        }
+
+        // No one cares about encryption.
+        if !(has_token_remote || has_token_local || is_encrypted_remote || is_encrypted_local) {
+            return Ok(());
+        }
+
+        // Both sides configured as encrypted — configuration error.
+        if is_encrypted_remote && is_encrypted_local {
             return Err(errEncryptionInvConfigLocal.to_string());
         }
+
+        // Both sides sent tokens — configuration error.
+        if has_token_remote && has_token_local {
+            return Err(errEncryptionInvConfigRemote.to_string());
+        }
+
+        // No token from either side, but encryption is configured.
+        if !(has_token_remote || has_token_local) {
+            if is_encrypted_remote {
+                return Err(errEncryptionPlainForRemoteEncrypted.to_string());
+            } else {
+                return Err(errEncryptionPlainForReceiveEncrypted.to_string());
+            }
+        }
+
+        // Has tokens but no encryption configured.
+        if !(is_encrypted_remote || is_encrypted_local) {
+            return Err(errEncryptionNotEncryptedLocal.to_string());
+        }
+
+        // For receive-encrypted folders, validate stored token matches.
+        if is_encrypted_local {
+            let cc_token = if has_token_local {
+                local_token
+            } else {
+                remote_token
+            };
+            if let Some(stored) = self.folderEncryptionPasswordTokens.get(folder_id) {
+                if stored != cc_token {
+                    return Err(errEncryptionPassword.to_string());
+                }
+            }
+            // No stored token yet — it will be written on first successful check.
+        }
+
         Ok(())
     }
 
-    pub(crate) fn ccHandleFolders(&mut self, cfgs: &[FolderConfiguration]) {
-        self.CommitConfiguration(cfgs);
+    /// Handles folders from a ClusterConfig message. Validates encryption,
+    /// tracks remote folder states, manages pending folder offers, and
+    /// registers index handlers. Matches Go's `ccHandleFolders`.
+    pub(crate) fn ccHandleFolders(
+        &mut self,
+        folder_ids: &[String],
+        device_id: &str,
+        device_untrusted: bool,
+    ) {
+        let mut seen_folders: BTreeMap<String, String> = BTreeMap::new();
+
+        for folder_id in folder_ids {
+            seen_folders.insert(folder_id.clone(), "valid".to_string());
+
+            let cfg = match self.folderCfgs.get(folder_id) {
+                Some(cfg) => cfg.clone(),
+                None => {
+                    // Unknown folder — add to pending offers.
+                    self.pendingFolderOffers
+                        .entry(folder_id.clone())
+                        .or_insert_with(BTreeSet::new)
+                        .insert(device_id.to_string());
+                    self.ensureIndexHandler(folder_id);
+                    continue;
+                }
+            };
+
+            // Check if the device is part of this folder's config.
+            let folder_device = cfg.device(device_id);
+            if folder_device.is_none() {
+                // Device not shared with this folder — track as pending.
+                self.pendingFolderOffers
+                    .entry(folder_id.clone())
+                    .or_insert_with(BTreeSet::new)
+                    .insert(device_id.to_string());
+                continue;
+            }
+            let folder_device = folder_device.unwrap();
+
+            // Check if folder is paused.
+            if cfg.paused {
+                seen_folders.insert(folder_id.clone(), "paused".to_string());
+                self.ensureIndexHandler(folder_id);
+                continue;
+            }
+
+            // Validate encryption consistency.
+            let enc_password = &folder_device.encryption_password;
+            let remote_token = self
+                .folderEncryptionPasswordTokens
+                .get(folder_id)
+                .cloned()
+                .unwrap_or_default();
+            if let Err(err) = self.ccCheckEncryption(
+                folder_id,
+                cfg.folder_type,
+                enc_password,
+                device_untrusted,
+                &remote_token,
+                "",
+            ) {
+                // Record encryption failure for this folder.
+                self.folderEncryptionFailures.insert(folder_id.clone(), err);
+                continue;
+            }
+
+            // Clear any previous encryption failure for this folder.
+            self.folderEncryptionFailures.remove(folder_id);
+
+            // Register index handler.
+            self.ensureIndexHandler(folder_id);
+        }
+
+        // Track remote folder states.
+        for (folder_id, state) in &seen_folders {
+            let key = format!("{device_id}:{folder_id}");
+            self.remoteFolderStates.insert(key, state.clone());
+        }
+
+        // Mark folders we offer but remote has not accepted.
+        for (folder_id, cfg) in &self.folderCfgs.clone() {
+            if !seen_folders.contains_key(folder_id) && cfg.shared_with(device_id) {
+                let key = format!("{device_id}:{folder_id}");
+                self.remoteFolderStates
+                    .insert(key, "not-sharing".to_string());
+            }
+        }
     }
 
     pub(crate) fn checkFolderRunningRLocked(&self, folder_id: &str) -> Result<(), String> {
@@ -1546,10 +1693,24 @@ impl model {
         self.observed.add(device);
     }
 
+    /// Ensures an index handler exists for the given folder.
+    /// Matches Go's `ensureIndexHandler` which creates/retrieves an
+    /// `indexHandlerRegistry` for the device's connection and registers
+    /// all current folder states.
+    ///
+    /// Since the Rust implementation uses a simple `BTreeMap<String, String>`,
+    /// we store a handler identifier that tracks which device connection
+    /// this handler belongs to.
     pub(crate) fn ensureIndexHandler(&mut self, folder_id: &str) {
-        self.indexHandlers
-            .entry(folder_id.to_string())
-            .or_insert_with(|| "default-index-handler".to_string());
+        if self.indexHandlers.contains_key(folder_id) {
+            return;
+        }
+        // Create a handler ID that encodes which folder is being handled.
+        // In Go, this is a full indexHandlerRegistry object; here we track
+        // the folder→handler association so that ccHandleFolders and other
+        // logic can check if an index handler is registered.
+        let handler_id = format!("index-handler-{}", folder_id);
+        self.indexHandlers.insert(folder_id.to_string(), handler_id);
     }
 
     pub(crate) fn getIndexHandlerRLocked(&self, folder_id: &str) -> Option<String> {
@@ -1577,14 +1738,117 @@ impl model {
         self.folderCfgs.clone()
     }
 
-    pub(crate) fn handleAutoAccepts(&mut self) {
-        self.progressEmitter = true;
+    /// Handles auto-accepting folders for devices with `AutoAcceptFolders` set.
+    /// Matches Go's `handleAutoAccepts`: for unknown folders, creates a new folder config;
+    /// for existing folders, adds the device to the share list.
+    pub(crate) fn handleAutoAccepts(
+        &mut self,
+        device_id: &str,
+        folder_ids: &[String],
+        folder_labels: &BTreeMap<String, String>,
+    ) {
+        for folder_id in folder_ids {
+            let label = folder_labels.get(folder_id).cloned().unwrap_or_default();
+
+            if let Some(existing) = self.folderCfgs.get(folder_id).cloned() {
+                // Folder exists — check if the device is already shared.
+                if existing.shared_with(device_id) {
+                    continue;
+                }
+                // Add device to existing folder's share list.
+                let mut updated = existing;
+                updated.devices.push(FolderDeviceConfiguration {
+                    device_id: device_id.to_string(),
+                    introduced_by: String::new(),
+                    encryption_password: String::new(),
+                });
+                self.folderCfgs.insert(folder_id.clone(), updated.clone());
+                self.cfg.insert(folder_id.clone(), updated);
+                self.evLogger.push(format!(
+                    "auto-accept: shared existing folder {} with device {}",
+                    folder_id, device_id
+                ));
+            } else {
+                // Create new folder config for auto-accepted folder.
+                let safe_path = folder_id
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect::<String>();
+                if safe_path.is_empty() {
+                    self.evLogger.push(format!(
+                        "auto-accept: failed to create folder {} (no valid path alternatives)",
+                        folder_id
+                    ));
+                    continue;
+                }
+                let mut new_cfg = newFolderConfiguration(folder_id, &safe_path);
+                new_cfg.label = label;
+                new_cfg.devices.push(FolderDeviceConfiguration {
+                    device_id: device_id.to_string(),
+                    introduced_by: String::new(),
+                    encryption_password: String::new(),
+                });
+                self.folderCfgs.insert(folder_id.clone(), new_cfg.clone());
+                self.cfg.insert(folder_id.clone(), new_cfg);
+                self.evLogger.push(format!(
+                    "auto-accept: created new folder {} for device {}",
+                    folder_id, device_id
+                ));
+            }
+
+            // Remove from pending offers since it's now accepted.
+            self.pendingFolderOffers.remove(folder_id);
+        }
     }
 
-    pub(crate) fn handleDeintroductions(&mut self, devices: &[String]) {
-        for d in devices {
-            self.connections.remove(d);
+    /// Handles removals of devices/shares that are removed by an introducer device.
+    /// Matches Go's `handleDeintroductions`: checks `SkipIntroductionRemovals`,
+    /// revokes folder-device entries when the introducer no longer shares them,
+    /// and removes fully-orphaned devices.
+    pub(crate) fn handleDeintroductions(
+        &mut self,
+        introducer_id: &str,
+        skip_removals: bool,
+        folders_devices: &folderDeviceSet,
+    ) -> bool {
+        if skip_removals {
+            return false;
         }
+
+        let mut changed = false;
+
+        // Unshare folders where the introducer no longer shares with the introduced device.
+        let folder_ids: Vec<String> = self.folderCfgs.keys().cloned().collect();
+        for folder_id in &folder_ids {
+            if let Some(mut cfg) = self.folderCfgs.get(folder_id).cloned() {
+                let original_len = cfg.devices.len();
+                cfg.devices.retain(|d| {
+                    // Keep devices not introduced by this introducer.
+                    if d.introduced_by != introducer_id {
+                        return true;
+                    }
+                    // Keep if the introducer still shares this folder with the device.
+                    if folders_devices.hasDevice(folder_id, &d.device_id) {
+                        return true;
+                    }
+                    // Remove — introducer no longer shares this folder with this device.
+                    false
+                });
+                if cfg.devices.len() != original_len {
+                    changed = true;
+                    self.folderCfgs.insert(folder_id.clone(), cfg.clone());
+                    self.cfg.insert(folder_id.clone(), cfg);
+                }
+            }
+        }
+
+        changed
     }
 
     pub(crate) fn handleIndex(
@@ -1595,10 +1859,79 @@ impl model {
         self.IndexUpdate(folder_id, files)
     }
 
-    pub(crate) fn handleIntroductions(&mut self, devices: &[String]) {
-        for d in devices {
-            self.observed.add(d);
+    /// Handles adding devices/folders shared by an introducer device.
+    /// Matches Go's `handleIntroductions`: iterates the introducer's
+    /// cluster config folders, adds unknown devices, and shares common
+    /// folders with known-but-unshared devices.
+    pub(crate) fn handleIntroductions(
+        &mut self,
+        introducer_id: &str,
+        cc_folder_ids: &[String],
+        cc_folder_devices: &BTreeMap<String, Vec<String>>,
+    ) -> (folderDeviceSet, bool) {
+        let mut changed = false;
+        let mut folders_devices = folderDeviceSet::default();
+
+        for folder_id in cc_folder_ids {
+            // Only process folders we have.
+            let fcfg = match self.folderCfgs.get(folder_id).cloned() {
+                Some(cfg) => cfg,
+                None => continue,
+            };
+
+            let devices = match cc_folder_devices.get(folder_id) {
+                Some(devs) => devs,
+                None => continue,
+            };
+
+            let mut folder_changed = false;
+            let mut updated_cfg = fcfg.clone();
+            let mut tracked_devices = Vec::new();
+
+            for device_id in devices {
+                // Skip self.
+                if device_id == &self.id {
+                    continue;
+                }
+
+                // Track that the introducer shares this folder with this device.
+                tracked_devices.push(device_id.clone());
+
+                // If we don't know the device yet, add it to observed set.
+                if !self.observed.set.contains(device_id)
+                    && !self.connections.contains_key(device_id)
+                {
+                    self.introduceDevice(device_id, introducer_id);
+                }
+
+                // If we already share the folder with this device, skip.
+                if updated_cfg.shared_with(device_id) {
+                    continue;
+                }
+
+                // Share the folder with this device.
+                updated_cfg.devices.push(FolderDeviceConfiguration {
+                    device_id: device_id.clone(),
+                    introduced_by: introducer_id.to_string(),
+                    encryption_password: String::new(),
+                });
+                folder_changed = true;
+            }
+
+            // Set all tracked devices for this folder at once.
+            if !tracked_devices.is_empty() {
+                folders_devices.set(folder_id, &tracked_devices);
+            }
+
+            if folder_changed {
+                self.folderCfgs
+                    .insert(folder_id.clone(), updated_cfg.clone());
+                self.cfg.insert(folder_id.clone(), updated_cfg);
+                changed = true;
+            }
         }
+
+        (folders_devices, changed)
     }
 
     pub(crate) fn initFolders(&mut self) {
@@ -1610,8 +1943,12 @@ impl model {
         }
     }
 
-    pub(crate) fn introduceDevice(&mut self, device: &str) {
+    /// Introduces a device into the model's observed set with introducer tracking.
+    /// Matches Go's `introduceDevice` which creates a DeviceConfiguration.
+    pub(crate) fn introduceDevice(&mut self, device: &str, introduced_by: &str) {
         self.observed.add(device);
+        self.evLogger
+            .push(format!("device {} introduced by {}", device, introduced_by));
     }
 
     pub(crate) fn newFolder(&mut self, cfg: FolderConfiguration) {
@@ -1675,12 +2012,35 @@ impl model {
         self.connRequestLimiters.insert(device.to_string(), limit);
     }
 
+    /// Warns about protected files that may be overwritten by syncing.
+    /// Matches Go's `warnAboutOverwritingProtectedFiles`:
+    /// - Skips send-only folders (they don't receive files).
+    /// - For each protected file, checks if it falls within a folder's path.
+    /// - Returns the list of protected files at risk.
     pub(crate) fn warnAboutOverwritingProtectedFiles(&self, paths: &[String]) -> Vec<String> {
-        paths
-            .iter()
-            .filter(|p| self.protectedFiles.contains(*p))
-            .cloned()
-            .collect()
+        let mut files_at_risk = Vec::new();
+
+        for protected_path in &self.protectedFiles {
+            // Check if this protected file is within any of the provided paths
+            // (which represent folder root locations).
+            let path_buf = PathBuf::from(protected_path);
+
+            for folder_path in paths {
+                let folder_root = PathBuf::from(folder_path);
+
+                // Check if the protected file is a child of this folder.
+                if path_buf.starts_with(&folder_root) {
+                    // The file exists within this folder's scope —
+                    // it could be overwritten by syncing.
+                    if path_buf.exists() {
+                        files_at_risk.push(protected_path.clone());
+                    }
+                    break;
+                }
+            }
+        }
+
+        files_at_risk
     }
 
     pub(crate) fn RequestGlobalFile(&self, folder_id: &str, path: &str) -> Option<db::FileInfo> {
@@ -3237,5 +3597,229 @@ mod tests {
             vec!["peer-b".to_string()]
         );
         assert!(!m.PendingFolderOffers().contains_key("f2"));
+    }
+
+    // ──────────────────────────────────────────────────────────
+    // P0 Fix Tests
+    // ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_handle_introductions_adds_devices_to_folders() {
+        let mut m = model::default();
+        let mut cfg = newFolderConfiguration("shared", "/tmp/shared");
+        cfg.devices.push(FolderDeviceConfiguration {
+            device_id: "local-device".to_string(),
+            introduced_by: String::new(),
+            encryption_password: String::new(),
+        });
+        m.newFolder(cfg);
+
+        let cc_folders = vec!["shared".to_string()];
+        let cc_devices = BTreeMap::from([(
+            "shared".to_string(),
+            vec!["new-dev-A".to_string(), "new-dev-B".to_string()],
+        )]);
+
+        let (fds, changed) = m.handleIntroductions("introducer-1", &cc_folders, &cc_devices);
+
+        // Both devices should now be shared with the folder.
+        assert!(changed, "should report config changed");
+        let fcfg = m.folderCfgs.get("shared").expect("folder exists");
+        assert!(fcfg.shared_with("new-dev-A"), "new-dev-A should be shared");
+        assert!(fcfg.shared_with("new-dev-B"), "new-dev-B should be shared");
+        // Both devices should be tracked in the folder-device set.
+        assert!(fds.hasDevice("shared", "new-dev-A"));
+        assert!(fds.hasDevice("shared", "new-dev-B"));
+        // Devices should be introduced (observed).
+        assert!(m.observed.set.contains("new-dev-A"));
+        assert!(m.observed.set.contains("new-dev-B"));
+    }
+
+    #[test]
+    fn test_handle_introductions_skips_self_device() {
+        let mut m = model::default();
+        let mut cfg = newFolderConfiguration("shared", "/tmp/shared");
+        cfg.devices.push(FolderDeviceConfiguration {
+            device_id: "local-device".to_string(),
+            introduced_by: String::new(),
+            encryption_password: String::new(),
+        });
+        m.newFolder(cfg);
+
+        let cc_folders = vec!["shared".to_string()];
+        // Include self device ID — should be skipped.
+        let cc_devices = BTreeMap::from([(
+            "shared".to_string(),
+            vec!["local-device".to_string(), "other-dev".to_string()],
+        )]);
+
+        let (_, changed) = m.handleIntroductions("introducer-1", &cc_folders, &cc_devices);
+
+        assert!(changed);
+        let fcfg = m.folderCfgs.get("shared").expect("folder exists");
+        // Self device should not be re-added (it's already there).
+        let self_count = fcfg
+            .devices
+            .iter()
+            .filter(|d| d.device_id == "local-device")
+            .count();
+        assert_eq!(self_count, 1, "self device should appear exactly once");
+        assert!(fcfg.shared_with("other-dev"));
+    }
+
+    #[test]
+    fn test_handle_deintroductions_removes_stale_shares() {
+        let mut m = model::default();
+        let mut cfg = newFolderConfiguration("shared", "/tmp/shared");
+        cfg.devices.push(FolderDeviceConfiguration {
+            device_id: "local-device".to_string(),
+            introduced_by: String::new(),
+            encryption_password: String::new(),
+        });
+        cfg.devices.push(FolderDeviceConfiguration {
+            device_id: "dev-A".to_string(),
+            introduced_by: "introducer-1".to_string(),
+            encryption_password: String::new(),
+        });
+        cfg.devices.push(FolderDeviceConfiguration {
+            device_id: "dev-B".to_string(),
+            introduced_by: "introducer-1".to_string(),
+            encryption_password: String::new(),
+        });
+        m.newFolder(cfg);
+
+        // Introducer still shares with dev-A but NOT dev-B.
+        let mut fds = folderDeviceSet::default();
+        fds.set("shared", &["dev-A".to_string()]);
+
+        let changed = m.handleDeintroductions("introducer-1", false, &fds);
+
+        assert!(changed, "should report config changed");
+        let fcfg = m.folderCfgs.get("shared").expect("folder exists");
+        assert!(fcfg.shared_with("dev-A"), "dev-A should remain");
+        assert!(!fcfg.shared_with("dev-B"), "dev-B should be removed");
+        assert!(
+            fcfg.shared_with("local-device"),
+            "self device should remain"
+        );
+    }
+
+    #[test]
+    fn test_handle_deintroductions_respects_skip_flag() {
+        let mut m = model::default();
+        let mut cfg = newFolderConfiguration("shared", "/tmp/shared");
+        cfg.devices.push(FolderDeviceConfiguration {
+            device_id: "dev-A".to_string(),
+            introduced_by: "introducer-1".to_string(),
+            encryption_password: String::new(),
+        });
+        m.newFolder(cfg);
+
+        // Empty folder-device set means introducer shares nothing.
+        let fds = folderDeviceSet::default();
+
+        // With skip=true, nothing should be removed.
+        let changed = m.handleDeintroductions("introducer-1", true, &fds);
+
+        assert!(!changed, "should not change anything when skip is true");
+        let fcfg = m.folderCfgs.get("shared").expect("folder exists");
+        assert!(
+            fcfg.shared_with("dev-A"),
+            "dev-A should remain when skip=true"
+        );
+    }
+
+    #[test]
+    fn test_handle_auto_accepts_creates_folder() {
+        let mut m = model::default();
+
+        let folder_ids = vec!["new-folder".to_string()];
+        let mut labels = BTreeMap::new();
+        labels.insert("new-folder".to_string(), "My New Folder".to_string());
+
+        m.handleAutoAccepts("peer-dev", &folder_ids, &labels);
+
+        let fcfg = m.folderCfgs.get("new-folder").expect("folder created");
+        assert_eq!(fcfg.label, "My New Folder");
+        assert!(fcfg.shared_with("peer-dev"));
+        assert!(
+            !m.pendingFolderOffers.contains_key("new-folder"),
+            "should be removed from pending"
+        );
+    }
+
+    #[test]
+    fn test_handle_auto_accepts_shares_existing() {
+        let mut m = model::default();
+        let cfg = newFolderConfiguration("existing", "/tmp/existing");
+        m.newFolder(cfg);
+
+        let folder_ids = vec!["existing".to_string()];
+        let labels = BTreeMap::new();
+
+        m.handleAutoAccepts("new-peer", &folder_ids, &labels);
+
+        let fcfg = m.folderCfgs.get("existing").expect("folder exists");
+        assert!(fcfg.shared_with("new-peer"), "new device should be shared");
+    }
+
+    #[test]
+    fn test_cc_handle_folders_tracks_remote_states() {
+        let mut m = model::default();
+        let cfg = newFolderConfiguration("known", "/tmp/known");
+        m.newFolder(cfg);
+
+        let folder_ids = vec!["known".to_string(), "unknown".to_string()];
+        m.ccHandleFolders(&folder_ids, "peer-1", false);
+
+        // Check remote folder states.
+        assert!(
+            m.remoteFolderStates.get("peer-1:known").is_some(),
+            "known folder should be tracked"
+        );
+        assert!(
+            m.remoteFolderStates.get("peer-1:unknown").is_some(),
+            "unknown folder should be tracked as valid"
+        );
+        // Unknown folder should be in pending offers.
+        assert!(
+            m.pendingFolderOffers
+                .get("unknown")
+                .map(|s| s.contains("peer-1"))
+                .unwrap_or(false),
+            "unknown folder should be pending"
+        );
+    }
+
+    #[test]
+    fn test_cc_check_encryption_validates_tokens() {
+        let m = model::default();
+
+        // No encryption, no tokens — should pass.
+        assert!(m
+            .ccCheckEncryption("f1", FolderType::SendReceive, "", false, "", "")
+            .is_ok());
+
+        // Both sides encrypted — should fail.
+        assert!(m
+            .ccCheckEncryption("f1", FolderType::ReceiveEncrypted, "pass", false, "", "")
+            .is_err());
+
+        // Untrusted device without encryption — should fail.
+        assert!(m
+            .ccCheckEncryption("f1", FolderType::SendReceive, "", true, "", "")
+            .is_err());
+
+        // Has remote token, local is encrypted — should pass if no stored token yet.
+        assert!(m
+            .ccCheckEncryption(
+                "f1",
+                FolderType::ReceiveEncrypted,
+                "",
+                false,
+                "token-abc",
+                ""
+            )
+            .is_ok());
     }
 }

@@ -846,7 +846,7 @@ impl folder {
         let mut cursor: Option<String> = None;
         let folder_root = PathBuf::from(&self.config.path);
         loop {
-            let (needed_batch, next_cursor, batch_total_blocks, batch_reused_blocks) = {
+            let (mut needed_batch, next_cursor, batch_total_blocks, batch_reused_blocks) = {
                 let db = self.db.read().map_err(|_| "db lock poisoned".to_string())?;
                 let page = db
                     .all_needed_global_files_ordered_page(
@@ -935,6 +935,37 @@ impl folder {
             reused_same_path_blocks = reused_same_path_blocks.saturating_add(batch_reused_blocks);
 
             let mut local_updates = Vec::with_capacity(needed_batch.len());
+
+            // E2: Go processes deletes before upserts, and within deletes:
+            //   (1) file/symlink deletes first
+            //   (2) dir deletes in reverse depth-first (deepest path first)
+            //   (3) non-delete upserts last
+            // This prevents orphan-dir issues and ensures parent dirs are
+            // deleted only after all their children.
+            needed_batch.sort_by(|a, b| {
+                let a_is_del = a.deleted;
+                let b_is_del = b.deleted;
+                if a_is_del != b_is_del {
+                    // Deletes before non-deletes
+                    return b_is_del.cmp(&a_is_del);
+                }
+                if a_is_del && b_is_del {
+                    let a_is_dir = a.file_type == db::FileInfoType::Directory;
+                    let b_is_dir = b.file_type == db::FileInfoType::Directory;
+                    if a_is_dir != b_is_dir {
+                        // File deletes before dir deletes
+                        return a_is_dir.cmp(&b_is_dir);
+                    }
+                    if a_is_dir && b_is_dir {
+                        // Dir deletes: deepest first (reverse by path depth)
+                        let a_depth = a.path.matches('/').count();
+                        let b_depth = b.path.matches('/').count();
+                        return b_depth.cmp(&a_depth);
+                    }
+                }
+                std::cmp::Ordering::Equal
+            });
+
             for global in &needed_batch {
                 match apply_remote_file_to_disk(&folder_root, global) {
                     Ok(result) => {
@@ -2394,9 +2425,8 @@ impl sendReceiveFolder {
                 if !meta.is_dir() {
                     return Err(errUnexpectedDirOnFileDel.to_string());
                 }
-                // 9.6: Enumerate children.  Remove syncthing temp files;
-                // skip other internal entries (.stfolder, .stignore).  If
-                // any real user files remain the directory is not empty.
+                // E4: Go checks each child against ignore patterns, scan queue,
+                // and DB state before allowing directory removal.
                 let entries =
                     fs::read_dir(&abs).map_err(|e| format!("read dir {}: {e}", abs.display()))?;
                 let mut has_user_files = false;
@@ -2418,7 +2448,32 @@ impl sendReceiveFolder {
                     {
                         continue;
                     }
+                    // E4: Check if child is in ignore patterns
+                    let child_rel = if path.is_empty() {
+                        name_str.to_string()
+                    } else {
+                        format!("{}/{}", path, name_str)
+                    };
+                    if let Ok(db) = self.folder.db.read() {
+                        // Check if the child is known in the DB (globally or locally).
+                        // If it's an unknown file on disk that isn't in any ignore
+                        // pattern, Go returns errDirHasIgnored or errDirNotEmpty.
+                        if let Ok(Some(local)) =
+                            db.get_device_file(&self.folder.config.id, LOCAL_DEVICE_ID, &child_rel)
+                        {
+                            // Known file — if it's not deleted in DB, it's a real file
+                            if !local.deleted {
+                                has_user_files = true;
+                                break;
+                            }
+                            continue;
+                        }
+                    }
+                    // E4: Unknown child not in DB — treat as potential ignored or
+                    // needing-scan file. Go would check ignore patterns here; we
+                    // conservatively reject to prevent data loss.
                     has_user_files = true;
+                    break;
                 }
                 if has_user_files {
                     return Err(errDirNotEmpty.to_string());

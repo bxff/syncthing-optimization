@@ -652,6 +652,7 @@ fn meta(
         modified_ns,
         size: 0,
         block_hashes: block_hashes.into_iter().map(str::to_string).collect(),
+        version_counters: Vec::new(),
     }
 }
 

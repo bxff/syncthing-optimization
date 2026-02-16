@@ -439,6 +439,7 @@ fn wire_to_bep(message: &WireMessage) -> Result<BepMessage, String> {
             folder: update.Folder.clone(),
             files: update.Files.iter().map(fileinfo_to_index_entry).collect(),
             prev_sequence: update.PrevSequence,
+            last_sequence: update.LastSequence,
         }),
         // 8.5: Request preserves from_temporary and block_no
         // B2: id passed through as i32 — no clamping
@@ -470,15 +471,17 @@ fn wire_to_bep(message: &WireMessage) -> Result<BepMessage, String> {
                     version: u
                         .Version
                         .as_ref()
-                        .map(|v| v.Counters.iter().map(|c| (c.Id, c.Value)).collect())
+                        .map(|v| {
+                            v.Counters
+                                .iter()
+                                .map(|c| (c.Id as u64, c.Value as u64))
+                                .collect()
+                        })
                         .unwrap_or_default(),
                     block_indexes: u.BlockIndexes.clone(),
                     block_size: u.BlockSize,
-                    update_type: if u.UpdateType == FileDownloadProgressUpdateTypeForget {
-                        "forget".to_string()
-                    } else {
-                        "append".to_string()
-                    },
+                    // A9: Raw i32 enum value
+                    update_type: u.UpdateType,
                 })
                 .collect(),
         }),
@@ -542,22 +545,19 @@ fn bep_to_wire(message: &BepMessage) -> Result<WireMessage, String> {
         } => Ok(WireMessage::Index(Index {
             Folder: folder.clone(),
             Files: files.iter().map(index_entry_to_fileinfo).collect(),
-            // B1: preserve wire last_sequence, fall back to computed
-            LastSequence: if *last_sequence != 0 {
-                *last_sequence
-            } else {
-                files.iter().map(|f| f.sequence as i64).max().unwrap_or(0)
-            },
+            // A2: preserve wire last_sequence verbatim
+            LastSequence: *last_sequence,
         })),
         // 8.6: IndexUpdate preserves prev_sequence
         BepMessage::IndexUpdate {
             folder,
             files,
             prev_sequence,
+            last_sequence,
         } => Ok(WireMessage::IndexUpdate(IndexUpdate {
             Folder: folder.clone(),
             Files: files.iter().map(index_entry_to_fileinfo).collect(),
-            LastSequence: files.iter().map(|f| f.sequence as i64).max().unwrap_or(0),
+            LastSequence: *last_sequence,
             PrevSequence: *prev_sequence,
         })),
         // 8.5: Request preserves from_temporary and block_no
@@ -601,19 +601,16 @@ fn bep_to_wire(message: &BepMessage) -> Result<WireMessage, String> {
                                     .version
                                     .iter()
                                     .map(|(id, value)| Counter {
-                                        Id: *id,
-                                        Value: *value,
+                                        Id: *id as i64,
+                                        Value: *value as i64,
                                     })
                                     .collect(),
                             })
                         },
                         BlockIndexes: u.block_indexes.clone(),
                         BlockSize: u.block_size,
-                        UpdateType: if u.update_type.eq_ignore_ascii_case("forget") {
-                            FileDownloadProgressUpdateTypeForget
-                        } else {
-                            FileDownloadProgressUpdateTypeAppend
-                        },
+                        // A9: Raw i32 enum value
+                        UpdateType: u.update_type,
                     })
                     .collect(),
             }))
@@ -629,10 +626,21 @@ fn bep_to_wire(message: &BepMessage) -> Result<WireMessage, String> {
 fn fileinfo_to_index_entry(file: &FileInfo) -> IndexEntry {
     IndexEntry {
         path: file.Name.clone(),
-        sequence: file.Sequence.max(0) as u64,
+        // A6: Keep as i64 — no clamping
+        sequence: file.Sequence,
         deleted: file.Deleted,
-        size: file.Size.max(0) as u64,
-        block_hashes: file.Blocks.iter().map(|b| encode_hex(&b.Hash)).collect(),
+        // A6: Keep as i64 — no clamping
+        size: file.Size,
+        // A3: Full block tuples
+        blocks: file
+            .Blocks
+            .iter()
+            .map(|b| crate::bep::BlockEntry {
+                hash: encode_hex(&b.Hash),
+                offset: b.Offset,
+                size: b.Size,
+            })
+            .collect(),
         file_type: file.Type,
         permissions: file.Permissions as u32,
         modified_s: file.ModifiedS,
@@ -641,29 +649,37 @@ fn fileinfo_to_index_entry(file: &FileInfo) -> IndexEntry {
         no_permissions: file.NoPermissions,
         invalid: file.Invalid,
         local_flags: file.LocalFlags as u32,
-        symlink_target: file.SymlinkTarget.clone(),
+        // A8: symlink as raw bytes
+        symlink_target: file.SymlinkTarget.as_bytes().to_vec(),
         block_size: file.BlockSize,
-        // BEP-1: Parse version vector from FileInfo
+        // A7: u64 version counters
         version_counters: file
             .Version
             .Counters
             .iter()
-            .map(|c| (c.Id, c.Value))
+            .map(|c| (c.Id as u64, c.Value as u64))
             .collect(),
+        // A4: Preserve wire fields
+        blocks_hash: file.BlocksHash.clone(),
+        previous_blocks_hash: file.PreviousBlocksHash.clone(),
+        encrypted: if file.Encrypted { vec![1] } else { Vec::new() },
     }
 }
 
 fn index_entry_to_fileinfo(entry: &IndexEntry) -> FileInfo {
     FileInfo {
         Name: entry.path.clone(),
-        Sequence: entry.sequence as i64,
+        Sequence: entry.sequence,
         Deleted: entry.deleted,
-        Size: entry.size as i64,
+        Size: entry.size,
+        // A3: reconstruct Blocks from full tuples
         Blocks: entry
-            .block_hashes
+            .blocks
             .iter()
-            .map(|h| BlockInfo {
-                Hash: decode_hex_or_utf8(h),
+            .map(|b| BlockInfo {
+                Hash: decode_hex_or_utf8(&b.hash),
+                Offset: b.offset,
+                Size: b.size,
                 ..Default::default()
             })
             .collect(),

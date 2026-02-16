@@ -66,6 +66,8 @@ pub(crate) struct FileMetadata {
     pub(crate) modified_ns: u64,
     pub(crate) size: u64,
     pub(crate) block_hashes: Vec<String>,
+    /// D1: Version vector counters for conflict resolution (device_short_id, counter_value).
+    pub(crate) version_counters: Vec<(u64, u64)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,6 +80,8 @@ struct StoredFileMetadata {
     modified_ns: u64,
     size: u64,
     block_hashes: StoredBlockHashes,
+    /// D1: Version vector counters persisted for conflict resolution.
+    version_counters: Vec<(u64, u64)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1360,6 +1364,7 @@ fn decode_op(payload: &[u8]) -> Option<JournalOp> {
                 modified_ns,
                 size,
                 block_hashes,
+                version_counters: Vec::new(),
             }))
         }
         "U" if parts.len() == 12 => {
@@ -1402,6 +1407,7 @@ fn decode_op(payload: &[u8]) -> Option<JournalOp> {
                 modified_ns,
                 size,
                 block_hashes,
+                version_counters: Vec::new(),
             }))
         }
         "D" if parts.len() == 4 => Some(JournalOp::Delete {
@@ -1760,6 +1766,7 @@ fn stored_from_file(file: &FileMetadata) -> StoredFileMetadata {
         modified_ns: file.modified_ns,
         size,
         block_hashes: stored_block_hashes_from_runtime_hashes(&file.block_hashes),
+        version_counters: file.version_counters.clone(),
     }
 }
 
@@ -1787,6 +1794,7 @@ fn file_from_parts(
         modified_ns: stored.modified_ns,
         size: stored.size,
         block_hashes: runtime_hashes_from_stored_block_hashes(&stored.block_hashes),
+        version_counters: stored.version_counters.clone(),
     })
 }
 
@@ -1853,6 +1861,7 @@ mod tests {
             modified_ns: sequence,
             size: sequence,
             block_hashes: vec![format!("h-{sequence:08}")],
+            version_counters: Vec::new(),
         }
     }
 
@@ -2213,6 +2222,7 @@ mod tests {
                 modified_ns: 1,
                 size: 1,
                 block_hashes: vec!["h-1".to_string()],
+                version_counters: Vec::new(),
             })
             .expect("upsert");
 
@@ -2619,6 +2629,7 @@ mod tests {
                 modified_ns: 1,
                 size: 1,
                 block_hashes: vec![],
+                version_counters: Vec::new(),
             })
             .expect("upsert");
 

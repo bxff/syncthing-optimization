@@ -42,6 +42,8 @@ pub(crate) enum BepMessage {
         files: Vec<IndexEntry>,
         // 8.6: preserve prev_sequence from wire
         prev_sequence: i64,
+        // A1: preserve last_sequence from wire (Go uses this end-to-end)
+        last_sequence: i64,
     },
     Request {
         // B2: i32 to preserve negative IDs from Go peers
@@ -103,11 +105,13 @@ pub(crate) struct ClusterConfigDevice {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub(crate) struct IndexEntry {
     pub(crate) path: String,
-    pub(crate) sequence: u64,
+    // A6: signed sequence from wire — no .max(0) clamping
+    pub(crate) sequence: i64,
     pub(crate) deleted: bool,
-    pub(crate) size: u64,
-    // 8.4: hex-encoded block hashes (lossless round-trip for binary hashes)
-    pub(crate) block_hashes: Vec<String>,
+    // A6: signed size from wire — no .max(0) clamping
+    pub(crate) size: i64,
+    // A3: Full block tuples (hash, offset, size) — not hash-only
+    pub(crate) blocks: Vec<BlockEntry>,
     // 8.3: additional fields from pb::FileInfo
     pub(crate) file_type: i32,
     pub(crate) permissions: u32,
@@ -117,21 +121,38 @@ pub(crate) struct IndexEntry {
     pub(crate) no_permissions: bool,
     pub(crate) invalid: bool,
     pub(crate) local_flags: u32,
-    // 11.2: Symlink target — hex-encode for lossless round-trip.
-    pub(crate) symlink_target: String,
+    // A8: Symlink target as raw bytes (Vec<u8>) for wire fidelity
+    #[serde(default)]
+    pub(crate) symlink_target: Vec<u8>,
     pub(crate) block_size: i32,
-    // BEP-1: Full version vector — list of (id, value) counters
-    pub(crate) version_counters: Vec<(i64, i64)>,
+    // A7: Full version vector — u64 counters end-to-end
+    pub(crate) version_counters: Vec<(u64, u64)>,
+    // A4: Additional wire fields preserved from pb::FileInfo
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) blocks_hash: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) previous_blocks_hash: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) encrypted: Vec<u8>,
+}
+
+// A3: Block entry with full (hash, offset, size) tuple from wire
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub(crate) struct BlockEntry {
+    pub(crate) hash: String, // hex-encoded for lossless round-trip
+    pub(crate) offset: i64,
+    pub(crate) size: i32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DownloadProgressEntry {
     pub(crate) name: String,
-    // BEP-5: Full version vector, not collapsed max
-    pub(crate) version: Vec<(i64, i64)>,
+    // A7: u64 version counters end-to-end
+    pub(crate) version: Vec<(u64, u64)>,
     pub(crate) block_indexes: Vec<i32>,
     pub(crate) block_size: i32,
-    pub(crate) update_type: String,
+    // A9: Raw enum value from wire, not string-collapsed
+    pub(crate) update_type: i32,
 }
 
 fn message_type_of(message: &BepMessage) -> Result<i32, String> {
@@ -280,9 +301,15 @@ pub(crate) fn decode_frame(frame: &[u8]) -> Result<BepMessage, String> {
     decode_payload(header.r#type, &decoded_payload)
 }
 
+// A10: Old Syncthing v0.x magic number for legacy detection (Go: Version13HelloMagic)
+const HELLO_MAGIC_OLD: u32 = 0x9F79BC40;
+
 fn is_hello_packet(frame: &[u8]) -> bool {
-    frame.len() >= 6
-        && u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]) == HelloMessageMagic
+    if frame.len() < 6 {
+        return false;
+    }
+    let magic = u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]);
+    magic == HelloMessageMagic || magic == HELLO_MAGIC_OLD
 }
 
 fn encode_hello_packet(message: &BepMessage) -> Result<Vec<u8>, String> {
@@ -326,8 +353,12 @@ fn decode_hello_packet(packet: &[u8]) -> Result<BepMessage, String> {
         return Err("hello packet too short".to_string());
     }
     let magic = u32::from_be_bytes([packet[0], packet[1], packet[2], packet[3]]);
+    // A10: Classify magic — old protocol vs unknown
+    if magic == HELLO_MAGIC_OLD {
+        return Err("old protocol version (v0.x)".to_string());
+    }
     if magic != HelloMessageMagic {
-        return Err("unknown hello magic".to_string());
+        return Err("not a BEP connection".to_string());
     }
     let size = u16::from_be_bytes([packet[4], packet[5]]) as usize;
     if size > MAX_HELLO_BYTES {
@@ -387,31 +418,26 @@ fn encode_payload(message: &BepMessage) -> Result<Vec<u8>, String> {
             files,
             last_sequence,
         } => {
-            // B1: use wire-preserved last_sequence, fall back to computed if 0
-            let seq = if *last_sequence != 0 {
-                *last_sequence
-            } else {
-                files.iter().map(|f| f.sequence as i64).max().unwrap_or(0)
-            };
+            // A2: Use wire-preserved last_sequence verbatim — no fallback recompute
             let wire = pb::Index {
                 folder: folder.clone(),
                 files: files.iter().map(index_entry_to_wire).collect(),
-                last_sequence: seq,
+                last_sequence: *last_sequence,
             };
             proto_encode(&wire, "index")
         }
         // 8.6: IndexUpdate carries prev_sequence from message
+        // A1: IndexUpdate carries both last_sequence and prev_sequence
         BepMessage::IndexUpdate {
             folder,
             files,
             prev_sequence,
+            last_sequence,
         } => {
-            // B1: use wire-preserved last_sequence from files, fall back to computed
-            let last_sequence = files.iter().map(|f| f.sequence as i64).max().unwrap_or(0);
             let wire = pb::IndexUpdate {
                 folder: folder.clone(),
                 files: files.iter().map(index_entry_to_wire).collect(),
-                last_sequence,
+                last_sequence: *last_sequence,
                 prev_sequence: *prev_sequence,
             };
             proto_encode(&wire, "index update")
@@ -465,13 +491,10 @@ fn encode_payload(message: &BepMessage) -> Result<Vec<u8>, String> {
                 updates: updates
                     .iter()
                     .map(|update| pb::FileDownloadProgressUpdate {
-                        update_type: if update.update_type.eq_ignore_ascii_case("forget") {
-                            FileDownloadProgressUpdateType_FILE_DOWNLOAD_PROGRESS_UPDATE_TYPE_FORGET
-                        } else {
-                            FileDownloadProgressUpdateType_FILE_DOWNLOAD_PROGRESS_UPDATE_TYPE_APPEND
-                        },
+                        // A9: Raw enum value preserved from wire
+                        update_type: update.update_type,
                         name: update.name.clone(),
-                        // BEP-5: Build version vector from counter pairs
+                        // A7: u64 version vector
                         version: if update.version.is_empty() {
                             None
                         } else {
@@ -480,8 +503,8 @@ fn encode_payload(message: &BepMessage) -> Result<Vec<u8>, String> {
                                     .version
                                     .iter()
                                     .map(|(id, value)| pb::Counter {
-                                        id: *id as u64,
-                                        value: *value as u64,
+                                        id: *id,
+                                        value: *value,
                                     })
                                     .collect(),
                             })
@@ -546,12 +569,14 @@ fn decode_payload(message_type: i32, payload: &[u8]) -> Result<BepMessage, Strin
             })
         }
         // 8.6: IndexUpdate preserves prev_sequence
+        // A1: IndexUpdate preserves both last_sequence and prev_sequence
         MessageType_MESSAGE_TYPE_INDEX_UPDATE => {
             let msg: pb::IndexUpdate = proto_decode(payload, "index update")?;
             Ok(BepMessage::IndexUpdate {
                 folder: msg.folder,
                 files: msg.files.iter().map(index_entry_from_wire).collect(),
                 prev_sequence: msg.prev_sequence,
+                last_sequence: msg.last_sequence,
             })
         }
         // 8.5: Request preserves from_temporary and block_no
@@ -589,26 +614,16 @@ fn decode_payload(message_type: i32, payload: &[u8]) -> Result<BepMessage, Strin
                     .into_iter()
                     .map(|u| DownloadProgressEntry {
                         name: u.name,
-                        // BEP-5: Preserve full version vector
+                        // A7: u64 version vector preserved from wire
                         version: u
                             .version
                             .as_ref()
-                            .map(|v| {
-                                v.counters
-                                    .iter()
-                                    .map(|c| (c.id as i64, c.value as i64))
-                                    .collect()
-                            })
+                            .map(|v| v.counters.iter().map(|c| (c.id, c.value)).collect())
                             .unwrap_or_default(),
                         block_indexes: u.block_indexes,
                         block_size: u.block_size,
-                        update_type: if u.update_type
-                            == FileDownloadProgressUpdateType_FILE_DOWNLOAD_PROGRESS_UPDATE_TYPE_FORGET
-                        {
-                            "forget".to_string()
-                        } else {
-                            "append".to_string()
-                        },
+                        // A9: Raw enum value preserved
+                        update_type: u.update_type,
                     })
                     .collect(),
             })
@@ -630,11 +645,12 @@ fn index_entry_to_wire(entry: &IndexEntry) -> pb::FileInfo {
     pb::FileInfo {
         name: entry.path.clone(),
         r#type: entry.file_type,
-        size: entry.size as i64,
+        // A6: signed size preserved
+        size: entry.size,
         permissions: entry.permissions,
         modified_s: entry.modified_s,
         modified_by: entry.modified_by,
-        // BEP-1: Build full version vector from counters
+        // A7: u64 version vector
         version: if entry.version_counters.is_empty() {
             None
         } else {
@@ -643,28 +659,30 @@ fn index_entry_to_wire(entry: &IndexEntry) -> pb::FileInfo {
                     .version_counters
                     .iter()
                     .map(|(id, value)| pb::Counter {
-                        id: *id as u64,
-                        value: *value as u64,
+                        id: *id,
+                        value: *value,
                     })
                     .collect(),
             })
         },
-        sequence: entry.sequence as i64,
-        // 11.1: Block hashes — hex-decode for lossless wire round-trip.
+        // A6: signed sequence preserved
+        sequence: entry.sequence,
+        // A3: Full block tuples (hash, offset, size)
         blocks: entry
-            .block_hashes
+            .blocks
             .iter()
-            .map(|hash| pb::BlockInfo {
-                hash: decode_hex_string(hash),
-                offset: 0,
-                size: 0,
+            .map(|b| pb::BlockInfo {
+                hash: decode_hex_string(&b.hash),
+                offset: b.offset,
+                size: b.size,
             })
             .collect(),
-        // 11.2: Symlink target — hex-decode for lossless wire round-trip.
-        symlink_target: decode_hex_string(&entry.symlink_target),
-        blocks_hash: Vec::new(),
-        previous_blocks_hash: Vec::new(),
-        encrypted: Vec::new(),
+        // A8: Symlink target as raw bytes
+        symlink_target: entry.symlink_target.clone(),
+        // A4: Preserved wire fields
+        blocks_hash: entry.blocks_hash.clone(),
+        previous_blocks_hash: entry.previous_blocks_hash.clone(),
+        encrypted: entry.encrypted.clone(),
         modified_ns: entry.modified_ns,
         block_size: entry.block_size,
         platform: None,
@@ -679,18 +697,24 @@ fn index_entry_to_wire(entry: &IndexEntry) -> pb::FileInfo {
     }
 }
 
-// 8.3/8.4: index_entry_from_wire preserves all fields; uses hex encoding for block hashes
+// 8.3/8.4: index_entry_from_wire preserves all fields
 fn index_entry_from_wire(file: &pb::FileInfo) -> IndexEntry {
     IndexEntry {
         path: file.name.clone(),
-        sequence: file.sequence.max(0) as u64,
+        // A6: Preserve signed sequence from wire — no .max(0) clamping
+        sequence: file.sequence,
         deleted: file.deleted,
-        size: file.size.max(0) as u64,
-        // 11.1: Block hashes — hex-encode for lossless round-trip.
-        block_hashes: file
+        // A6: Preserve signed size from wire — no .max(0) clamping
+        size: file.size,
+        // A3: Full block tuples (hash, offset, size)
+        blocks: file
             .blocks
             .iter()
-            .map(|b| encode_hex_string(&b.hash))
+            .map(|b| BlockEntry {
+                hash: encode_hex_string(&b.hash),
+                offset: b.offset,
+                size: b.size,
+            })
             .collect(),
         file_type: file.r#type,
         permissions: file.permissions,
@@ -699,21 +723,21 @@ fn index_entry_from_wire(file: &pb::FileInfo) -> IndexEntry {
         modified_by: file.modified_by,
         no_permissions: file.no_permissions,
         invalid: file.invalid,
-        local_flags: file.local_flags,
-        // 11.2: Symlink target — hex-encode for lossless round-trip.
-        symlink_target: encode_hex_string(&file.symlink_target),
+        // A5: Ignore incoming wire local_flags — Go treats them as untrusted
+        local_flags: 0,
+        // A8: Symlink target preserved as raw bytes
+        symlink_target: file.symlink_target.clone(),
         block_size: file.block_size,
-        // BEP-1: Parse full version vector from wire
+        // A7: u64 version vector from wire
         version_counters: file
             .version
             .as_ref()
-            .map(|v| {
-                v.counters
-                    .iter()
-                    .map(|c| (c.id as i64, c.value as i64))
-                    .collect()
-            })
+            .map(|v| v.counters.iter().map(|c| (c.id, c.value)).collect())
             .unwrap_or_default(),
+        // A4: Preserved wire fields
+        blocks_hash: file.blocks_hash.clone(),
+        previous_blocks_hash: file.previous_blocks_hash.clone(),
+        encrypted: file.encrypted.clone(),
     }
 }
 
@@ -799,7 +823,11 @@ pub(crate) fn default_exchange() -> Vec<BepMessage> {
                 sequence: 1,
                 deleted: false,
                 size: 100,
-                block_hashes: vec!["aa".to_string()],
+                blocks: vec![BlockEntry {
+                    hash: "aa".to_string(),
+                    offset: 0,
+                    size: 0,
+                }],
                 ..IndexEntry::default()
             }],
             last_sequence: 0,
@@ -811,10 +839,15 @@ pub(crate) fn default_exchange() -> Vec<BepMessage> {
                 sequence: 2,
                 deleted: false,
                 size: 110,
-                block_hashes: vec!["bb".to_string()],
+                blocks: vec![BlockEntry {
+                    hash: "bb".to_string(),
+                    offset: 0,
+                    size: 0,
+                }],
                 ..IndexEntry::default()
             }],
             prev_sequence: 0,
+            last_sequence: 0,
         },
         BepMessage::Request {
             id: 1,
@@ -839,7 +872,8 @@ pub(crate) fn default_exchange() -> Vec<BepMessage> {
                 version: vec![(0, 2)],
                 block_indexes: vec![0],
                 block_size: 131_072,
-                update_type: "append".to_string(),
+                // A9: 0 = FILE_DOWNLOAD_PROGRESS_UPDATE_TYPE_APPEND
+                update_type: 0,
             }],
         },
         BepMessage::Ping {
@@ -884,10 +918,15 @@ mod tests {
                 sequence: 42,
                 deleted: false,
                 size: 900,
-                block_hashes: vec!["ab12".to_string()],
+                blocks: vec![BlockEntry {
+                    hash: "ab12".to_string(),
+                    offset: 0,
+                    size: 0,
+                }],
                 ..IndexEntry::default()
             }],
             prev_sequence: 0,
+            last_sequence: 0,
         };
 
         let frame = encode_frame(&msg).expect("encode");
@@ -950,10 +989,22 @@ mod tests {
                 sequence: 7,
                 deleted: false,
                 size: 1024 * 16,
-                block_hashes: vec![big.clone(), big],
+                blocks: vec![
+                    BlockEntry {
+                        hash: big.clone(),
+                        offset: 0,
+                        size: 0,
+                    },
+                    BlockEntry {
+                        hash: big,
+                        offset: 0,
+                        size: 0,
+                    },
+                ],
                 ..IndexEntry::default()
             }],
             prev_sequence: 0,
+            last_sequence: 0,
         };
 
         let frame = encode_frame(&message).expect("encode");

@@ -4165,7 +4165,8 @@ fn parse_event_type_filter_with_default(
             "devicepaused",
             "deviceresumed",
             "configsaved",
-            "clusterconfignreceived",
+            // B7: Fixed typo (was "clusterconfignreceived") and removed disk-only events
+            "clusterconfigreceived",
             "foldersummary",
             "foldercompletion",
             "foldererrors",
@@ -4180,8 +4181,7 @@ fn parse_event_type_filter_with_default(
             "itemstarted",
             "itemfinished",
             "statechanged",
-            "localchangedetected",
-            "remotechangedetected",
+            // B7: localchangedetected and remotechangedetected belong in DiskEventMask only
             "downloadprogress",
         ]
         .into_iter()
@@ -8514,5 +8514,52 @@ mod tests {
         assert_eq!(version.response_kind, "object");
         assert!(version.present_keys.contains(&"version".to_string()));
         assert!(version.present_keys.contains(&"longVersion".to_string()));
+    }
+
+    // ===== B7: Event mask regression tests =====
+
+    #[test]
+    fn default_event_mask_has_correct_entries() {
+        // B7: Verify the typo fix and disk-only event exclusion
+        let mask = super::parse_event_type_filter_with_default(None, false);
+        let events = mask.expect("default mask should be Some");
+
+        // Typo fix: must contain the correct spelling
+        assert!(
+            events.contains("clusterconfigreceived"),
+            "should contain 'clusterconfigreceived' (not 'clusterconfignreceived')"
+        );
+        assert!(
+            !events.contains("clusterconfignreceived"),
+            "should NOT contain old typo 'clusterconfignreceived'"
+        );
+
+        // Disk-only events must NOT be in DefaultEventMask
+        assert!(
+            !events.contains("localchangedetected"),
+            "localchangedetected is disk-only, not in default mask"
+        );
+        assert!(
+            !events.contains("remotechangedetected"),
+            "remotechangedetected is disk-only, not in default mask"
+        );
+
+        // Core events must be present
+        assert!(events.contains("startupcomplete"));
+        assert!(events.contains("deviceconnected"));
+        assert!(events.contains("foldersummary"));
+        assert!(events.contains("downloadprogress"));
+    }
+
+    #[test]
+    fn disk_event_mask_has_change_events() {
+        // B7: Verify disk-only mask contains the change-detection events
+        let mask = super::parse_event_type_filter_with_default(None, true);
+        let events = mask.expect("disk mask should be Some");
+
+        assert!(events.contains("localchangedetected"));
+        assert!(events.contains("remotechangedetected"));
+        // disk mask should NOT contain general events
+        assert!(!events.contains("startupcomplete"));
     }
 }

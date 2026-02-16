@@ -126,14 +126,36 @@ impl Default for VersioningConfiguration {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Size {
-    pub(crate) bytes: i64,
+    /// B12: Numeric value (e.g. 1.0 for "1 %", 500.0 for "500 MB")
+    pub(crate) value: f64,
+    /// B12: Unit string matching Go's Size type: "%", "kB", "MB", "GB", "TB", or "" for bytes
+    pub(crate) unit: String,
 }
 
 impl Size {
-    pub(crate) fn base_value(self) -> i64 {
-        self.bytes.max(0)
+    /// Compute the byte value from value+unit. For "%" units, returns 0
+    /// (percentage check must be done by the caller with the total).
+    pub(crate) fn base_value(&self) -> i64 {
+        match self.unit.as_str() {
+            "%" => 0, // percentage-based; handled by caller
+            "kB" => (self.value * 1_000.0) as i64,
+            "MB" => (self.value * 1_000_000.0) as i64,
+            "GB" => (self.value * 1_000_000_000.0) as i64,
+            "TB" => (self.value * 1_000_000_000_000.0) as i64,
+            _ => self.value as i64, // raw bytes
+        }
+    }
+
+    /// Returns true if this is a percentage-based size.
+    pub(crate) fn is_percentage(&self) -> bool {
+        self.unit == "%"
+    }
+
+    /// For percentage sizes, returns the percentage value (e.g. 1.0 for 1%).
+    pub(crate) fn percentage(&self) -> f64 {
+        self.value
     }
 }
 
@@ -274,7 +296,10 @@ impl Default for FolderConfiguration {
             fs_watcher_timeout_s: 0.0,
             ignore_perms: false,
             auto_normalize: true,
-            min_disk_free: Size { bytes: 0 }, // C1: Go defaults to 1%; 0 disables check (parity: percentage handled at check site)
+            min_disk_free: Size {
+                value: 1.0,
+                unit: "%".to_string(),
+            }, // B12: Go defaults to 1%
             copiers: 0,
             puller_max_pending_kib: 0,
             hashers: 0,
@@ -586,18 +611,39 @@ impl FolderConfiguration {
         required: u64,
         available: u64,
     ) -> Result<(), String> {
-        let min = self.min_disk_free.base_value().max(0) as u64;
-        if min == 0 {
-            return Ok(());
-        }
-        if available < required.saturating_add(min) {
-            return Err(format!(
-                "insufficient space in folder {}: required={} min_free={} available={}",
-                self.description(),
-                required,
-                min,
-                available
-            ));
+        // B12: Handle percentage-based and absolute size checking
+        if self.min_disk_free.is_percentage() {
+            let pct = self.min_disk_free.percentage();
+            if pct <= 0.0 {
+                return Ok(()); // disabled
+            }
+            // For percentage, "available" is current free space; we need total space
+            // but we only have available here, so we check: available >= pct% of (available + required)
+            let total_approx = available.saturating_add(required);
+            let min_free = (total_approx as f64 * pct / 100.0) as u64;
+            if available < required.saturating_add(min_free) {
+                return Err(format!(
+                    "insufficient space in folder {}: required={} min_free={}% available={}",
+                    self.description(),
+                    required,
+                    pct,
+                    available
+                ));
+            }
+        } else {
+            let min = self.min_disk_free.base_value().max(0) as u64;
+            if min == 0 {
+                return Ok(());
+            }
+            if available < required.saturating_add(min) {
+                return Err(format!(
+                    "insufficient space in folder {}: required={} min_free={} available={}",
+                    self.description(),
+                    required,
+                    min,
+                    available
+                ));
+            }
         }
         Ok(())
     }
@@ -910,7 +956,7 @@ mod tests {
             "fs_watcher_timeout_s":0.0,
             "ignore_perms":false,
             "auto_normalize":true,
-            "minDiskFree":{"bytes":100},
+            "minDiskFree":{"value":100.0,"unit":""},
             "copiers":1,
             "puller_max_pending_kib":1,
             "hashers":1,
@@ -1027,5 +1073,103 @@ mod tests {
 
         let method_all: CopyRangeMethod = serde_json::from_str("\"all\"").expect("copy range all");
         assert_eq!(method_all, CopyRangeMethod::AllWithFallback);
+    }
+
+    // ===== B12: Size struct regression tests =====
+
+    #[test]
+    fn size_base_value_units() {
+        // B12: Verify byte conversion for each supported unit
+        let kb = Size {
+            value: 2.0,
+            unit: "kB".to_string(),
+        };
+        assert_eq!(kb.base_value(), 2_000);
+
+        let mb = Size {
+            value: 1.5,
+            unit: "MB".to_string(),
+        };
+        assert_eq!(mb.base_value(), 1_500_000);
+
+        let gb = Size {
+            value: 1.0,
+            unit: "GB".to_string(),
+        };
+        assert_eq!(gb.base_value(), 1_000_000_000);
+
+        let tb = Size {
+            value: 0.5,
+            unit: "TB".to_string(),
+        };
+        assert_eq!(tb.base_value(), 500_000_000_000);
+
+        // Raw bytes (empty unit)
+        let raw = Size {
+            value: 42.0,
+            unit: "".to_string(),
+        };
+        assert_eq!(raw.base_value(), 42);
+
+        // Percentage returns 0 from base_value (caller handles %)
+        let pct = Size {
+            value: 5.0,
+            unit: "%".to_string(),
+        };
+        assert_eq!(pct.base_value(), 0);
+        assert!(pct.is_percentage());
+        assert_eq!(pct.percentage(), 5.0);
+
+        // Non-percentage is not percentage
+        assert!(!kb.is_percentage());
+    }
+
+    #[test]
+    fn size_percentage_space_check() {
+        // B12: Verify percentage-based min_disk_free in check_available_space
+        let mut cfg = FolderConfiguration::default();
+        cfg.id = "pct-test".to_string();
+        cfg.path = "/tmp/pct".to_string();
+        cfg.min_disk_free = Size {
+            value: 10.0,
+            unit: "%".to_string(),
+        };
+
+        // 1000 available, 100 required → total ~1100, 10% = 110
+        // available(1000) >= required(100) + min_free(110) = 210 → ok
+        assert!(cfg.check_available_space(100, 1000).is_ok());
+
+        // 100 available, 50 required → total ~150, 10% = 15
+        // available(100) >= required(50) + min_free(15) = 65 → ok
+        assert!(cfg.check_available_space(50, 100).is_ok());
+
+        // 10 available, 50 required → total ~60, 10% = 6
+        // available(10) >= required(50) + min_free(6) = 56 → fail
+        assert!(cfg.check_available_space(50, 10).is_err());
+
+        // Disabled: 0%
+        cfg.min_disk_free = Size {
+            value: 0.0,
+            unit: "%".to_string(),
+        };
+        assert!(cfg.check_available_space(999, 1).is_ok());
+    }
+
+    #[test]
+    fn size_absolute_space_check() {
+        // B12: Verify absolute byte-based min_disk_free
+        let mut cfg = FolderConfiguration::default();
+        cfg.id = "abs-test".to_string();
+        cfg.path = "/tmp/abs".to_string();
+        cfg.min_disk_free = Size {
+            value: 500.0,
+            unit: "MB".to_string(),
+        };
+
+        // Need 100 bytes, 1GB available, 500MB min free → ok
+        assert!(cfg.check_available_space(100, 1_000_000_000).is_ok());
+
+        // Need 600MB, only 700MB available, 500MB min free → 600M+500M > 700M → fail
+        assert!(cfg.check_available_space(600_000_000, 700_000_000).is_err());
     }
 }

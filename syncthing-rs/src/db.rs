@@ -1540,6 +1540,12 @@ fn file_info_to_store(folder: &str, device: &str, info: &FileInfo) -> StoreFileM
         modified_ns: i64_to_u64(info.modified_ns),
         size: i64_to_u64(info.size),
         block_hashes: info.block_hashes.clone(),
+        // D1: Persist version counters through store layer (i64→u64 cast)
+        version_counters: info
+            .version_counters
+            .iter()
+            .map(|(id, val)| (*id as u64, *val as u64))
+            .collect(),
     }
 }
 
@@ -1555,7 +1561,12 @@ fn store_to_file_info(meta: &StoreFileMetadata) -> FileInfo {
         local_flags: meta.local_flags,
         file_type: store_to_file_type(&meta.file_type),
         block_hashes: meta.block_hashes.clone(),
-        version_counters: Vec::new(),
+        // D1: Restore version counters from store layer (u64→i64 cast)
+        version_counters: meta
+            .version_counters
+            .iter()
+            .map(|(id, val)| (*id as i64, *val as i64))
+            .collect(),
     }
 }
 
@@ -1571,7 +1582,12 @@ fn store_to_file_info_without_blocks(meta: &StoreFileMetadata) -> FileInfo {
         local_flags: meta.local_flags,
         file_type: store_to_file_type(&meta.file_type),
         block_hashes: Vec::new(),
-        version_counters: Vec::new(),
+        // D1: Restore version counters even without blocks
+        version_counters: meta
+            .version_counters
+            .iter()
+            .map(|(id, val)| (*id as i64, *val as i64))
+            .collect(),
     }
 }
 
@@ -1680,13 +1696,8 @@ fn runtime_meta_index_sequences(meta: &RuntimeMetadata) -> BTreeMap<(String, Dev
             out.insert((folder, device), (*seq).max(0));
         }
     }
-    if out.is_empty() {
-        for (k, id) in &meta.index_ids {
-            if let Some((folder, device)) = split_meta_key(k) {
-                out.insert((folder, device), u64_to_i64(*id));
-            }
-        }
-    }
+    // D4: Removed unsafe index_ids fallback — Go never uses index_ids as sequences.
+    // If no explicit sequences exist, return empty map (default 0 per-folder).
     out
 }
 
@@ -2717,5 +2728,79 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    // ===== D1: version_counters round-trip through store layer =====
+
+    #[test]
+    fn version_counters_round_trip_through_store_conversion() {
+        // D1: Verify version_counters survive file_info_to_store → store_to_file_info
+        let info = FileInfo {
+            folder: "default".to_string(),
+            path: "test.txt".to_string(),
+            sequence: 42,
+            modified_ns: 1_000_000,
+            size: 100,
+            deleted: false,
+            ignored: false,
+            local_flags: 0,
+            file_type: FileInfoType::File,
+            block_hashes: vec!["hash1".to_string()],
+            version_counters: vec![(1, 10), (2, 20), (3, 30)],
+        };
+
+        let stored = file_info_to_store("default", "local", &info);
+        // Verify i64 → u64 cast
+        assert_eq!(
+            stored.version_counters,
+            vec![(1u64, 10u64), (2u64, 20u64), (3u64, 30u64)]
+        );
+
+        // Round-trip back with blocks
+        let recovered = store_to_file_info(&stored);
+        assert_eq!(recovered.version_counters, vec![(1, 10), (2, 20), (3, 30)]);
+        assert_eq!(recovered.block_hashes, vec!["hash1"]);
+
+        // Round-trip back without blocks
+        let recovered_no_blocks = store_to_file_info_without_blocks(&stored);
+        assert_eq!(
+            recovered_no_blocks.version_counters,
+            vec![(1, 10), (2, 20), (3, 30)]
+        );
+        assert!(recovered_no_blocks.block_hashes.is_empty());
+
+        // Empty version_counters should also round-trip cleanly
+        let info_empty = FileInfo {
+            version_counters: vec![],
+            ..info
+        };
+        let stored_empty = file_info_to_store("default", "local", &info_empty);
+        assert!(stored_empty.version_counters.is_empty());
+        let recovered_empty = store_to_file_info(&stored_empty);
+        assert!(recovered_empty.version_counters.is_empty());
+    }
+
+    // ===== D4: index_ids fallback no longer leaks as sequences =====
+
+    #[test]
+    fn index_ids_are_not_used_as_sequence_fallback() {
+        // D4: After removing the fallback, metadata with index_ids but no
+        // explicit sequences should return an empty map (not the index_ids).
+        let meta = RuntimeMetadata {
+            index_ids: {
+                let mut m = BTreeMap::new();
+                m.insert("default/device1".to_string(), 99);
+                m
+            },
+            index_sequences: BTreeMap::new(),
+            mtimes: BTreeMap::new(),
+            kv: BTreeMap::new(),
+        };
+        let seqs = runtime_meta_index_sequences(&meta);
+        // D4: Must be empty — we no longer fall back to index_ids
+        assert!(
+            seqs.is_empty(),
+            "index_ids should never be used as sequences"
+        );
     }
 }

@@ -1049,6 +1049,7 @@ impl model {
                 folder,
                 files,
                 prev_sequence,
+                last_sequence,
             } => {
                 self.ensure_remote_index_allowed(device, folder)?;
                 // M3: Log prev_sequence for anomaly diagnostics
@@ -2504,7 +2505,8 @@ pub(crate) fn readOffsetIntoBuf(path: &Path, offset: u64, len: usize) -> Result<
 }
 
 fn fileInfoFromIndexEntry(folder: &str, file: &IndexEntry) -> db::FileInfo {
-    let sequence = clamp_u64_to_i64(file.sequence);
+    // A6: sequence and size are already i64 — no clamping needed
+    let sequence = file.sequence;
     // 12.1: Map wire file_type i32 to db::FileInfoType.
     let file_type = match file.file_type {
         0 => db::FileInfoType::File,
@@ -2522,14 +2524,21 @@ fn fileInfoFromIndexEntry(folder: &str, file: &IndexEntry) -> db::FileInfo {
         path: file.path.clone(),
         sequence,
         modified_ns,
-        size: clamp_u64_to_i64(file.size),
+        // A6: size is already i64
+        size: file.size,
         deleted: file.deleted,
         // M2: Map ignored from file.invalid and local_flags context (Go checks Invalid + LocalFlags)
         ignored: file.invalid || (file.local_flags & FlagLocalIgnored) != 0,
         local_flags: file.local_flags,
         file_type,
-        block_hashes: file.block_hashes.clone(),
-        version_counters: Vec::new(),
+        // A3: Extract hash strings from block tuples for db layer
+        block_hashes: file.blocks.iter().map(|b| b.hash.clone()).collect(),
+        // A7: Pass version counters through (u64→i64 for db layer)
+        version_counters: file
+            .version_counters
+            .iter()
+            .map(|(id, val)| (*id as i64, *val as i64))
+            .collect(),
     }
 }
 
@@ -2797,7 +2806,11 @@ mod tests {
                 sequence: 42,
                 deleted: false,
                 size: 10,
-                block_hashes: vec!["h1".to_string()],
+                blocks: vec![crate::bep::BlockEntry {
+                    hash: "h1".to_string(),
+                    offset: 0,
+                    size: 0,
+                }],
                 modified_s: 1,
                 modified_ns: 500,
                 ..IndexEntry::default()
@@ -2946,7 +2959,11 @@ mod tests {
             sequence: 42,
             deleted: false,
             size: 7,
-            block_hashes: vec!["h1".to_string()],
+            blocks: vec![crate::bep::BlockEntry {
+                hash: "h1".to_string(),
+                offset: 0,
+                size: 0,
+            }],
             modified_s: 5,
             modified_ns: 123,
             ..IndexEntry::default()
@@ -2963,10 +2980,9 @@ mod tests {
         // with saturating arithmetic for overflow safety.
         let entry = IndexEntry {
             path: "large.bin".to_string(),
-            sequence: u64::MAX,
+            sequence: i64::MAX,
             deleted: false,
-            size: u64::MAX,
-            block_hashes: Vec::new(),
+            size: i64::MAX,
             modified_s: i64::MAX,
             modified_ns: i32::MAX,
             ..IndexEntry::default()
@@ -3704,7 +3720,11 @@ mod tests {
                     sequence: 2,
                     deleted: false,
                     size: 10,
-                    block_hashes: vec!["h1".to_string()],
+                    blocks: vec![crate::bep::BlockEntry {
+                        hash: "h1".to_string(),
+                        offset: 0,
+                        size: 0,
+                    }],
                     ..IndexEntry::default()
                 }],
                 last_sequence: 0,
@@ -3721,7 +3741,11 @@ mod tests {
                     sequence: 3,
                     deleted: false,
                     size: 10,
-                    block_hashes: vec!["h2".to_string()],
+                    blocks: vec![crate::bep::BlockEntry {
+                        hash: "h2".to_string(),
+                        offset: 0,
+                        size: 0,
+                    }],
                     ..IndexEntry::default()
                 }],
                 last_sequence: 0,

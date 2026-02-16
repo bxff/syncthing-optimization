@@ -2,7 +2,7 @@
 #![allow(non_camel_case_types)]
 #![allow(dead_code)]
 
-use crate::bep::{BepMessage, IndexEntry};
+use crate::bep::{BepMessage, ClusterConfigFolder, IndexEntry};
 use crate::config::{FolderConfiguration, FolderDeviceConfiguration, FolderType};
 use crate::db::{self, Db};
 use crate::folder_core;
@@ -1003,6 +1003,9 @@ impl model {
             BepMessage::Hello {
                 device_name: _,
                 client_name,
+                client_version: _,
+                num_connections: _,
+                timestamp: _,
             } => {
                 self.deviceWasSeen(device);
                 self.OnHello(device, client_name);
@@ -1012,8 +1015,8 @@ impl model {
                 Ok(None)
             }
             BepMessage::ClusterConfig { folders } => {
-                for folder_id in folders {
-                    let folder_id = folder_id.trim();
+                for folder in folders {
+                    let folder_id = folder.id.trim();
                     if folder_id.is_empty() {
                         continue;
                     }
@@ -1037,7 +1040,11 @@ impl model {
                 self.IndexFromDeviceFull(folder, device, &converted)?;
                 Ok(None)
             }
-            BepMessage::IndexUpdate { folder, files } => {
+            BepMessage::IndexUpdate {
+                folder,
+                files,
+                prev_sequence: _,
+            } => {
                 self.ensure_remote_index_allowed(device, folder)?;
                 let converted = files
                     .iter()
@@ -1053,6 +1060,8 @@ impl model {
                 offset,
                 size,
                 hash,
+                from_temporary: _,
+                block_no: _,
             } => {
                 if !self.request_permitted(device, folder, name) {
                     return Ok(Some(BepMessage::Response {
@@ -2750,6 +2759,7 @@ mod tests {
                 deleted: false,
                 size: 10,
                 block_hashes: vec!["h1".to_string()],
+                ..IndexEntry::default()
             },
         );
         assert_eq!(fi.sequence, 42);
@@ -2764,7 +2774,26 @@ mod tests {
         m.ApplyBepMessage(
             "peer-a",
             &BepMessage::ClusterConfig {
-                folders: vec!["known".to_string(), " ".to_string(), "pending".to_string()],
+                folders: vec![
+                    ClusterConfigFolder {
+                        id: "known".to_string(),
+                        label: String::new(),
+                        devices: Vec::new(),
+                        folder_type: 0,
+                    },
+                    ClusterConfigFolder {
+                        id: " ".to_string(),
+                        label: String::new(),
+                        devices: Vec::new(),
+                        folder_type: 0,
+                    },
+                    ClusterConfigFolder {
+                        id: "pending".to_string(),
+                        label: String::new(),
+                        devices: Vec::new(),
+                        folder_type: 0,
+                    },
+                ],
             },
         )
         .expect("cluster config");
@@ -2875,6 +2904,7 @@ mod tests {
             deleted: false,
             size: 7,
             block_hashes: vec!["h1".to_string()],
+            ..IndexEntry::default()
         };
         let info = fileInfoFromIndexEntry("default", &entry);
         assert_eq!(info.sequence, 42);
@@ -2890,6 +2920,7 @@ mod tests {
             deleted: false,
             size: u64::MAX,
             block_hashes: Vec::new(),
+            ..IndexEntry::default()
         };
         let info = fileInfoFromIndexEntry("default", &entry);
         assert_eq!(info.sequence, i64::MAX);
@@ -3060,6 +3091,8 @@ mod tests {
                     offset: 0,
                     size: 64,
                     hash: b"h".to_vec(),
+                    from_temporary: false,
+                    block_no: 0,
                 },
             )
             .expect("response generated");
@@ -3088,6 +3121,8 @@ mod tests {
                     offset: 0,
                     size: (MAX_BEP_REQUEST_BYTES as u32) + 1,
                     hash: b"h".to_vec(),
+                    from_temporary: false,
+                    block_no: 0,
                 },
             )
             .expect("response generated");
@@ -3153,6 +3188,8 @@ mod tests {
                     offset: 0,
                     size: 4,
                     hash: b"wrong-hash".to_vec(),
+                    from_temporary: false,
+                    block_no: 0,
                 },
             )
             .expect("response generated");
@@ -3208,6 +3245,8 @@ mod tests {
                     offset: 0,
                     size: 4,
                     hash: b"bad".to_vec(),
+                    from_temporary: false,
+                    block_no: 0,
                 },
             )
             .expect("response generated");
@@ -3273,6 +3312,8 @@ mod tests {
                     size: 5,
                     hash: b"0000000000000000000000000000000000000000000000000000000000000000"
                         .to_vec(),
+                    from_temporary: false,
+                    block_no: 0,
                 },
             )
             .expect("response generated");
@@ -3322,6 +3363,8 @@ mod tests {
                     offset: 0,
                     size: 4,
                     hash: Vec::new(),
+                    from_temporary: false,
+                    block_no: 0,
                 },
             )
             .expect("response generated");
@@ -3373,6 +3416,8 @@ mod tests {
                     offset: 0,
                     size: 2,
                     hash: Vec::new(),
+                    from_temporary: false,
+                    block_no: 0,
                 },
             )
             .expect("keep response");
@@ -3391,6 +3436,8 @@ mod tests {
                     offset: 0,
                     size: 2,
                     hash: Vec::new(),
+                    from_temporary: false,
+                    block_no: 0,
                 },
             )
             .expect("drop response");
@@ -3603,6 +3650,7 @@ mod tests {
                     deleted: false,
                     size: 10,
                     block_hashes: vec!["h1".to_string()],
+                    ..IndexEntry::default()
                 }],
             },
         )
@@ -3618,6 +3666,7 @@ mod tests {
                     deleted: false,
                     size: 10,
                     block_hashes: vec!["h2".to_string()],
+                    ..IndexEntry::default()
                 }],
             },
         )
@@ -3647,6 +3696,9 @@ mod tests {
             &BepMessage::Hello {
                 device_name: "peer-a".to_string(),
                 client_name: "new".to_string(),
+                client_version: String::new(),
+                num_connections: 0,
+                timestamp: 0,
             },
         )
         .expect("apply hello");
@@ -3671,7 +3723,12 @@ mod tests {
         m.ApplyBepMessage(
             "peer-a",
             &BepMessage::ClusterConfig {
-                folders: vec!["default".to_string()],
+                folders: vec![ClusterConfigFolder {
+                    id: "default".to_string(),
+                    label: String::new(),
+                    devices: Vec::new(),
+                    folder_type: 0,
+                }],
             },
         )
         .expect("cluster config");
@@ -3706,7 +3763,12 @@ mod tests {
         m.ApplyBepMessage(
             "peer-a",
             &BepMessage::ClusterConfig {
-                folders: vec!["default".to_string()],
+                folders: vec![ClusterConfigFolder {
+                    id: "default".to_string(),
+                    label: String::new(),
+                    devices: Vec::new(),
+                    folder_type: 0,
+                }],
             },
         )
         .expect("cluster config");

@@ -1,4 +1,4 @@
-use crate::bep::{decode_frame, encode_frame, BepMessage};
+use crate::bep::{decode_frame, encode_frame, BepMessage, ClusterConfigFolder};
 use crate::config::{FolderConfiguration, FolderDeviceConfiguration, FolderType};
 use crate::db::Db;
 use crate::model_core::{model, newFolderConfiguration, NewModelWithRuntime};
@@ -1123,6 +1123,8 @@ impl ApiRuntimeState {
         });
         let mut device_configs = BTreeMap::new();
         device_configs.insert(local_device.to_string(), local_device_cfg);
+        // 7.1: Auto-generate API key when empty, matching Go's GUIConfiguration.prepare()
+        let auto_api_key = generate_random_api_key();
         Self {
             device_configs,
             options: json!({
@@ -1150,6 +1152,8 @@ impl ApiRuntimeState {
                 "user": "",
                 "password": "",
                 "address": "127.0.0.1:8384",
+                "apiKey": auto_api_key,
+                "sendBasicAuthPrompt": false,
             }),
             ldap: json!({
                 "address": "",
@@ -1331,14 +1335,32 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
     let (path, query) = split_url(url);
     let params = parse_query(query);
 
+    // 7.2: Auth gate for non-/rest/ routes (GUI protection).
+    // Go's auth middleware protects ALL routes; only isNoAuthPath entries bypass.
     if !path.starts_with("/rest/") {
-        return build_gui_response(method, path, runtime);
+        if !is_no_auth_path(path, runtime) {
+            match is_authenticated_request(path, method, &params, runtime) {
+                Ok(true) => {}
+                Ok(false) => {
+                    // 7.5: Issue CSRF cookie on GUI page loads (Go api_csrf.go:67-78)
+                    let mut reply = make_api_error_for_unauth(runtime);
+                    maybe_set_csrf_cookie(&mut reply, &params, runtime);
+                    return reply;
+                }
+                Err(err) => return make_api_error(500, &err),
+            }
+        }
+        // 7.5: Issue/refresh CSRF cookie on non-/rest/ page loads
+        let mut reply = build_gui_response(method, path, runtime);
+        maybe_set_csrf_cookie(&mut reply, &params, runtime);
+        return reply;
     }
 
     if !path.starts_with("/rest/noauth/") {
         match is_authenticated_request(path, method, &params, runtime) {
             Ok(true) => {}
-            Ok(false) => return make_api_error(401, "authentication required"),
+            // 7.4: Return 403 (not 401) for unauthenticated requests, matching Go
+            Ok(false) => return make_api_error_for_unauth(runtime),
             Err(err) => return make_api_error(500, &err),
         }
     }
@@ -1538,6 +1560,16 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             ApiReply::json(200, json!({ "status": "OK" }))
         }
         "/rest/noauth/auth/password" => {
+            // 7.7: Conditional login registration — Go only registers when auth is enabled
+            {
+                let state = match runtime.state.read() {
+                    Ok(guard) => guard,
+                    Err(_) => return make_api_error(500, "api state lock poisoned"),
+                };
+                if !auth_required(&state) {
+                    return make_api_error(404, "not found");
+                }
+            }
             if method != &Method::Post {
                 return make_api_error(405, "method not allowed");
             }
@@ -1604,6 +1636,16 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 .with_header(&csrf_header_name, csrf)
         }
         "/rest/noauth/auth/logout" => {
+            // 7.7: Conditional logout — Go only registers when auth is enabled
+            {
+                let state = match runtime.state.read() {
+                    Ok(guard) => guard,
+                    Err(_) => return make_api_error(500, "api state lock poisoned"),
+                };
+                if !auth_required(&state) {
+                    return make_api_error(404, "not found");
+                }
+            }
             if method != &Method::Post {
                 return make_api_error(405, "method not allowed");
             }
@@ -3370,6 +3412,123 @@ fn parse_accept_language_values(raw: &str) -> Vec<String> {
     out
 }
 
+/// 7.1: Generate a random 32-character alphanumeric API key,
+/// matching Go's `rand.String(32)` in GUIConfiguration.prepare().
+fn generate_random_api_key() -> String {
+    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    seed ^= std::process::id() as u64;
+    let mut key = String::with_capacity(32);
+    for _ in 0..32 {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let idx = ((seed >> 33) as usize) % CHARSET.len();
+        key.push(CHARSET[idx] as char);
+    }
+    key
+}
+
+/// 7.2: Matches Go's `isNoAuthPath` from api_auth.go:97-126.
+/// These paths are served without authentication.
+fn is_no_auth_path(path: &str, runtime: &DaemonApiRuntime) -> bool {
+    // Exact matches (Go's noAuthPaths)
+    let no_auth_exact: &[&str] = &["/", "/index.html", "/modal.html", "/rest/svc/lang"];
+    if no_auth_exact.contains(&path) {
+        return true;
+    }
+
+    // Check metricsWithoutAuth
+    if path == "/metrics" {
+        if let Ok(state) = runtime.state.read() {
+            let metrics_no_auth = state
+                .gui
+                .get("metricsWithoutAuth")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if metrics_no_auth {
+                return true;
+            }
+        }
+    }
+
+    // Prefix matches (Go's noAuthPrefixes)
+    let no_auth_prefixes: &[&str] = &[
+        "/assets/",
+        "/syncthing/",
+        "/vendor/",
+        "/theme-assets/",
+        "/rest/noauth",
+    ];
+    no_auth_prefixes
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+}
+
+/// 7.4: Return 403 by default, 401 only if sendBasicAuthPrompt is set.
+/// Matches Go's basicAuthAndSessionMiddleware behavior.
+fn make_api_error_for_unauth(runtime: &DaemonApiRuntime) -> ApiReply {
+    let send_basic_prompt = runtime
+        .state
+        .read()
+        .ok()
+        .and_then(|state| {
+            state
+                .gui
+                .get("sendBasicAuthPrompt")
+                .and_then(Value::as_bool)
+        })
+        .unwrap_or(false);
+
+    if send_basic_prompt {
+        let short_id = runtime_short_id(runtime);
+        let mut reply = make_api_error(401, "Not Authorized");
+        reply.headers.push((
+            "WWW-Authenticate".to_string(),
+            format!("Basic realm=\"Authorization Required ({short_id})\""),
+        ));
+        reply
+    } else {
+        make_api_error(403, "Forbidden")
+    }
+}
+
+/// 7.5: Issue/refresh CSRF cookie on GUI page loads when no valid one is present.
+/// Matches Go's csrfManager.ServeHTTP behavior for non-/rest/ paths (api_csrf.go:67-78).
+fn maybe_set_csrf_cookie(
+    reply: &mut ApiReply,
+    _params: &BTreeMap<String, String>,
+    runtime: &DaemonApiRuntime,
+) {
+    // Generate a new CSRF token and set it as a cookie.
+    // In Go, this checks if an existing valid CSRF cookie is present and only
+    // issues a new one if not. We always issue here since the Rust request
+    // pipeline doesn't carry cookie state through params for CSRF cookies.
+    let csrf_cookie_name = csrf_cookie_name(runtime);
+    let csrf_token = mint_csrf_token("gui");
+    if let Ok(mut state) = runtime.state.write() {
+        // Store the token so it can be validated later
+        let gui_token_key = format!("_gui_csrf_{}", state.auth_param_salt);
+        state
+            .active_auth_csrf
+            .insert(gui_token_key, csrf_token.clone());
+    }
+    let secure_attr = runtime
+        .state
+        .read()
+        .ok()
+        .and_then(|state| state.gui.get("useTLS").and_then(Value::as_bool))
+        .map(|tls| if tls { "; Secure" } else { "" })
+        .unwrap_or("");
+    reply.headers.push((
+        "Set-Cookie".to_string(),
+        format!("{csrf_cookie_name}={csrf_token}; Path=/; SameSite=Lax{secure_attr}"),
+    ));
+}
+
 fn auth_required(state: &ApiRuntimeState) -> bool {
     let user = state
         .gui
@@ -3503,8 +3662,8 @@ fn is_authenticated_request(
         return Ok(false);
     }
 
-    let requires_csrf = method != &Method::Get
-        && path.starts_with("/rest/")
+    // 7.3: CSRF enforced for ALL methods on /rest/ (Go enforces regardless of method)
+    let requires_csrf = path.starts_with("/rest/")
         && !path.starts_with("/rest/noauth/")
         && !path.starts_with("/rest/debug/");
     if !requires_csrf {
@@ -4926,6 +5085,14 @@ pub(crate) fn run_parity_probe(with_peer_interop: bool) -> Result<(), String> {
             shutdown_requested: Arc::new(AtomicBool::new(false)),
             gui_root: None,
         };
+        // Clear auto-generated API key so auth_required() returns false for parity probe
+        {
+            let mut state = runtime
+                .state
+                .write()
+                .map_err(|_| "state lock".to_string())?;
+            state.gui["apiKey"] = serde_json::json!("");
+        }
 
         ensure_api_ok(&build_api_response(
             &Method::Get,
@@ -5016,6 +5183,14 @@ pub(crate) fn run_api_surface_probe() -> Result<ApiSurfaceProbeResult, String> {
             shutdown_requested: Arc::new(AtomicBool::new(false)),
             gui_root: None,
         };
+        // Clear auto-generated API key so auth_required() returns false for probe tests
+        {
+            let mut state = runtime
+                .state
+                .write()
+                .map_err(|_| "state lock".to_string())?;
+            state.gui["apiKey"] = serde_json::json!("");
+        }
 
         let cases: Vec<(&str, Method, String, u16)> = vec![
             (
@@ -5076,13 +5251,13 @@ pub(crate) fn run_api_surface_probe() -> Result<ApiSurfaceProbeResult, String> {
                 "POST /rest/noauth/auth/password",
                 Method::Post,
                 "/rest/noauth/auth/password?user=probe".to_string(),
-                204,
+                404, // 7.7: Returns 404 when auth is not enabled
             ),
             (
                 "POST /rest/noauth/auth/logout",
                 Method::Post,
                 "/rest/noauth/auth/logout?user=probe".to_string(),
-                204,
+                404, // 7.7: Returns 404 when auth is not enabled
             ),
             (
                 "GET /rest/system/error",
@@ -5840,6 +6015,9 @@ fn run_parity_peer_probe_inprocess(model: &Arc<RwLock<model>>) -> Result<(), Str
         &BepMessage::Hello {
             device_name: "parity-probe".to_string(),
             client_name: "syncthing-rs".to_string(),
+            client_version: String::new(),
+            num_connections: 0,
+            timestamp: 0,
         },
     )?;
     let response = guard
@@ -5852,6 +6030,8 @@ fn run_parity_peer_probe_inprocess(model: &Arc<RwLock<model>>) -> Result<(), Str
                 offset: 0,
                 size: 5,
                 hash: Vec::new(),
+                from_temporary: false,
+                block_no: 0,
             },
         )?
         .ok_or_else(|| "peer probe fallback expected response message".to_string())?;
@@ -5926,6 +6106,9 @@ fn run_parity_peer_probe(model: &Arc<RwLock<model>>) -> Result<(), String> {
         &BepMessage::Hello {
             device_name: "parity-probe".to_string(),
             client_name: "syncthing-rs".to_string(),
+            client_version: String::new(),
+            num_connections: 0,
+            timestamp: 0,
         },
     )?;
     write_frame(
@@ -5937,6 +6120,8 @@ fn run_parity_peer_probe(model: &Arc<RwLock<model>>) -> Result<(), String> {
             offset: 0,
             size: 5,
             hash: Vec::new(),
+            from_temporary: false,
+            block_no: 0,
         },
     )?;
 
@@ -6387,7 +6572,34 @@ mod tests {
             shutdown_requested: Arc::new(AtomicBool::new(false)),
             gui_root: None,
         };
+        // Clear the auto-generated API key for non-auth tests so auth_required() returns false.
+        // Auth-specific tests set user/password/apiKey explicitly to test the real auth flow.
+        {
+            let mut state = runtime.state.write().expect("lock state");
+            state.gui["apiKey"] = serde_json::Value::String(String::new());
+        }
         runtime
+    }
+
+    /// Helper that calls build_api_response with the API key appended to the URL
+    /// so the request passes auth. Use this for all tests that need authenticated access.
+    fn test_api_call(method: &Method, url: &str, runtime: &DaemonApiRuntime) -> ApiReply {
+        let api_key = runtime
+            .state
+            .read()
+            .expect("lock state")
+            .gui
+            .get("apiKey")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let apikey_param = runtime
+            .state
+            .read()
+            .map(|state| auth_query_apikey_key(&state))
+            .unwrap_or_else(|_| "_auth_apikey".to_string());
+        let authed_url = append_query_param(url, &apikey_param, &api_key);
+        build_api_response(method, &authed_url, runtime)
     }
 
     #[test]
@@ -6530,7 +6742,20 @@ mod tests {
                 .ApplyBepMessage(
                     "PEER-A",
                     &BepMessage::ClusterConfig {
-                        folders: vec!["incoming".to_string(), "default".to_string()],
+                        folders: vec![
+                            ClusterConfigFolder {
+                                id: "incoming".to_string(),
+                                label: String::new(),
+                                devices: Vec::new(),
+                                folder_type: 0,
+                            },
+                            ClusterConfigFolder {
+                                id: "default".to_string(),
+                                label: String::new(),
+                                devices: Vec::new(),
+                                folder_type: 0,
+                            },
+                        ],
                     },
                 )
                 .expect("apply cluster config");
@@ -7310,7 +7535,7 @@ mod tests {
         }
 
         let unauthorized = build_api_response(&Method::Get, "/rest/system/status", &runtime);
-        assert_eq!(unauthorized.status_code, StatusCode(401));
+        assert_eq!(unauthorized.status_code, StatusCode(403));
 
         let wrong_login = build_api_response(
             &Method::Post,
@@ -7326,18 +7551,22 @@ mod tests {
         );
         assert_eq!(login.status_code, StatusCode(204));
         let token = session_token_from_set_cookie(&login).expect("session token");
-        let (token_key, _csrf_key) = auth_query_keys(&runtime);
+        let csrf = header_value(&login, "X-CSRF-Token")
+            .expect("csrf token from login")
+            .to_string();
+        let (token_key, csrf_key) = auth_query_keys(&runtime);
 
+        // 7.3: CSRF now required for GET too, so include CSRF token
         let authorized = build_api_response(
             &Method::Get,
-            &format!("/rest/system/status?{token_key}={token}"),
+            &format!("/rest/system/status?{token_key}={token}&{csrf_key}={csrf}"),
             &runtime,
         );
         assert_eq!(authorized.status_code, StatusCode(200));
 
         let impersonated =
             build_api_response(&Method::Get, "/rest/system/status?user=alice", &runtime);
-        assert_eq!(impersonated.status_code, StatusCode(401));
+        assert_eq!(impersonated.status_code, StatusCode(403));
     }
 
     #[test]
@@ -7350,11 +7579,11 @@ mod tests {
         }
 
         let folder_get = build_api_response(&Method::Get, "/rest/config/folders/default", &runtime);
-        assert_eq!(folder_get.status_code, StatusCode(401));
+        assert_eq!(folder_get.status_code, StatusCode(403));
         let device_get = build_api_response(&Method::Get, "/rest/config/devices/peer-a", &runtime);
-        assert_eq!(device_get.status_code, StatusCode(401));
+        assert_eq!(device_get.status_code, StatusCode(403));
         let debug_get = build_api_response(&Method::Get, "/rest/debug/httpmetrics", &runtime);
-        assert_eq!(debug_get.status_code, StatusCode(401));
+        assert_eq!(debug_get.status_code, StatusCode(403));
     }
 
     #[test]
@@ -7397,7 +7626,7 @@ mod tests {
             &format!("/rest/system/status?{token_key}={token}"),
             &runtime,
         );
-        assert_eq!(still_auth.status_code, StatusCode(401));
+        assert_eq!(still_auth.status_code, StatusCode(403));
     }
 
     #[test]
@@ -7421,9 +7650,17 @@ mod tests {
             .to_string();
         let (token_key, csrf_key) = auth_query_keys(&runtime);
 
-        let get_ok = build_api_response(
+        // 7.3: CSRF is now enforced for ALL methods (including GET), matching Go parity
+        let get_no_csrf = build_api_response(
             &Method::Get,
             &format!("/rest/system/status?{token_key}={token}"),
+            &runtime,
+        );
+        assert_eq!(get_no_csrf.status_code, StatusCode(403));
+
+        let get_ok = build_api_response(
+            &Method::Get,
+            &format!("/rest/system/status?{token_key}={token}&{csrf_key}={csrf}"),
             &runtime,
         );
         assert_eq!(get_ok.status_code, StatusCode(200));
@@ -7433,14 +7670,14 @@ mod tests {
             &format!("/rest/db/scan?folder=default&{token_key}={token}"),
             &runtime,
         );
-        assert_eq!(write_missing_csrf.status_code, StatusCode(401));
+        assert_eq!(write_missing_csrf.status_code, StatusCode(403));
 
         let write_ok = build_api_response(
             &Method::Post,
             &format!("/rest/db/scan?folder=default&{token_key}={token}&{csrf_key}={csrf}"),
             &runtime,
         );
-        assert_ne!(write_ok.status_code, StatusCode(401));
+        assert_ne!(write_ok.status_code, StatusCode(403));
     }
 
     #[test]
@@ -7491,7 +7728,7 @@ mod tests {
         }
 
         let unauthorized = build_api_response(&Method::Get, "/rest/system/status", &runtime);
-        assert_eq!(unauthorized.status_code, StatusCode(401));
+        assert_eq!(unauthorized.status_code, StatusCode(403));
 
         let api_key_param = auth_apikey_key(&runtime);
 
@@ -7880,6 +8117,9 @@ mod tests {
             &BepMessage::Hello {
                 device_name: "peer-a".to_string(),
                 client_name: "syncthing-rs-test".to_string(),
+                client_version: String::new(),
+                num_connections: 0,
+                timestamp: 0,
             },
         )
         .expect("write hello");
@@ -7892,6 +8132,8 @@ mod tests {
                 offset: 0,
                 size: 128,
                 hash: b"h".to_vec(),
+                from_temporary: false,
+                block_no: 0,
             },
         )
         .expect("write request");
@@ -7939,6 +8181,9 @@ mod tests {
                 device_name: "AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG-HHHHHHH"
                     .to_string(),
                 client_name: "syncthing-rs-test".to_string(),
+                client_version: String::new(),
+                num_connections: 0,
+                timestamp: 0,
             },
         )
         .expect("write hello");
@@ -7971,6 +8216,9 @@ mod tests {
             &BepMessage::Hello {
                 device_name: "peer-a".to_string(),
                 client_name: "syncthing-rs-test".to_string(),
+                client_version: String::new(),
+                num_connections: 0,
+                timestamp: 0,
             },
         )
         .expect("write hello");
@@ -8017,6 +8265,8 @@ mod tests {
                 offset: 0,
                 size: 2,
                 hash: b"h".to_vec(),
+                from_temporary: false,
+                block_no: 0,
             },
         )
         .expect("write request");

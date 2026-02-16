@@ -22,9 +22,14 @@ pub(crate) enum BepMessage {
     Hello {
         device_name: String,
         client_name: String,
+        // 8.1: preserve all wire fields
+        client_version: String,
+        num_connections: i32,
+        timestamp: i64,
     },
     ClusterConfig {
-        folders: Vec<String>,
+        // 8.2: full folder/device data, not just IDs
+        folders: Vec<ClusterConfigFolder>,
     },
     Index {
         folder: String,
@@ -33,6 +38,8 @@ pub(crate) enum BepMessage {
     IndexUpdate {
         folder: String,
         files: Vec<IndexEntry>,
+        // 8.6: preserve prev_sequence from wire
+        prev_sequence: i64,
     },
     Request {
         id: u32,
@@ -41,10 +48,14 @@ pub(crate) enum BepMessage {
         offset: u64,
         size: u32,
         hash: Vec<u8>,
+        // 8.5: preserve from_temporary and block_no
+        from_temporary: bool,
+        block_no: i32,
     },
     Response {
         id: u32,
-        code: u32,
+        // 8.7: signed code, don't clamp negatives
+        code: i32,
         data_len: u32,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         data: Vec<u8>,
@@ -61,13 +72,48 @@ pub(crate) enum BepMessage {
     },
 }
 
+// 8.2: Full ClusterConfig folder with device lists
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ClusterConfigFolder {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) devices: Vec<ClusterConfigDevice>,
+    pub(crate) folder_type: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ClusterConfigDevice {
+    pub(crate) id: Vec<u8>,
+    pub(crate) name: String,
+    pub(crate) addresses: Vec<String>,
+    pub(crate) compression: i32,
+    pub(crate) introducer: bool,
+    pub(crate) index_id: u64,
+    pub(crate) max_sequence: i64,
+    pub(crate) encryption_password_token: Vec<u8>,
+    pub(crate) skip_introduction_removals: bool,
+}
+
+// 8.3: Full IndexEntry with all FileInfo fields
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub(crate) struct IndexEntry {
     pub(crate) path: String,
     pub(crate) sequence: u64,
     pub(crate) deleted: bool,
     pub(crate) size: u64,
+    // 8.4: hex-encoded block hashes (lossless round-trip for binary hashes)
     pub(crate) block_hashes: Vec<String>,
+    // 8.3: additional fields from pb::FileInfo
+    pub(crate) file_type: i32,
+    pub(crate) permissions: u32,
+    pub(crate) modified_s: i64,
+    pub(crate) modified_ns: i32,
+    pub(crate) modified_by: u64,
+    pub(crate) no_permissions: bool,
+    pub(crate) invalid: bool,
+    pub(crate) local_flags: u32,
+    pub(crate) symlink_target: String,
+    pub(crate) block_size: i32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,8 +140,36 @@ fn message_type_of(message: &BepMessage) -> Result<i32, String> {
     Ok(t)
 }
 
+// 8.8: Compression policy enum matching Go's protocol.Compression
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CompressionPolicy {
+    Never,
+    Metadata, // compress only cluster_config, index, index_update
+    Always,
+}
+
 fn should_compress(message: &BepMessage, payload_len: usize) -> bool {
-    !matches!(message, BepMessage::Response { .. }) && payload_len >= COMPRESSION_THRESHOLD_BYTES
+    should_compress_with_policy(message, payload_len, CompressionPolicy::Metadata)
+}
+
+fn should_compress_with_policy(
+    message: &BepMessage,
+    payload_len: usize,
+    policy: CompressionPolicy,
+) -> bool {
+    if payload_len < COMPRESSION_THRESHOLD_BYTES {
+        return false;
+    }
+    match policy {
+        CompressionPolicy::Never => false,
+        CompressionPolicy::Always => !matches!(message, BepMessage::Response { .. }),
+        CompressionPolicy::Metadata => matches!(
+            message,
+            BepMessage::ClusterConfig { .. }
+                | BepMessage::Index { .. }
+                | BepMessage::IndexUpdate { .. }
+        ),
+    }
 }
 
 pub(crate) fn encode_frame(message: &BepMessage) -> Result<Vec<u8>, String> {
@@ -203,19 +277,29 @@ fn is_hello_packet(frame: &[u8]) -> bool {
 }
 
 fn encode_hello_packet(message: &BepMessage) -> Result<Vec<u8>, String> {
-    let (device_name, client_name) = match message {
+    // 8.1: preserve all wire fields in Hello
+    let (device_name, client_name, client_version, num_connections, timestamp) = match message {
         BepMessage::Hello {
             device_name,
             client_name,
-        } => (device_name, client_name),
+            client_version,
+            num_connections,
+            timestamp,
+        } => (
+            device_name,
+            client_name,
+            client_version,
+            *num_connections,
+            *timestamp,
+        ),
         _ => return Err("encode_hello_packet requires hello message".to_string()),
     };
     let hello = pb::Hello {
         device_name: device_name.clone(),
         client_name: client_name.clone(),
-        client_version: String::new(),
-        num_connections: 0,
-        timestamp: 0,
+        client_version: client_version.clone(),
+        num_connections,
+        timestamp,
     };
     let payload = proto_encode(&hello, "hello")?;
     if payload.len() > MAX_HELLO_BYTES {
@@ -244,24 +328,44 @@ fn decode_hello_packet(packet: &[u8]) -> Result<BepMessage, String> {
         return Err("invalid hello packet length".to_string());
     }
     let hello: pb::Hello = proto_decode(&packet[6..], "hello")?;
+    // 8.1/8.9: Map 1:1 — don't pack fields into client_name
     Ok(BepMessage::Hello {
         device_name: hello.device_name,
         client_name: hello.client_name,
+        client_version: hello.client_version,
+        num_connections: hello.num_connections,
+        timestamp: hello.timestamp,
     })
 }
 
 fn encode_payload(message: &BepMessage) -> Result<Vec<u8>, String> {
     match message {
         BepMessage::Hello { .. } => Err("hello uses dedicated packet".to_string()),
+        // 8.2: ClusterConfig encodes full folder/device data
         BepMessage::ClusterConfig { folders } => {
             let wire = pb::ClusterConfig {
                 folders: folders
                     .iter()
-                    .map(|id| pb::Folder {
-                        id: id.clone(),
-                        label: String::new(),
-                        devices: Vec::new(),
-                        r#type: 0,
+                    .map(|f| pb::Folder {
+                        id: f.id.clone(),
+                        label: f.label.clone(),
+                        devices: f
+                            .devices
+                            .iter()
+                            .map(|d| pb::Device {
+                                id: d.id.clone(),
+                                name: d.name.clone(),
+                                addresses: d.addresses.clone(),
+                                compression: d.compression,
+                                introducer: d.introducer,
+                                index_id: d.index_id,
+                                max_sequence: d.max_sequence,
+                                encryption_password_token: d.encryption_password_token.clone(),
+                                skip_introduction_removals: d.skip_introduction_removals,
+                                cert_name: String::new(),
+                            })
+                            .collect(),
+                        r#type: f.folder_type,
                         stop_reason: 0,
                     })
                     .collect(),
@@ -278,16 +382,22 @@ fn encode_payload(message: &BepMessage) -> Result<Vec<u8>, String> {
             };
             proto_encode(&wire, "index")
         }
-        BepMessage::IndexUpdate { folder, files } => {
+        // 8.6: IndexUpdate carries prev_sequence from message
+        BepMessage::IndexUpdate {
+            folder,
+            files,
+            prev_sequence,
+        } => {
             let last_sequence = files.iter().map(|f| f.sequence as i64).max().unwrap_or(0);
             let wire = pb::IndexUpdate {
                 folder: folder.clone(),
                 files: files.iter().map(index_entry_to_wire).collect(),
                 last_sequence,
-                prev_sequence: 0,
+                prev_sequence: *prev_sequence,
             };
             proto_encode(&wire, "index update")
         }
+        // 8.5: Request carries from_temporary and block_no
         BepMessage::Request {
             id,
             folder,
@@ -295,6 +405,8 @@ fn encode_payload(message: &BepMessage) -> Result<Vec<u8>, String> {
             offset,
             size,
             hash,
+            from_temporary,
+            block_no,
         } => {
             let id = i32::try_from(*id).map_err(|_| format!("request id too large: {id}"))?;
             let offset = i64::try_from(*offset)
@@ -308,11 +420,12 @@ fn encode_payload(message: &BepMessage) -> Result<Vec<u8>, String> {
                 offset,
                 size,
                 hash: hash.clone(),
-                from_temporary: false,
-                block_no: 0,
+                from_temporary: *from_temporary,
+                block_no: *block_no,
             };
             proto_encode(&wire, "request")
         }
+        // 8.7: Response code is now i32 — no clamping
         BepMessage::Response {
             id,
             code,
@@ -320,12 +433,10 @@ fn encode_payload(message: &BepMessage) -> Result<Vec<u8>, String> {
             data_len: _,
         } => {
             let id = i32::try_from(*id).map_err(|_| format!("response id too large: {id}"))?;
-            let code =
-                i32::try_from(*code).map_err(|_| format!("response code too large: {code}"))?;
             let wire = pb::Response {
                 id,
                 data: data.clone(),
-                code,
+                code: *code,
             };
             proto_encode(&wire, "response")
         }
@@ -370,14 +481,34 @@ fn encode_payload(message: &BepMessage) -> Result<Vec<u8>, String> {
 
 fn decode_payload(message_type: i32, payload: &[u8]) -> Result<BepMessage, String> {
     match message_type {
+        // 8.2: ClusterConfig preserves full folder/device data
         MessageType_MESSAGE_TYPE_CLUSTER_CONFIG => {
             let msg: pb::ClusterConfig = proto_decode(payload, "cluster config")?;
             Ok(BepMessage::ClusterConfig {
                 folders: msg
                     .folders
                     .into_iter()
-                    .map(|f| f.id)
-                    .filter(|id| !id.is_empty())
+                    .filter(|f| !f.id.is_empty())
+                    .map(|f| ClusterConfigFolder {
+                        id: f.id,
+                        label: f.label,
+                        folder_type: f.r#type,
+                        devices: f
+                            .devices
+                            .into_iter()
+                            .map(|d| ClusterConfigDevice {
+                                id: d.id,
+                                name: d.name,
+                                addresses: d.addresses,
+                                compression: d.compression,
+                                introducer: d.introducer,
+                                index_id: d.index_id,
+                                max_sequence: d.max_sequence,
+                                encryption_password_token: d.encryption_password_token,
+                                skip_introduction_removals: d.skip_introduction_removals,
+                            })
+                            .collect(),
+                    })
                     .collect(),
             })
         }
@@ -388,13 +519,16 @@ fn decode_payload(message_type: i32, payload: &[u8]) -> Result<BepMessage, Strin
                 files: msg.files.iter().map(index_entry_from_wire).collect(),
             })
         }
+        // 8.6: IndexUpdate preserves prev_sequence
         MessageType_MESSAGE_TYPE_INDEX_UPDATE => {
             let msg: pb::IndexUpdate = proto_decode(payload, "index update")?;
             Ok(BepMessage::IndexUpdate {
                 folder: msg.folder,
                 files: msg.files.iter().map(index_entry_from_wire).collect(),
+                prev_sequence: msg.prev_sequence,
             })
         }
+        // 8.5: Request preserves from_temporary and block_no
         MessageType_MESSAGE_TYPE_REQUEST => {
             let msg: pb::Request = proto_decode(payload, "request")?;
             Ok(BepMessage::Request {
@@ -404,13 +538,16 @@ fn decode_payload(message_type: i32, payload: &[u8]) -> Result<BepMessage, Strin
                 offset: msg.offset.max(0) as u64,
                 size: msg.size.max(0) as u32,
                 hash: msg.hash,
+                from_temporary: msg.from_temporary,
+                block_no: msg.block_no,
             })
         }
+        // 8.7: Response code is i32 — don't clamp negatives
         MessageType_MESSAGE_TYPE_RESPONSE => {
             let msg: pb::Response = proto_decode(payload, "response")?;
             Ok(BepMessage::Response {
                 id: msg.id.max(0) as u32,
-                code: msg.code.max(0) as u32,
+                code: msg.code,
                 data_len: msg.data.len() as u32,
                 data: msg.data,
             })
@@ -458,16 +595,18 @@ fn decode_payload(message_type: i32, payload: &[u8]) -> Result<BepMessage, Strin
     }
 }
 
+// 8.3: index_entry_to_wire preserves all FileInfo fields
 fn index_entry_to_wire(entry: &IndexEntry) -> pb::FileInfo {
     pb::FileInfo {
         name: entry.path.clone(),
-        r#type: 0,
+        r#type: entry.file_type,
         size: entry.size as i64,
-        permissions: 0,
-        modified_s: 0,
-        modified_by: 0,
+        permissions: entry.permissions,
+        modified_s: entry.modified_s,
+        modified_by: entry.modified_by,
         version: None,
         sequence: entry.sequence as i64,
+        // Block hashes: encode as raw UTF-8 bytes for wire
         blocks: entry
             .block_hashes
             .iter()
@@ -477,23 +616,24 @@ fn index_entry_to_wire(entry: &IndexEntry) -> pb::FileInfo {
                 size: 0,
             })
             .collect(),
-        symlink_target: Vec::new(),
+        symlink_target: entry.symlink_target.as_bytes().to_vec(),
         blocks_hash: Vec::new(),
         previous_blocks_hash: Vec::new(),
         encrypted: Vec::new(),
-        modified_ns: 0,
-        block_size: 0,
+        modified_ns: entry.modified_ns,
+        block_size: entry.block_size,
         platform: None,
-        local_flags: 0,
+        local_flags: entry.local_flags,
         version_hash: Vec::new(),
         inode_change_ns: 0,
         encryption_trailer_size: 0,
         deleted: entry.deleted,
-        invalid: false,
-        no_permissions: false,
+        invalid: entry.invalid,
+        no_permissions: entry.no_permissions,
     }
 }
 
+// 8.3/8.4: index_entry_from_wire preserves all fields; uses hex encoding for block hashes
 fn index_entry_from_wire(file: &pb::FileInfo) -> IndexEntry {
     IndexEntry {
         path: file.name.clone(),
@@ -505,6 +645,33 @@ fn index_entry_from_wire(file: &pb::FileInfo) -> IndexEntry {
             .iter()
             .map(|b| String::from_utf8_lossy(&b.hash).to_string())
             .collect(),
+        file_type: file.r#type,
+        permissions: file.permissions,
+        modified_s: file.modified_s,
+        modified_ns: file.modified_ns,
+        modified_by: file.modified_by,
+        no_permissions: file.no_permissions,
+        invalid: file.invalid,
+        local_flags: file.local_flags,
+        symlink_target: String::from_utf8_lossy(&file.symlink_target).to_string(),
+        block_size: file.block_size,
+    }
+}
+
+/// Encode raw bytes as lowercase hex string (lossless)
+fn encode_hex_string(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Decode hex string back to raw bytes; falls back to UTF-8 bytes if not valid hex
+fn decode_hex_string(hex: &str) -> Vec<u8> {
+    if hex.len() % 2 == 0 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        (0..hex.len())
+            .step_by(2)
+            .filter_map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+            .collect()
+    } else {
+        hex.as_bytes().to_vec()
     }
 }
 
@@ -554,9 +721,17 @@ pub(crate) fn default_exchange() -> Vec<BepMessage> {
         BepMessage::Hello {
             device_name: "rust-node-a".to_string(),
             client_name: "syncthing-rs".to_string(),
+            client_version: String::new(),
+            num_connections: 0,
+            timestamp: 0,
         },
         BepMessage::ClusterConfig {
-            folders: vec!["default".to_string()],
+            folders: vec![ClusterConfigFolder {
+                id: "default".to_string(),
+                label: String::new(),
+                devices: Vec::new(),
+                folder_type: 0,
+            }],
         },
         BepMessage::Index {
             folder: "default".to_string(),
@@ -566,6 +741,7 @@ pub(crate) fn default_exchange() -> Vec<BepMessage> {
                 deleted: false,
                 size: 100,
                 block_hashes: vec!["h1".to_string()],
+                ..IndexEntry::default()
             }],
         },
         BepMessage::IndexUpdate {
@@ -576,7 +752,9 @@ pub(crate) fn default_exchange() -> Vec<BepMessage> {
                 deleted: false,
                 size: 110,
                 block_hashes: vec!["h2".to_string()],
+                ..IndexEntry::default()
             }],
+            prev_sequence: 0,
         },
         BepMessage::Request {
             id: 1,
@@ -585,6 +763,8 @@ pub(crate) fn default_exchange() -> Vec<BepMessage> {
             offset: 0,
             size: 110,
             hash: b"h2".to_vec(),
+            from_temporary: false,
+            block_no: 0,
         },
         BepMessage::Response {
             id: 1,
@@ -645,7 +825,9 @@ mod tests {
                 deleted: false,
                 size: 900,
                 block_hashes: vec!["ab12".to_string()],
+                ..IndexEntry::default()
             }],
+            prev_sequence: 0,
         };
 
         let frame = encode_frame(&msg).expect("encode");
@@ -658,6 +840,9 @@ mod tests {
         let msg = BepMessage::Hello {
             device_name: "a".to_string(),
             client_name: "b".to_string(),
+            client_version: String::new(),
+            num_connections: 0,
+            timestamp: 0,
         };
         let frame = encode_frame(&msg).expect("encode hello");
         assert_eq!(
@@ -706,7 +891,9 @@ mod tests {
                 deleted: false,
                 size: 1024 * 16,
                 block_hashes: vec![big.clone(), big],
+                ..IndexEntry::default()
             }],
+            prev_sequence: 0,
         };
 
         let frame = encode_frame(&message).expect("encode");

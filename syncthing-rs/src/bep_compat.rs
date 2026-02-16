@@ -267,7 +267,7 @@ impl Device {
     }
 
     pub(crate) fn GetEncryptionPasswordToken(&self) -> String {
-        self.EncryptionPasswordToken.clone()
+        String::from_utf8_lossy(&self.EncryptionPasswordToken).to_string()
     }
 
     pub(crate) fn GetId(&self) -> String {

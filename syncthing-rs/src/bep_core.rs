@@ -1,7 +1,10 @@
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
 
-use crate::bep::{decode_frame, encode_frame, BepMessage, DownloadProgressEntry, IndexEntry};
+use crate::bep::{
+    decode_frame, encode_frame, BepMessage, ClusterConfigDevice, ClusterConfigFolder,
+    DownloadProgressEntry, IndexEntry,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -133,7 +136,7 @@ pub(crate) struct Device {
     pub(crate) IndexId: u64,
     pub(crate) MaxSequence: i64,
     pub(crate) CertName: String,
-    pub(crate) EncryptionPasswordToken: String,
+    pub(crate) EncryptionPasswordToken: Vec<u8>, // 8.10: bytes, not String
     pub(crate) SkipIntroductionRemovals: bool,
 }
 
@@ -372,24 +375,52 @@ pub(crate) fn decode_wire_message(frame: &[u8]) -> Result<WireMessage, String> {
 
 fn wire_to_bep(message: &WireMessage) -> Result<BepMessage, String> {
     match message {
+        // 8.9: Hello maps 1:1 — stop packing fields into client_name
         WireMessage::Hello(hello) => Ok(BepMessage::Hello {
             device_name: hello.DeviceName.clone(),
-            client_name: format!(
-                "{}|{}|{}|{}",
-                hello.ClientName, hello.ClientVersion, hello.NumConnections, hello.Timestamp
-            ),
+            client_name: hello.ClientName.clone(),
+            client_version: hello.ClientVersion.clone(),
+            num_connections: hello.NumConnections,
+            timestamp: hello.Timestamp,
         }),
+        // 8.2: ClusterConfig carries full folder/device data
         WireMessage::ClusterConfig(cfg) => Ok(BepMessage::ClusterConfig {
-            folders: cfg.Folders.iter().map(|f| f.Id.clone()).collect(),
+            folders: cfg
+                .Folders
+                .iter()
+                .map(|f| ClusterConfigFolder {
+                    id: f.Id.clone(),
+                    label: f.Label.clone(),
+                    folder_type: f.Type,
+                    devices: f
+                        .Devices
+                        .iter()
+                        .map(|d| ClusterConfigDevice {
+                            id: d.Id.as_bytes().to_vec(),
+                            name: d.Name.clone(),
+                            addresses: d.Addresses.clone(),
+                            compression: d.Compression,
+                            introducer: d.Introducer,
+                            index_id: d.IndexId,
+                            max_sequence: d.MaxSequence,
+                            encryption_password_token: d.EncryptionPasswordToken.clone(),
+                            skip_introduction_removals: d.SkipIntroductionRemovals,
+                        })
+                        .collect(),
+                })
+                .collect(),
         }),
         WireMessage::Index(index) => Ok(BepMessage::Index {
             folder: index.Folder.clone(),
             files: index.Files.iter().map(fileinfo_to_index_entry).collect(),
         }),
+        // 8.6: IndexUpdate preserves prev_sequence
         WireMessage::IndexUpdate(update) => Ok(BepMessage::IndexUpdate {
             folder: update.Folder.clone(),
             files: update.Files.iter().map(fileinfo_to_index_entry).collect(),
+            prev_sequence: update.PrevSequence,
         }),
+        // 8.5: Request preserves from_temporary and block_no
         WireMessage::Request(req) => Ok(BepMessage::Request {
             id: req.Id.max(0) as u32,
             folder: req.Folder.clone(),
@@ -397,10 +428,13 @@ fn wire_to_bep(message: &WireMessage) -> Result<BepMessage, String> {
             offset: req.Offset.max(0) as u64,
             size: req.Size.max(0) as u32,
             hash: req.Hash.clone(),
+            from_temporary: req.FromTemporary,
+            block_no: req.BlockNo,
         }),
+        // 8.7: Response code is i32, don't clamp
         WireMessage::Response(resp) => Ok(BepMessage::Response {
             id: resp.Id.max(0) as u32,
-            code: resp.Code.max(0) as u32,
+            code: resp.Code,
             data_len: resp.Data.len() as u32,
             data: resp.Data.clone(),
         }),
@@ -439,29 +473,44 @@ fn wire_to_bep(message: &WireMessage) -> Result<BepMessage, String> {
 
 fn bep_to_wire(message: &BepMessage) -> Result<WireMessage, String> {
     match message {
+        // 8.9: Hello maps 1:1
         BepMessage::Hello {
             device_name,
             client_name,
-        } => {
-            let mut hello = Hello {
-                DeviceName: device_name.clone(),
-                ClientName: client_name.clone(),
-                ..Default::default()
-            };
-            let parts = client_name.splitn(4, '|').collect::<Vec<_>>();
-            if parts.len() == 4 {
-                hello.ClientName = parts[0].to_string();
-                hello.ClientVersion = parts[1].to_string();
-                hello.NumConnections = parts[2].parse::<i32>().unwrap_or_default();
-                hello.Timestamp = parts[3].parse::<i64>().unwrap_or_default();
-            }
-            Ok(WireMessage::Hello(hello))
-        }
+            client_version,
+            num_connections,
+            timestamp,
+        } => Ok(WireMessage::Hello(Hello {
+            DeviceName: device_name.clone(),
+            ClientName: client_name.clone(),
+            ClientVersion: client_version.clone(),
+            NumConnections: *num_connections,
+            Timestamp: *timestamp,
+        })),
+        // 8.2: ClusterConfig carries full folder data
         BepMessage::ClusterConfig { folders } => Ok(WireMessage::ClusterConfig(ClusterConfig {
             Folders: folders
                 .iter()
-                .map(|id| Folder {
-                    Id: id.clone(),
+                .map(|f| Folder {
+                    Id: f.id.clone(),
+                    Label: f.label.clone(),
+                    Type: f.folder_type,
+                    Devices: f
+                        .devices
+                        .iter()
+                        .map(|d| Device {
+                            Id: String::from_utf8_lossy(&d.id).to_string(),
+                            Name: d.name.clone(),
+                            Addresses: d.addresses.clone(),
+                            Compression: d.compression,
+                            Introducer: d.introducer,
+                            IndexId: d.index_id,
+                            MaxSequence: d.max_sequence,
+                            EncryptionPasswordToken: d.encryption_password_token.clone(),
+                            SkipIntroductionRemovals: d.skip_introduction_removals,
+                            CertName: String::new(),
+                        })
+                        .collect(),
                     ..Default::default()
                 })
                 .collect(),
@@ -472,12 +521,18 @@ fn bep_to_wire(message: &BepMessage) -> Result<WireMessage, String> {
             Files: files.iter().map(index_entry_to_fileinfo).collect(),
             LastSequence: files.iter().map(|f| f.sequence as i64).max().unwrap_or(0),
         })),
-        BepMessage::IndexUpdate { folder, files } => Ok(WireMessage::IndexUpdate(IndexUpdate {
+        // 8.6: IndexUpdate preserves prev_sequence
+        BepMessage::IndexUpdate {
+            folder,
+            files,
+            prev_sequence,
+        } => Ok(WireMessage::IndexUpdate(IndexUpdate {
             Folder: folder.clone(),
             Files: files.iter().map(index_entry_to_fileinfo).collect(),
             LastSequence: files.iter().map(|f| f.sequence as i64).max().unwrap_or(0),
-            PrevSequence: 0,
+            PrevSequence: *prev_sequence,
         })),
+        // 8.5: Request preserves from_temporary and block_no
         BepMessage::Request {
             id,
             folder,
@@ -485,6 +540,8 @@ fn bep_to_wire(message: &BepMessage) -> Result<WireMessage, String> {
             offset,
             size,
             hash,
+            from_temporary,
+            block_no,
         } => Ok(WireMessage::Request(Request {
             Id: *id as i32,
             Folder: folder.clone(),
@@ -492,12 +549,13 @@ fn bep_to_wire(message: &BepMessage) -> Result<WireMessage, String> {
             Offset: *offset as i64,
             Size: *size as i32,
             Hash: hash.clone(),
-            FromTemporary: false,
-            BlockNo: 0,
+            FromTemporary: *from_temporary,
+            BlockNo: *block_no,
         })),
+        // 8.7: Response code is i32
         BepMessage::Response { id, code, data, .. } => Ok(WireMessage::Response(Response {
             Id: *id as i32,
-            Code: *code as i32,
+            Code: *code,
             Data: data.clone(),
         })),
         BepMessage::DownloadProgress { folder, updates } => {
@@ -531,6 +589,7 @@ fn bep_to_wire(message: &BepMessage) -> Result<WireMessage, String> {
     }
 }
 
+// 8.3: fileinfo_to_index_entry preserves all FileInfo fields
 fn fileinfo_to_index_entry(file: &FileInfo) -> IndexEntry {
     IndexEntry {
         path: file.Name.clone(),
@@ -538,6 +597,16 @@ fn fileinfo_to_index_entry(file: &FileInfo) -> IndexEntry {
         deleted: file.Deleted,
         size: file.Size.max(0) as u64,
         block_hashes: file.Blocks.iter().map(|b| encode_hex(&b.Hash)).collect(),
+        file_type: file.Type,
+        permissions: file.Permissions.max(0) as u32,
+        modified_s: file.ModifiedS,
+        modified_ns: file.ModifiedNs,
+        modified_by: file.ModifiedBy.max(0) as u64,
+        no_permissions: file.NoPermissions,
+        invalid: file.Invalid,
+        local_flags: file.LocalFlags.max(0) as u32,
+        symlink_target: file.SymlinkTarget.clone(),
+        block_size: file.BlockSize,
     }
 }
 

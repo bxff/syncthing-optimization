@@ -237,6 +237,8 @@ mod tests {
                 offset: 0,
                 size: 1,
                 hash: Vec::new(),
+                from_temporary: false,
+                block_no: 0,
             },
         );
         let trace = run_message_exchange(&messages).expect("must succeed");

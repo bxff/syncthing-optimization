@@ -870,7 +870,30 @@ impl model {
         self.CurrentGlobalFile(folder_id, path)
     }
 
+    /// Handles a block request from a remote device.
+    /// Matches Go's validation chain: folder existence, internal file
+    /// rejection, path traversal prevention. The Rust version returns
+    /// file metadata rather than actual block data.
     pub(crate) fn Request(&self, folder_id: &str, path: &str) -> Option<db::FileInfo> {
+        // Validate folder exists and is running.
+        if self.checkFolderRunningRLocked(folder_id).is_err() {
+            return None;
+        }
+
+        // Reject internal syncthing files.
+        if path.starts_with(".stfolder")
+            || path.starts_with(".stignore")
+            || path.starts_with(".stversions")
+            || path.contains("/.st")
+        {
+            return None;
+        }
+
+        // Reject path traversal.
+        if path.contains("../") {
+            return None;
+        }
+
         self.CurrentFolderFile(folder_id, path)
     }
 

@@ -753,12 +753,16 @@ impl folder {
                 drop(db);
 
                 if let Some(local) = local {
-                    // If the file exists locally with same content, just
-                    // update its sequence to match global.
+                    // E1: Go checks full metadata equivalence, not just size + file_type.
+                    // Compare modified_s, permissions, block_hashes, symlink_target too.
                     if !local.deleted
                         && !needed.deleted
                         && local.size == needed.size
                         && local.file_type == needed.file_type
+                        && local.modified_ns == needed.modified_ns
+                        && local.permissions == needed.permissions
+                        && local.block_hashes == needed.block_hashes
+                        && local.symlink_target == needed.symlink_target
                     {
                         let mut entry = needed.clone();
                         entry.folder = self.config.id.clone();
@@ -2088,6 +2092,12 @@ fn write_file_atomic(path: &Path, size: i64) -> Result<(), String> {
             path.display()
         ));
     }
+    // E6: fsync parent directory after rename for crash-consistency.
+    // Go's osutil.Rename syncs the parent dir inode to ensure the
+    // directory entry is durable even after a crash.
+    if let Ok(dir) = fs::File::open(parent) {
+        let _ = dir.sync_all();
+    }
     Ok(())
 }
 
@@ -2506,7 +2516,9 @@ impl sendReceiveFolder {
             match fs::symlink_metadata(&abs) {
                 Ok(meta) => {
                     if meta.is_dir() {
-                        fs::remove_dir_all(&abs)
+                        // E5: Go uses os.Remove (non-recursive), not os.RemoveAll.
+                        // Only remove empty dirs to prevent data loss.
+                        fs::remove_dir(&abs)
                             .map_err(|e| format!("remove dir {}: {e}", abs.display()))?;
                     }
                 }

@@ -1099,6 +1099,8 @@ struct ApiRuntimeState {
     active_auth_users: BTreeSet<String>,
     active_auth_tokens: BTreeMap<String, String>,
     active_auth_csrf: BTreeMap<String, String>,
+    // B11: Track config dirty state for /rest/config/insync — separate from shutdown
+    config_dirty: bool,
 }
 
 impl ApiRuntimeState {
@@ -1195,6 +1197,7 @@ impl ApiRuntimeState {
             active_auth_users: BTreeSet::new(),
             active_auth_tokens: BTreeMap::new(),
             active_auth_csrf: BTreeMap::new(),
+            config_dirty: false,
         }
     }
 }
@@ -1282,6 +1285,10 @@ fn start_api_server(
                 };
                 if let Some(token) = bearer_token {
                     url = append_query_param(&url, &token_query_key, token.trim());
+                }
+                // B3: Extract Basic auth credentials and pass through as _auth_basic param
+                if auth.len() > 6 && auth[..6].eq_ignore_ascii_case("basic ") {
+                    url = append_query_param(&url, "_auth_basic", auth[6..].trim());
                 }
             }
             if let Some(cookie_header) = request
@@ -1605,6 +1612,18 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
+            // B2: Check if LDAP auth mode is configured
+            let auth_mode = state
+                .gui
+                .get("authMode")
+                .and_then(Value::as_str)
+                .unwrap_or("static");
+            if auth_mode == "ldap" {
+                // B2: LDAP auth — delegate to LDAP bind verification
+                // In production, this would perform an LDAP bind against configured server.
+                // For now, reject with a descriptive error since LDAP infra is not available.
+                return make_api_error(501, "LDAP authentication not yet implemented");
+            }
             if !expected_user.is_empty() || !expected_password.is_empty() {
                 let password_ok = verify_gui_password(&provided_password, &expected_password);
                 if user != expected_user || !password_ok {
@@ -2092,12 +2111,17 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 Err(err) => make_api_error(500, err),
             },
             // RT-4: Go only accepts GET+PUT on /rest/config, not POST
-            Method::Put => {
+            // B6: POST acts as deprecated alias for PUT (Go compatibility)
+            Method::Put | Method::Post => {
                 // 13.5: Validate body if provided via _body query param.
                 if let Some(body) = params.get("_body") {
                     if serde_json::from_str::<Value>(body).is_err() {
                         return make_api_error(400, "invalid JSON in config body");
                     }
+                }
+                // B11: Mark config as dirty so /rest/config/insync reports correctly
+                if let Ok(mut state) = runtime.state.write() {
+                    state.config_dirty = true;
                 }
                 append_event(
                     runtime,
@@ -2113,8 +2137,12 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             if method != &Method::Get {
                 return make_api_error(405, "method not allowed");
             }
-            // R5: state-driven — check if pending restart or config changed
-            let in_sync = !runtime.shutdown_requested.load(Ordering::Acquire);
+            // B11: state-driven — check config_dirty flag, not shutdown_requested
+            let in_sync = !runtime
+                .state
+                .read()
+                .map(|s| s.config_dirty)
+                .unwrap_or(false);
             ApiReply::json(200, json!({"configInSync": in_sync}))
         }
         "/rest/config/restart-required" => {
@@ -3740,6 +3768,37 @@ fn csprng_hex_token() -> String {
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// B3: Decode a Base64-encoded string to raw bytes.
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    // RFC 4648 standard base64 decode (no padding required)
+    let lut = |c: u8| -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            b'=' => None, // padding
+            _ => None,
+        }
+    };
+    let filtered: Vec<u8> = input.bytes().filter(|&b| b != b'=').collect();
+    let mut out = Vec::with_capacity(filtered.len() * 3 / 4);
+    for chunk in filtered.chunks(4) {
+        let vals: Vec<u8> = chunk.iter().filter_map(|&b| lut(b)).collect();
+        if vals.len() >= 2 {
+            out.push((vals[0] << 2) | (vals[1] >> 4));
+        }
+        if vals.len() >= 3 {
+            out.push((vals[1] << 4) | (vals[2] >> 2));
+        }
+        if vals.len() >= 4 {
+            out.push((vals[2] << 6) | vals[3]);
+        }
+    }
+    Some(out)
+}
+
 fn verify_gui_password(provided_password: &str, expected_password: &str) -> bool {
     if expected_password.is_empty() {
         return provided_password.is_empty();
@@ -3763,11 +3822,30 @@ fn is_authenticated_request(
         .state
         .read()
         .map_err(|_| "api state lock poisoned".to_string())?;
-    // RT-1: Go validates CSRF via a separate middleware layer.
-    // When user/password auth is not required, allow all requests through from
-    // the auth perspective. CSRF enforcement (if needed) should be a separate
-    // check matching Go's csrf.Manager middleware.
+    // B1: Go enforces CSRF via csrfManager on ALL mutating /rest/* requests,
+    // independent of whether user/password auth is required. We must check
+    // CSRF before the auth-bypass early return.
     let auth_is_required = auth_required(&state);
+
+    let is_mutating_rest = path.starts_with("/rest/")
+        && !path.starts_with("/rest/noauth/")
+        && !path.starts_with("/rest/debug/")
+        && matches!(
+            method,
+            Method::Post | Method::Put | Method::Delete | Method::Patch
+        );
+
+    if is_mutating_rest {
+        // B1: Always enforce CSRF on mutating /rest/ requests, even when auth is off.
+        let csrf_key = auth_query_csrf_key(&state);
+        let provided_csrf = params.get(&csrf_key).map(String::as_str).unwrap_or("");
+        let csrf_valid = state.active_auth_csrf.values().any(|v| v == provided_csrf);
+        // If CSRF is not valid and there are active tokens requiring CSRF, reject
+        if !csrf_valid && !state.active_auth_csrf.is_empty() {
+            return Ok(false);
+        }
+    }
+
     if !auth_is_required {
         return Ok(true);
     }
@@ -3788,6 +3866,35 @@ fn is_authenticated_request(
         .unwrap_or(false);
     if authenticated_via_api_key {
         return Ok(true);
+    }
+
+    // B3: Basic auth fallback — Go checks `Authorization: Basic <base64>` after API key
+    if let Some(basic_creds) = params.get("_auth_basic") {
+        use std::io::Read;
+        let decoded = base64_decode(basic_creds);
+        if let Some((user, pass)) = decoded.and_then(|d| {
+            let s = String::from_utf8(d).ok()?;
+            let (u, p) = s.split_once(':')?;
+            Some((u.to_string(), p.to_string()))
+        }) {
+            let expected_user = state
+                .gui
+                .get("user")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let expected_password = state
+                .gui
+                .get("password")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if user == expected_user && verify_gui_password(&pass, &expected_password) {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
     }
 
     let token_key = auth_query_token_key(&state);

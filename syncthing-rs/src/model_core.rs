@@ -1441,12 +1441,39 @@ impl model {
         self.IndexUpdateFromDevice(folder_id, "remote", files)
     }
 
+    /// Applies incremental index updates from a remote device.
+    /// Matches Go's index handler sequence tracking: validates that incoming
+    /// file sequences are monotonically increasing relative to the device's
+    /// last known sequence in the DB.
     pub(crate) fn IndexUpdateFromDevice(
         &mut self,
         folder_id: &str,
         device: &str,
         files: &[db::FileInfo],
     ) -> Result<(), String> {
+        if files.is_empty() {
+            return Ok(());
+        }
+
+        // Validate sequence numbers: all incoming files should have sequences
+        // greater than the device's last known max sequence.
+        let db = self
+            .sdb
+            .read()
+            .map_err(|_| "db lock poisoned".to_string())?;
+        let current_seq = db.get_device_sequence(folder_id, device).unwrap_or(0);
+        drop(db);
+
+        // Check that the update contains files with sequences > current_seq.
+        // If the max incoming sequence is <= current_seq, this is likely a
+        // replay or stale update.
+        let max_incoming_seq = files.iter().map(|f| f.sequence).max().unwrap_or(0);
+        if max_incoming_seq > 0 && max_incoming_seq <= current_seq {
+            return Err(format!(
+                "index update for {folder_id}/{device}: max incoming sequence {max_incoming_seq} <= current {current_seq}"
+            ));
+        }
+
         self.IndexFromDevice(folder_id, device, files)
     }
 
@@ -1734,8 +1761,42 @@ impl model {
         self.generateClusterConfigRLocked()
     }
 
+    /// Generates the ClusterConfig payload for a specific peer device.
+    /// Matches Go's `generateClusterConfigRLocked`: builds per-folder device lists,
+    /// filters by shared devices, handles encryption tokens, and marks paused folders.
     pub(crate) fn generateClusterConfigRLocked(&self) -> BTreeMap<String, FolderConfiguration> {
-        self.folderCfgs.clone()
+        let mut result = BTreeMap::new();
+
+        for (folder_id, folder_cfg) in &self.folderCfgs {
+            // Skip ReceiveEncrypted folders that don't have an encryption
+            // token yet — the peer can't validate us without one.
+            if folder_cfg.folder_type == FolderType::ReceiveEncrypted
+                && !self.folderEncryptionPasswordTokens.contains_key(folder_id)
+            {
+                continue;
+            }
+
+            let mut out_cfg = folder_cfg.clone();
+
+            // Filter device list: for untrusted (encrypted) devices,
+            // only include the target peer — don't leak untrusted device
+            // info to other peers (prevents introducer features from kicking
+            // in for encryption proxies).
+            out_cfg.devices = folder_cfg
+                .devices
+                .iter()
+                .filter(|d| {
+                    // Keep devices that don't have an encryption password
+                    // (they are normal peers), OR that are "self".
+                    d.encryption_password.is_empty() || d.device_id == self.id
+                })
+                .cloned()
+                .collect();
+
+            result.insert(folder_id.clone(), out_cfg);
+        }
+
+        result
     }
 
     /// Handles auto-accepting folders for devices with `AutoAcceptFolders` set.

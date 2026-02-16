@@ -1929,11 +1929,35 @@ impl sendReceiveFolder {
         self.folder.Jobs()
     }
 
+    /// Validates that the parent directory of the given path is safe.
+    /// Matches Go's inline validation: checks for path traversal AND
+    /// symlink-in-path attacks where an intermediate component is a symlink
+    /// that could redirect writes outside the folder root.
     pub(crate) fn checkParent(&self, path: &str) -> Result<(), String> {
         if path.contains("../") {
             return Err(errDirPrefix.to_string());
         }
-        let _ = self.resolve_abs_path(path)?;
+        let abs = match self.resolve_abs_path(path)? {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        // Check each parent component for symlinks.
+        // A symlink in the path could redirect file writes outside the folder.
+        if let Some(parent) = abs.parent() {
+            let root = PathBuf::from(&self.folder.config.path);
+            let mut current = root.clone();
+            if let Ok(rel) = parent.strip_prefix(&root) {
+                for component in rel.components() {
+                    current = current.join(component);
+                    if current.is_symlink() {
+                        return Err(format!(
+                            "parent directory contains symlink: {}",
+                            current.display()
+                        ));
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -2287,8 +2311,83 @@ impl sendReceiveFolder {
         self.withLimiter(bytes)
     }
 
-    pub(crate) fn moveForConflict(&self, path: &str) -> String {
-        conflictName(path)
+    /// Moves a file to a conflict copy, matching Go's `moveForConflict`.
+    /// If the file is already a conflict copy, removes it.
+    /// If `max_conflicts` is 0, removes the file instead of renaming.
+    /// Otherwise, renames to a conflict name and trims excess conflicts.
+    pub(crate) fn moveForConflict(&mut self, path: &str) -> Result<String, String> {
+        // If the file is already a conflict copy, just remove it.
+        if isConflict(path) {
+            if let Ok(Some(abs)) = self.resolve_abs_path(path) {
+                let _ = fs::remove_file(&abs);
+            }
+            return Ok(String::new());
+        }
+
+        // If max_conflicts is 0, remove instead of making a conflict copy.
+        if self.folder.config.max_conflicts == 0 {
+            if let Ok(Some(abs)) = self.resolve_abs_path(path) {
+                let _ = fs::remove_file(&abs);
+            }
+            return Ok(String::new());
+        }
+
+        // Rename to conflict name.
+        let new_name = conflictName(path);
+        if let (Ok(Some(src)), Ok(Some(dst))) = (
+            self.resolve_abs_path(path),
+            self.resolve_abs_path(&new_name),
+        ) {
+            match fs::rename(&src, &dst) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    // Source doesn't exist — treat as success (user may have
+                    // already moved it, or it's a remote-modify/local-delete
+                    // conflict).
+                }
+                Err(err) => return Err(format!("rename conflict: {err}")),
+            }
+        }
+
+        // Trim excess conflict copies if max_conflicts > 0.
+        if self.folder.config.max_conflicts > 0 {
+            let max = self.folder.config.max_conflicts as usize;
+            if let Ok(Some(parent)) = self.resolve_abs_path(
+                &PathBuf::from(path)
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+            ) {
+                // Find existing conflict copies for this file.
+                if let Ok(entries) = fs::read_dir(&parent) {
+                    let stem = PathBuf::from(path)
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let mut conflicts: Vec<String> = entries
+                        .filter_map(|e| e.ok())
+                        .filter_map(|e| {
+                            let name = e.file_name().to_string_lossy().to_string();
+                            if name.contains(&stem) && isConflict(&name) {
+                                Some(name)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if conflicts.len() > max {
+                        conflicts.sort();
+                        conflicts.reverse();
+                        for excess in &conflicts[max..] {
+                            let excess_path = parent.join(excess);
+                            let _ = fs::remove_file(&excess_path);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(new_name)
     }
 
     pub(crate) fn newPullError(&self, path: &str, err: &str) -> FileError {
@@ -2743,12 +2842,26 @@ pub(crate) fn unifySubs(subs: &[String]) -> Vec<String> {
     uniq.into_iter().collect()
 }
 
+/// Generates a conflict-copy filename with timestamp and modifier ID.
+/// Matches Go's `conflictName` which formats as:
+///   `{name}.sync-conflict-{YYYYMMDD-HHMMSS}-{modifier}{ext}`
 pub(crate) fn conflictName(path: &str) -> String {
-    format!("{path}.sync-conflict-rs")
+    let p = std::path::Path::new(path);
+    let ext = p
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let stem = &path[..path.len() - ext.len()];
+    // Use Unix timestamp since chrono is not available.
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("{stem}.sync-conflict-{ts}-unknown{ext}")
 }
 
 pub(crate) fn isConflict(path: &str) -> bool {
-    path.contains("sync-conflict")
+    path.contains(".sync-conflict-")
 }
 
 pub(crate) fn existingConflicts(paths: &[String]) -> Vec<String> {

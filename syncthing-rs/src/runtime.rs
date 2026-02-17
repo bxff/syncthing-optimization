@@ -1398,6 +1398,10 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "model lock poisoned"),
                 };
+                // 1d: PATCH requires existing entity — Go returns 404 on missing
+                if *method == Method::Patch && !guard.folderCfgs.contains_key(folder_id) {
+                    return make_api_error(404, "folder not found");
+                }
                 if !guard.folderCfgs.contains_key(folder_id) {
                     let path_value = params
                         .get("path")
@@ -1488,6 +1492,10 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "api state lock poisoned"),
                 };
+                // 1d: PATCH requires existing entity — Go returns 404 on missing
+                if *method == Method::Patch && !state.device_configs.contains_key(device_id) {
+                    return make_api_error(404, "device not found");
+                }
                 let mut cfg = state
                     .device_configs
                     .get(device_id)
@@ -1830,8 +1838,13 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 )
             }
             Method::Post => {
-                let Some(message) = params.get("message") else {
-                    return make_api_error(400, "missing message query parameter");
+                // 1f: Go reads error message from request body, not query param
+                let message = params
+                    .get("_body")
+                    .cloned()
+                    .or_else(|| params.get("message").cloned());
+                let Some(message) = message else {
+                    return make_api_error(400, "missing error message in request body");
                 };
                 let mut state = match runtime.state.write() {
                     Ok(guard) => guard,

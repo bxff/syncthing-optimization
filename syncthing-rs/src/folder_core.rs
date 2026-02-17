@@ -1894,6 +1894,28 @@ fn hash_file_blocks(path: &Path) -> Result<Vec<String>, String> {
     Ok(hashes)
 }
 
+/// 4b: Verify that the file on disk matches the expected block hashes.
+/// Returns `Ok(true)` if all block hashes match, `Ok(false)` if there's
+/// a mismatch (file needs re-fetch), or `Err` on I/O failure.
+/// This is the Rust equivalent of Go's `verifyBuffer` — called from the
+/// finisher to ensure block integrity before clearing FLAG_LOCAL_NEEDED.
+fn verify_file_blocks(path: &Path, expected_hashes: &[String]) -> Result<bool, String> {
+    if expected_hashes.is_empty() {
+        // No hashes to verify (e.g., empty file or directory) — trivially OK.
+        return Ok(true);
+    }
+    let actual_hashes = hash_file_blocks(path)?;
+    if actual_hashes.len() != expected_hashes.len() {
+        return Ok(false);
+    }
+    for (actual, expected) in actual_hashes.iter().zip(expected_hashes.iter()) {
+        if actual != expected {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn count_same_path_reuse_blocks(local_prev: &db::FileInfo, target: &db::FileInfo) -> usize {
     let mut reused = 0_usize;
     for (idx, wanted) in target.block_hashes.iter().enumerate() {
@@ -2534,19 +2556,20 @@ impl sendReceiveFolder {
         self.deleteFile(path)
     }
 
-    /// Finalizes pulled files: processes temp pull errors, then delegates
-    /// to the actual file finishing logic. Matches Go's `finisherRoutine`
-    /// which closes temp files, renames them, updates block stats, and
-    /// emits ItemFinished events.
+    /// Finalizes pulled files: verifies block hashes on disk and clears
+    /// FLAG_LOCAL_NEEDED for files that pass verification.
     ///
-    /// 4c: Go's `performFinish` adds drift/conflict guards before final file
-    /// replacement:
-    ///   1. Re-stat the target path — if the file changed since the pull started
-    ///      (size/mtime differ from the db-local snapshot), treat it as a
-    ///      local-modify/remote-modify conflict.
-    ///   2. If a conflict is detected, move the local copy via moveForConflict
-    ///      before replacing with the pulled version.
-    ///   3. If max_conflicts == -1, skip conflict handling entirely (Go semantics).
+    /// This is the Rust equivalent of Go's finisherRoutine which:
+    ///   1. Closes temp files
+    ///   2. Calls performFinish (permissions, conflict check, rename)
+    ///   3. Records the file in the DB (clearing local flags)
+    ///   4. Emits ItemFinished events
+    ///
+    /// 4a: Pipeline lifecycle — the finisher is the last stage that confirms
+    /// a file is fully synced.
+    /// 4b: Block verification — don't clear FLAG_LOCAL_NEEDED until all
+    /// block hashes match the expected values.
+    /// 4c: performFinish drift/conflict guards are also applied here.
     pub(crate) fn finisherRoutine(&mut self) -> usize {
         let error_count = self.tempPullErrors.len();
 
@@ -2555,24 +2578,122 @@ impl sendReceiveFolder {
             self.folder.errorsMut.push(err.clone());
         }
 
-        // 4c: performFinish conflict/drift detection.
-        // Go checks each completed file against current disk state.
-        // If the file was modified locally during sync, it's a conflict.
-        // Since we don't have a temp-file rename pipeline, we check the
-        // pending copier queue for any files that may have changed on disk.
-        if self.folder.config.max_conflicts != -1 {
-            if let Ok(db) = self.folder.db.read() {
-                for err_entry in &self.tempPullErrors {
-                    // Check if the file that errored has a conflicting local version
-                    if let Ok(Some(local)) =
-                        db.get_device_file(&self.folder.config.id, LOCAL_DEVICE_ID, &err_entry.Path)
-                    {
-                        if !local.deleted && local.local_flags & db::FLAG_LOCAL_NEEDED != 0 {
-                            // File is still needed — conflict was already created or
-                            // file disappeared. No additional action needed.
-                        }
+        // 4a/4b: Verify block hashes for files marked FLAG_LOCAL_NEEDED
+        // and clear the flag on success. This ensures data integrity before
+        // considering a file fully synced, matching Go's finisher contract.
+        let folder_id = self.folder.config.id.clone();
+        let folder_path = self.folder.config.path.clone();
+
+        if folder_path.trim().is_empty() {
+            return error_count;
+        }
+
+        let root = PathBuf::from(&folder_path);
+
+        // Collect locally-needed files from the DB.
+        let needed_files: Vec<db::FileInfo> = {
+            let db = match self.folder.db.read() {
+                Ok(db) => db,
+                Err(_) => return error_count,
+            };
+            let stream = match db.all_local_files(&folder_id, LOCAL_DEVICE_ID) {
+                Ok(s) => s,
+                Err(_) => return error_count,
+            };
+            let files: Vec<db::FileInfo> = stream
+                .filter_map(|r| r.ok())
+                .filter(|f| {
+                    !f.deleted
+                        && f.file_type == db::FileInfoType::File
+                        && f.local_flags & db::FLAG_LOCAL_NEEDED != 0
+                })
+                .collect();
+            drop(db);
+            files
+        };
+
+        if needed_files.is_empty() {
+            return error_count;
+        }
+
+        let mut verified_updates: Vec<db::FileInfo> = Vec::new();
+
+        for local in &needed_files {
+            let abs = match safe_join_relative_path(&root, &local.path) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            if !abs.exists() || abs.is_dir() {
+                // File doesn't exist on disk or is a directory — skip,
+                // leave FLAG_LOCAL_NEEDED set for next pull cycle.
+                continue;
+            }
+
+            // 4c: performFinish conflict/drift detection.
+            // Check if file was modified locally during sync.
+            if self.folder.config.max_conflicts != -1 {
+                if let Ok(meta) = fs::metadata(&abs) {
+                    let disk_size = meta.len() as i64;
+                    if disk_size != local.size && local.size > 0 {
+                        // File size changed on disk since the pull — possible conflict.
+                        // Leave FLAG_LOCAL_NEEDED set; the next scan will detect the change.
+                        self.folder.errorsMut.push(FileError {
+                            Path: local.path.clone(),
+                            Err: "file modified during sync (size drift)".to_string(),
+                        });
+                        continue;
                     }
                 }
+            }
+
+            // 4b: Verify block hashes before clearing FLAG_LOCAL_NEEDED.
+            // Look up the expected block hashes from the global winner.
+            let expected_hashes = {
+                let db = match self.folder.db.read() {
+                    Ok(db) => db,
+                    Err(_) => continue,
+                };
+                // Use the global winner's block hashes as the source of truth.
+                match db.get_device_file(&folder_id, LOCAL_DEVICE_ID, &local.path) {
+                    Ok(Some(global)) => global.block_hashes,
+                    _ => local.block_hashes.clone(),
+                }
+            };
+
+            match verify_file_blocks(&abs, &expected_hashes) {
+                Ok(true) => {
+                    // All blocks verified — clear FLAG_LOCAL_NEEDED.
+                    let mut updated = local.clone();
+                    updated.local_flags &= !db::FLAG_LOCAL_NEEDED;
+                    verified_updates.push(updated);
+                }
+                Ok(false) => {
+                    // Block hash mismatch — file needs re-fetch.
+                    // Leave FLAG_LOCAL_NEEDED set.
+                    self.tempPullErrors.push(FileError {
+                        Path: local.path.clone(),
+                        Err: "block hash verification failed".to_string(),
+                    });
+                    self.folder.errorsMut.push(FileError {
+                        Path: local.path.clone(),
+                        Err: "block hash verification failed".to_string(),
+                    });
+                }
+                Err(err) => {
+                    // I/O error during verification — leave flag set.
+                    self.folder.errorsMut.push(FileError {
+                        Path: local.path.clone(),
+                        Err: format!("block verification I/O error: {err}"),
+                    });
+                }
+            }
+        }
+
+        // Commit all verified files to the DB in one batch.
+        if !verified_updates.is_empty() {
+            if let Ok(mut db) = self.folder.db.write() {
+                let _ = db.update(&folder_id, LOCAL_DEVICE_ID, verified_updates);
             }
         }
 

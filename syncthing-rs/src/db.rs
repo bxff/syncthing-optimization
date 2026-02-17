@@ -1867,20 +1867,26 @@ fn prefer_global(candidate: &FileInfo, current: &FileInfo) -> bool {
             return false;
         }
         // Concurrent (has both greater and lesser, or all equal):
-        // Fall through to tie-breaking
+        // 3b: Concurrent conflict — use Go's WinsConflict tie-breaking:
+        // (1) non-deleted beats deleted
+        // (2) higher modified-by (device short ID) wins
+        // (3) fall back to sequence
+        if candidate.deleted != current.deleted {
+            return !candidate.deleted;
+        }
+        if candidate.modified_by != current.modified_by {
+            return candidate.modified_by > current.modified_by;
+        }
     }
 
-    // Fallback for entries without version vectors or concurrent versions.
+    // Fallback for entries without version vectors or equal concurrent.
     if candidate.sequence != current.sequence {
         return candidate.sequence > current.sequence;
     }
     if candidate.deleted != current.deleted {
         return !candidate.deleted;
     }
-    if candidate.modified_ns != current.modified_ns {
-        return candidate.modified_ns > current.modified_ns;
-    }
-    candidate.path > current.path
+    candidate.modified_ns > current.modified_ns
 }
 
 fn sort_pull_order(files: &mut [FileInfo], order: PullOrder) {

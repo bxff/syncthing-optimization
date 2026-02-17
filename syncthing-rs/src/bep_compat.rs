@@ -111,7 +111,8 @@ pub(crate) struct FileInfoWithoutBlocks {
     pub(crate) NoPermissions: bool,
     pub(crate) Sequence: i64,
     pub(crate) BlockSize: i32,
-    pub(crate) SymlinkTarget: String,
+    // 2b: SymlinkTarget as bytes (matching FileInfo)
+    pub(crate) SymlinkTarget: Vec<u8>,
     pub(crate) LocalFlags: u32,
     pub(crate) VersionHash: Vec<u8>,
     pub(crate) InodeChangeNs: i64,
@@ -119,7 +120,8 @@ pub(crate) struct FileInfoWithoutBlocks {
     pub(crate) BlocksHash: Vec<u8>,
     pub(crate) Platform: PlatformData,
     pub(crate) Version: Vector,
-    pub(crate) Encrypted: bool,
+    // 2c: Encrypted as bytes (matching FileInfo)
+    pub(crate) Encrypted: Vec<u8>,
     pub(crate) PreviousBlocksHash: Vec<u8>,
 }
 
@@ -244,11 +246,11 @@ impl ClusterConfig {
 }
 
 impl Counter {
-    pub(crate) fn GetId(&self) -> i64 {
+    pub(crate) fn GetId(&self) -> u64 {
         self.Id
     }
 
-    pub(crate) fn GetValue(&self) -> i64 {
+    pub(crate) fn GetValue(&self) -> u64 {
         self.Value
     }
 }
@@ -397,7 +399,7 @@ impl FileInfo {
     }
 
     pub(crate) fn GetEncrypted(&self) -> bool {
-        self.Encrypted
+        !self.Encrypted.is_empty()
     }
 
     pub(crate) fn GetEncryptionTrailerSize(&self) -> i64 {
@@ -457,7 +459,7 @@ impl FileInfo {
     }
 
     pub(crate) fn GetSymlinkTarget(&self) -> String {
-        self.SymlinkTarget.clone()
+        String::from_utf8_lossy(&self.SymlinkTarget).to_string()
     }
 
     pub(crate) fn GetType(&self) -> i32 {
@@ -1010,7 +1012,7 @@ impl FileInfoWithoutBlocks {
             BlocksHash: file.BlocksHash.clone(),
             Platform: file.Platform.clone(),
             Version: file.Version.clone(),
-            Encrypted: file.Encrypted,
+            Encrypted: file.Encrypted.clone(),
             PreviousBlocksHash: file.PreviousBlocksHash.clone(),
         }
     }
@@ -1025,7 +1027,7 @@ impl FileInfoWithoutBlocks {
         self.Deleted
     }
     pub(crate) fn GetEncrypted(&self) -> bool {
-        self.Encrypted
+        !self.Encrypted.is_empty()
     }
     pub(crate) fn GetEncryptionTrailerSize(&self) -> i64 {
         self.EncryptionTrailerSize
@@ -1070,7 +1072,7 @@ impl FileInfoWithoutBlocks {
         self.Size
     }
     pub(crate) fn GetSymlinkTarget(&self) -> String {
-        self.SymlinkTarget.clone()
+        String::from_utf8_lossy(&self.SymlinkTarget).to_string()
     }
     pub(crate) fn GetType(&self) -> i32 {
         self.Type

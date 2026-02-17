@@ -1054,6 +1054,9 @@ impl model {
                 self.ensure_remote_index_allowed(device, folder)?;
                 // C4: Enforce prev_sequence matching — Go rejects on mismatch.
                 // prev_sequence == 0 means first IndexUpdate after Index (no prior state).
+                // 3e: Go logs anomaly and continues on prev_sequence mismatch
+                // instead of hard-failing. This supports re-connections where
+                // sequence state may be slightly stale.
                 if *prev_sequence > 0 {
                     let db = self
                         .sdb
@@ -1062,10 +1065,10 @@ impl model {
                     let stored_seq = db.get_device_sequence(folder, device).unwrap_or(0);
                     drop(db);
                     if stored_seq != *prev_sequence {
-                        return Err(format!(
-                            "C4: IndexUpdate {}/{}: prev_sequence mismatch (stored={}, received={})",
+                        eprintln!(
+                            "3e: IndexUpdate {}/{}: prev_sequence mismatch (stored={}, received={}) — processing anyway",
                             device, folder, stored_seq, prev_sequence
-                        ));
+                        );
                     }
                 }
                 let converted = files
@@ -1109,25 +1112,12 @@ impl model {
                 match self.RequestData(folder, name, *offset as u64, *size as usize) {
                     Ok(data) => {
                         if !is_receive_encrypted && !hash.is_empty() {
+                            // 3g: Go only validates raw 32-byte SHA-256 digest.
+                            // No hex-string or UTF-8 fallback — strict byte comparison only.
                             let hash_ok = if hash.len() == 32 {
                                 sha256_bytes_matches(hash, &data)
-                            } else if let Some(hash_str) = std::str::from_utf8(hash).ok() {
-                                if is_hex_sha256(hash_str) {
-                                    sha256_hex_matches(hash_str, &data)
-                                } else {
-                                    // 12.3: Try SHA-256 of data before DB-only fallback.
-                                    let digest = Sha256::digest(&data);
-                                    let digest_hex: String =
-                                        digest.iter().map(|b| format!("{b:02x}")).collect();
-                                    if hash_str == digest_hex {
-                                        true
-                                    } else {
-                                        // MC-1: No DB-string fallback — only raw SHA-256 digest match.
-                                        false
-                                    }
-                                }
                             } else {
-                                // 12.3: Non-UTF-8 hash — compute SHA-256 and compare raw bytes.
+                                // Non-32-byte hash: compute SHA-256 and compare raw bytes
                                 let digest = Sha256::digest(&data);
                                 hash == digest.as_slice()
                             };
@@ -2528,9 +2518,10 @@ fn fileInfoFromIndexEntry(folder: &str, file: &IndexEntry) -> db::FileInfo {
         .modified_s
         .saturating_mul(1_000_000_000)
         .saturating_add(file.modified_ns as i64);
-    // C2: Map wire invalid to FlagLocalRemoteInvalid (Go's setLocalFlags pattern).
+    // 3d: Go treats local_flags as local-only — remote wire local_flags are
+    // never trusted. Only the invalid bit is mapped to FlagLocalRemoteInvalid.
     // ignored is only set by local scans, not from remote index entries.
-    let mut lf = file.local_flags;
+    let mut lf: u32 = 0;
     if file.invalid {
         lf |= FlagLocalRemoteInvalid;
     }

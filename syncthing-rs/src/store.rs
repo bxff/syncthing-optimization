@@ -1293,8 +1293,15 @@ fn encode_op(op: &JournalOp) -> Vec<u8> {
                 .map(|v| escape(v))
                 .collect::<Vec<_>>()
                 .join(",");
+            // 3a: Serialize version_counters as comma-separated id:value pairs
+            let vc = file
+                .version_counters
+                .iter()
+                .map(|(id, val)| format!("{}:{}", id, val))
+                .collect::<Vec<_>>()
+                .join(",");
             format!(
-                "U\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                "U\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 escape(&file.folder),
                 escape(&file.device),
                 escape(&file.path),
@@ -1305,7 +1312,8 @@ fn encode_op(op: &JournalOp) -> Vec<u8> {
                 if file.ignored { 1 } else { 0 },
                 file.local_flags,
                 escape(&file.file_type),
-                hashes
+                hashes,
+                vc
             )
         }
         JournalOp::Delete {
@@ -1367,7 +1375,9 @@ fn decode_op(payload: &[u8]) -> Option<JournalOp> {
                 version_counters: Vec::new(),
             }))
         }
-        "U" if parts.len() == 12 => {
+        // 3a: Handle both 12-field (legacy, no version_counters) and
+        // 13-field (current, with version_counters) formats
+        "U" if parts.len() == 12 || parts.len() == 13 => {
             let folder = unescape(&parts[1])?;
             let device = unescape(&parts[2])?;
             let path = unescape(&parts[3])?;
@@ -1394,6 +1404,20 @@ fn decode_op(payload: &[u8]) -> Option<JournalOp> {
                     .map(|v| unescape(&v))
                     .collect::<Option<Vec<_>>>()?
             };
+            // 3a: Parse version_counters from 13th field if present
+            let version_counters = if parts.len() == 13 && !parts[12].is_empty() {
+                parts[12]
+                    .split(',')
+                    .filter_map(|pair| {
+                        let mut it = pair.splitn(2, ':');
+                        let id = it.next()?.parse::<u64>().ok()?;
+                        let val = it.next()?.parse::<u64>().ok()?;
+                        Some((id, val))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
             Some(JournalOp::Upsert(FileMetadata {
                 folder,
@@ -1407,7 +1431,7 @@ fn decode_op(payload: &[u8]) -> Option<JournalOp> {
                 modified_ns,
                 size,
                 block_hashes,
-                version_counters: Vec::new(),
+                version_counters,
             }))
         }
         "D" if parts.len() == 4 => Some(JournalOp::Delete {

@@ -140,8 +140,9 @@ impl ClusterConfig {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub(crate) struct Counter {
-    pub(crate) Id: i64,
-    pub(crate) Value: i64,
+    // 2d: Proto field is uint64 — use u64 end-to-end
+    pub(crate) Id: u64,
+    pub(crate) Value: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -188,7 +189,8 @@ pub(crate) struct FileInfo {
     pub(crate) Sequence: i64,
     pub(crate) BlockSize: i32,
     pub(crate) Blocks: Vec<BlockInfo>,
-    pub(crate) SymlinkTarget: String,
+    // 2b: Symlink target as raw bytes for wire fidelity (proto is bytes)
+    pub(crate) SymlinkTarget: Vec<u8>,
     pub(crate) LocalFlags: u32,
     pub(crate) VersionHash: Vec<u8>,
     pub(crate) InodeChangeNs: i64,
@@ -196,7 +198,8 @@ pub(crate) struct FileInfo {
     pub(crate) BlocksHash: Vec<u8>,
     pub(crate) Platform: PlatformData,
     pub(crate) Version: Vector,
-    pub(crate) Encrypted: bool,
+    // 2c: Encrypted as raw bytes (proto is bytes, not bool)
+    pub(crate) Encrypted: Vec<u8>,
     pub(crate) PreviousBlocksHash: Vec<u8>,
 }
 
@@ -601,8 +604,8 @@ fn bep_to_wire(message: &BepMessage) -> Result<WireMessage, String> {
                                     .version
                                     .iter()
                                     .map(|(id, value)| Counter {
-                                        Id: *id as i64,
-                                        Value: *value as i64,
+                                        Id: *id,
+                                        Value: *value,
                                     })
                                     .collect(),
                             })
@@ -649,30 +652,38 @@ fn fileinfo_to_index_entry(file: &FileInfo) -> IndexEntry {
         no_permissions: file.NoPermissions,
         invalid: file.Invalid,
         local_flags: file.LocalFlags as u32,
-        // A8: symlink as raw bytes
-        symlink_target: file.SymlinkTarget.as_bytes().to_vec(),
+        // A8: symlink as raw bytes (already Vec<u8>)
+        symlink_target: file.SymlinkTarget.clone(),
         block_size: file.BlockSize,
         // A7: u64 version counters
         version_counters: file
             .Version
             .Counters
             .iter()
-            .map(|c| (c.Id as u64, c.Value as u64))
+            .map(|c| (c.Id, c.Value))
             .collect(),
         // A4: Preserve wire fields
         blocks_hash: file.BlocksHash.clone(),
         previous_blocks_hash: file.PreviousBlocksHash.clone(),
-        encrypted: if file.Encrypted { vec![1] } else { Vec::new() },
+        encrypted: file.Encrypted.clone(),
     }
 }
 
 fn index_entry_to_fileinfo(entry: &IndexEntry) -> FileInfo {
+    // 2a: Full field-for-field reconstruction from IndexEntry
     FileInfo {
         Name: entry.path.clone(),
-        Sequence: entry.sequence,
-        Deleted: entry.deleted,
+        Type: entry.file_type,
         Size: entry.size,
-        // A3: reconstruct Blocks from full tuples
+        Permissions: entry.permissions,
+        ModifiedS: entry.modified_s,
+        ModifiedNs: entry.modified_ns,
+        ModifiedBy: entry.modified_by as i64,
+        Deleted: entry.deleted,
+        Invalid: entry.invalid,
+        NoPermissions: entry.no_permissions,
+        Sequence: entry.sequence,
+        BlockSize: entry.block_size,
         Blocks: entry
             .blocks
             .iter()
@@ -680,9 +691,25 @@ fn index_entry_to_fileinfo(entry: &IndexEntry) -> FileInfo {
                 Hash: decode_hex_or_utf8(&b.hash),
                 Offset: b.offset,
                 Size: b.size,
-                ..Default::default()
             })
             .collect(),
+        // 2b: SymlinkTarget as raw bytes
+        SymlinkTarget: entry.symlink_target.clone(),
+        LocalFlags: entry.local_flags,
+        Version: Vector {
+            Counters: entry
+                .version_counters
+                .iter()
+                .map(|(id, val)| Counter {
+                    Id: *id,
+                    Value: *val,
+                })
+                .collect(),
+        },
+        BlocksHash: entry.blocks_hash.clone(),
+        PreviousBlocksHash: entry.previous_blocks_hash.clone(),
+        // 2c: Encrypted as raw bytes
+        Encrypted: entry.encrypted.clone(),
         ..Default::default()
     }
 }

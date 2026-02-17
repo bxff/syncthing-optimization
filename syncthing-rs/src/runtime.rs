@@ -1627,10 +1627,16 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 .and_then(Value::as_str)
                 .unwrap_or("static");
             if auth_mode == "ldap" {
-                // B2: LDAP auth — delegate to LDAP bind verification
+                // R2: LDAP auth — Go returns structured JSON with error details.
                 // In production, this would perform an LDAP bind against configured server.
-                // For now, reject with a descriptive error since LDAP infra is not available.
-                return make_api_error(501, "LDAP authentication not yet implemented");
+                // For now, reject with structured JSON matching Go's response format.
+                return ApiReply::json(
+                    501,
+                    json!({
+                        "error": "LDAP authentication not implemented",
+                        "message": "LDAP authentication mode is configured but not yet supported"
+                    }),
+                );
             }
             if !expected_user.is_empty() || !expected_password.is_empty() {
                 let password_ok = verify_gui_password(&provided_password, &expected_password);
@@ -2051,6 +2057,8 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                         reset.push(folder);
                     }
                 }
+                // R6: Go triggers restart after full reset (os.Exit(exitRestarting))
+                runtime.shutdown_requested.store(true, Ordering::Release);
                 ApiReply::json(200, json!({"resetAll": true, "folders": reset}))
             }
         }
@@ -2118,7 +2126,16 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 }),
             )
         }
-        "/rest/system/config" | "/rest/config" => match method {
+        // R3: /rest/system/config is GET-only (legacy read-only endpoint)
+        "/rest/system/config" => match method {
+            Method::Get => match build_config_document(runtime) {
+                Ok(payload) => ApiReply::json(200, payload),
+                Err(err) => make_api_error(500, err),
+            },
+            _ => make_api_error(405, "method not allowed"),
+        },
+        // R3: /rest/config accepts GET and PUT (POST as deprecated alias)
+        "/rest/config" => match method {
             Method::Get => match build_config_document(runtime) {
                 Ok(payload) => ApiReply::json(200, payload),
                 Err(err) => make_api_error(500, err),
@@ -2126,16 +2143,44 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             // RT-4: Go only accepts GET+PUT on /rest/config, not POST
             // B6: POST acts as deprecated alias for PUT (Go compatibility)
             Method::Put | Method::Post => {
-                // 13.5: Validate body if provided via _body query param.
-                if let Some(body) = params.get("_body") {
-                    if serde_json::from_str::<Value>(body).is_err() {
-                        return make_api_error(400, "invalid JSON in config body");
+                // R4: Parse body JSON as typed config and apply sections to state
+                let parsed_config = if let Some(body) = params.get("_body") {
+                    match serde_json::from_str::<Value>(body) {
+                        Ok(val) => val,
+                        Err(_) => return make_api_error(400, "invalid JSON in config body"),
                     }
-                }
-                // B11: Mark config as dirty so /rest/config/insync reports correctly
+                } else {
+                    return make_api_error(400, "missing config body");
+                };
+                // R4: Apply typed config sections to state (Go: m.config.Replace)
                 if let Ok(mut state) = runtime.state.write() {
+                    // R5: Apply each recognized section from the JSON body
+                    if let Some(options) = parsed_config.get("options") {
+                        if let Value::Object(map) = options {
+                            for (k, v) in map {
+                                state.options[k] = v.clone();
+                            }
+                        }
+                    }
+                    if let Some(gui) = parsed_config.get("gui") {
+                        if let Value::Object(map) = gui {
+                            for (k, v) in map {
+                                state.gui[k] = v.clone();
+                            }
+                        }
+                    }
+                    if let Some(ldap) = parsed_config.get("ldap") {
+                        if let Value::Object(map) = ldap {
+                            for (k, v) in map {
+                                state.ldap[k] = v.clone();
+                            }
+                        }
+                    }
+                    // B11: Mark config as dirty so /rest/config/insync reports correctly
                     state.config_dirty = true;
                 }
+                // R4: Config persistence to disk is handled by the daemon's
+                // config save pipeline; the API only needs to apply to state.
                 append_event(
                     runtime,
                     "ConfigSaved",
@@ -2193,7 +2238,18 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                         "ldap" => &mut state.ldap,
                         _ => return make_api_error(404, "not found"),
                     };
-                    apply_query_overrides(target, &params);
+                    // R5: Parse JSON body and merge into section, falling back to query params
+                    if let Some(body) = params.get("_body") {
+                        if let Ok(val) = serde_json::from_str::<Value>(body) {
+                            if let Value::Object(map) = val {
+                                for (k, v) in map {
+                                    target[k] = v;
+                                }
+                            }
+                        }
+                    } else {
+                        apply_query_overrides(target, &params);
+                    }
                     let value = target.clone();
                     drop(state);
                     append_event(runtime, "ConfigSaved", json!({"section": section}), false);
@@ -3853,8 +3909,8 @@ fn is_authenticated_request(
         let csrf_key = auth_query_csrf_key(&state);
         let provided_csrf = params.get(&csrf_key).map(String::as_str).unwrap_or("");
         let csrf_valid = state.active_auth_csrf.values().any(|v| v == provided_csrf);
-        // If CSRF is not valid and there are active tokens requiring CSRF, reject
-        if !csrf_valid && !state.active_auth_csrf.is_empty() {
+        // R1: Always enforce CSRF on mutating /rest/ — don't bypass when token-map is empty
+        if !csrf_valid {
             return Ok(false);
         }
     }

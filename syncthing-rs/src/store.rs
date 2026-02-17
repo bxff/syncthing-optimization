@@ -81,6 +81,9 @@ pub(crate) struct FileMetadata {
     pub(crate) blocks_hash: Vec<u8>,
     #[serde(default)]
     pub(crate) encrypted: Vec<u8>,
+    // S2: previous_blocks_hash for e2e persistence
+    #[serde(default)]
+    pub(crate) previous_blocks_hash: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,6 +105,8 @@ struct StoredFileMetadata {
     block_size: i32,
     blocks_hash: Vec<u8>,
     encrypted: Vec<u8>,
+    // S2: previous_blocks_hash for e2e persistence
+    previous_blocks_hash: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1320,8 +1325,29 @@ fn encode_op(op: &JournalOp) -> Vec<u8> {
                 .map(|(id, val)| format!("{}:{}", id, val))
                 .collect::<Vec<_>>()
                 .join(",");
+            // S1: Encode extended metadata fields (hex for Vec<u8>)
+            let symlink_hex = file
+                .symlink_target
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
+            let blocks_hash_hex = file
+                .blocks_hash
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
+            let encrypted_hex = file
+                .encrypted
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
+            let prev_blocks_hash_hex = file
+                .previous_blocks_hash
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
             format!(
-                "U\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                "U\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 escape(&file.folder),
                 escape(&file.device),
                 escape(&file.path),
@@ -1333,7 +1359,14 @@ fn encode_op(op: &JournalOp) -> Vec<u8> {
                 file.local_flags,
                 escape(&file.file_type),
                 hashes,
-                vc
+                vc,
+                file.permissions,
+                file.modified_by,
+                symlink_hex,
+                file.block_size,
+                blocks_hash_hex,
+                encrypted_hex,
+                prev_blocks_hash_hex
             )
         }
         JournalOp::Delete {
@@ -1399,11 +1432,11 @@ fn decode_op(payload: &[u8]) -> Option<JournalOp> {
                 block_size: 0,
                 blocks_hash: Vec::new(),
                 encrypted: Vec::new(),
+                previous_blocks_hash: Vec::new(),
             }))
         }
-        // 3a: Handle both 12-field (legacy, no version_counters) and
-        // 13-field (current, with version_counters) formats
-        "U" if parts.len() == 12 || parts.len() == 13 => {
+        // S1: Handle legacy (12/13-field) and current (19-field) journal formats
+        "U" if parts.len() >= 12 => {
             let folder = unescape(&parts[1])?;
             let device = unescape(&parts[2])?;
             let path = unescape(&parts[3])?;
@@ -1431,7 +1464,7 @@ fn decode_op(payload: &[u8]) -> Option<JournalOp> {
                     .collect::<Option<Vec<_>>>()?
             };
             // 3a: Parse version_counters from 13th field if present
-            let version_counters = if parts.len() == 13 && !parts[12].is_empty() {
+            let version_counters = if parts.len() >= 13 && !parts[12].is_empty() {
                 parts[12]
                     .split(',')
                     .filter_map(|pair| {
@@ -1441,6 +1474,43 @@ fn decode_op(payload: &[u8]) -> Option<JournalOp> {
                         Some((id, val))
                     })
                     .collect()
+            } else {
+                Vec::new()
+            };
+            // S1: Parse extended metadata fields 14-19 if present
+            let permissions: u32 = if parts.len() >= 14 {
+                parts[13].parse().unwrap_or(0)
+            } else {
+                0
+            };
+            let modified_by: u64 = if parts.len() >= 15 {
+                parts[14].parse().unwrap_or(0)
+            } else {
+                0
+            };
+            let symlink_target: Vec<u8> = if parts.len() >= 16 && !parts[15].is_empty() {
+                decode_hex_bytes(&parts[15])
+            } else {
+                Vec::new()
+            };
+            let block_size: i32 = if parts.len() >= 17 {
+                parts[16].parse().unwrap_or(0)
+            } else {
+                0
+            };
+            let blocks_hash: Vec<u8> = if parts.len() >= 18 && !parts[17].is_empty() {
+                decode_hex_bytes(&parts[17])
+            } else {
+                Vec::new()
+            };
+            let encrypted: Vec<u8> = if parts.len() >= 19 && !parts[18].is_empty() {
+                decode_hex_bytes(&parts[18])
+            } else {
+                Vec::new()
+            };
+            // S2: Parse previous_blocks_hash from 20th field if present
+            let previous_blocks_hash: Vec<u8> = if parts.len() >= 20 && !parts[19].is_empty() {
+                decode_hex_bytes(&parts[19])
             } else {
                 Vec::new()
             };
@@ -1458,12 +1528,13 @@ fn decode_op(payload: &[u8]) -> Option<JournalOp> {
                 size,
                 block_hashes,
                 version_counters,
-                permissions: 0,
-                modified_by: 0,
-                symlink_target: Vec::new(),
-                block_size: 0,
-                blocks_hash: Vec::new(),
-                encrypted: Vec::new(),
+                permissions,
+                modified_by,
+                symlink_target,
+                block_size,
+                blocks_hash,
+                encrypted,
+                previous_blocks_hash,
             }))
         }
         "D" if parts.len() == 4 => Some(JournalOp::Delete {
@@ -1518,6 +1589,24 @@ fn escape(s: &str) -> String {
         .replace('\t', "\\t")
         .replace('\n', "\\n")
         .replace(',', "\\,")
+}
+
+/// S1: Decode hex-encoded bytes from journal field.
+fn decode_hex_bytes(hex: &str) -> Vec<u8> {
+    if hex.len() % 2 != 0 {
+        return hex.as_bytes().to_vec();
+    }
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    for pair in hex.as_bytes().chunks_exact(2) {
+        if let Ok(s) = std::str::from_utf8(pair) {
+            if let Ok(byte) = u8::from_str_radix(s, 16) {
+                out.push(byte);
+                continue;
+            }
+        }
+        return hex.as_bytes().to_vec();
+    }
+    out
 }
 
 fn unescape(s: &str) -> Option<String> {
@@ -1829,6 +1918,7 @@ fn stored_from_file(file: &FileMetadata) -> StoredFileMetadata {
         block_size: file.block_size,
         blocks_hash: file.blocks_hash.clone(),
         encrypted: file.encrypted.clone(),
+        previous_blocks_hash: file.previous_blocks_hash.clone(),
     }
 }
 
@@ -1863,6 +1953,7 @@ fn file_from_parts(
         block_size: stored.block_size,
         blocks_hash: stored.blocks_hash.clone(),
         encrypted: stored.encrypted.clone(),
+        previous_blocks_hash: stored.previous_blocks_hash.clone(),
     })
 }
 

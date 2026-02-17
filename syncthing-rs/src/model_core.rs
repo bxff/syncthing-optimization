@@ -881,11 +881,12 @@ impl model {
             return None;
         }
 
-        // Reject internal syncthing files.
+        // M2: Reject internal syncthing files — Go's IsInternal checks each
+        // path component for a ".st" prefix (not a substring match).
         if path.starts_with(".stfolder")
             || path.starts_with(".stignore")
             || path.starts_with(".stversions")
-            || path.contains("/.st")
+            || path.split('/').any(|c| c.starts_with(".st"))
         {
             return None;
         }
@@ -2539,11 +2540,11 @@ fn fileInfoFromIndexEntry(folder: &str, file: &IndexEntry) -> db::FileInfo {
         file_type,
         // A3: Extract hash strings from block tuples for db layer
         block_hashes: file.blocks.iter().map(|b| b.hash.clone()).collect(),
-        // A7: Pass version counters through (u64→i64 for db layer)
+        // A7: M1 — Use saturation cast for version counters (u64→i64)
         version_counters: file
             .version_counters
             .iter()
-            .map(|(id, val)| (*id as i64, *val as i64))
+            .map(|(id, val)| (clamp_u64_to_i64(*id), clamp_u64_to_i64(*val)))
             .collect(),
         // C3: Extended metadata passthrough from wire IndexEntry
         permissions: file.permissions,

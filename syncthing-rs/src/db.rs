@@ -398,6 +398,53 @@ impl WalFreeDb {
         self.store.stats().memory_budget_bytes
     }
 
+    /// F5: Check if any children of a directory path have FlagLocalIgnored set.
+    /// Go's deleteDirOnDisk checks if the directory contains ignored children
+    /// before allowing deletion. This scans the local device's files for
+    /// entries whose path starts with `dir_path/` and has FlagLocalIgnored set.
+    #[allow(dead_code)]
+    pub(crate) fn has_ignored_children(
+        &self,
+        folder_id: &str,
+        dir_path: &str,
+    ) -> Result<bool, String> {
+        use crate::bep_core::FlagLocalIgnored;
+        let prefix = if dir_path.ends_with('/') {
+            dir_path.to_string()
+        } else {
+            format!("{}/", dir_path)
+        };
+        // Scan local files via paging API for any child with FlagLocalIgnored
+        let local_device = "local";
+        let page_size = 256;
+        let mut cursor: Option<String> = Some(dir_path.to_string());
+        loop {
+            let page = self.store.files_in_folder_device_ordered_page(
+                folder_id,
+                local_device,
+                cursor.as_deref(),
+                page_size,
+            );
+            if page.items.is_empty() {
+                break;
+            }
+            for file in &page.items {
+                // Stop scanning once past the prefix
+                if !file.path.starts_with(&prefix) {
+                    return Ok(false);
+                }
+                if (file.local_flags as u32) & FlagLocalIgnored != 0 {
+                    return Ok(true);
+                }
+            }
+            match page.next_cursor {
+                Some(ref c) => cursor = Some(c.path.clone()),
+                None => break,
+            }
+        }
+        Ok(false)
+    }
+
     pub(crate) fn all_local_files_ordered_page(
         &self,
         folder: &str,
@@ -1569,6 +1616,8 @@ fn file_info_to_store(folder: &str, device: &str, info: &FileInfo) -> StoreFileM
         block_size: info.block_size,
         blocks_hash: info.blocks_hash.clone(),
         encrypted: info.encrypted.clone(),
+        // S2: Persist previous_blocks_hash through store layer
+        previous_blocks_hash: info.previous_blocks_hash.clone(),
     }
 }
 
@@ -1596,7 +1645,8 @@ fn store_to_file_info(meta: &StoreFileMetadata) -> FileInfo {
         symlink_target: meta.symlink_target.clone(),
         block_size: meta.block_size,
         blocks_hash: meta.blocks_hash.clone(),
-        previous_blocks_hash: Vec::new(),
+        // S2: Restore previous_blocks_hash from store layer
+        previous_blocks_hash: meta.previous_blocks_hash.clone(),
         encrypted: meta.encrypted.clone(),
     }
 }
@@ -1625,7 +1675,8 @@ fn store_to_file_info_without_blocks(meta: &StoreFileMetadata) -> FileInfo {
         symlink_target: meta.symlink_target.clone(),
         block_size: meta.block_size,
         blocks_hash: meta.blocks_hash.clone(),
-        previous_blocks_hash: Vec::new(),
+        // S2: Restore previous_blocks_hash from store layer
+        previous_blocks_hash: meta.previous_blocks_hash.clone(),
         encrypted: meta.encrypted.clone(),
     }
 }

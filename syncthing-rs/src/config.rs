@@ -606,10 +606,12 @@ impl FolderConfiguration {
         copy
     }
 
+    /// C1: Accepts (required, free, total) to match Go's freePct = usage.Free / usage.Total * 100
     pub(crate) fn check_available_space(
         &self,
         required: u64,
         available: u64,
+        total: u64,
     ) -> Result<(), String> {
         // 5a: Match Go's checkAvailableSpace + CheckFreeSpace two-step formula.
         // Go: CheckAvailableSpace returns nil if MinDiskFree.BaseValue() <= 0
@@ -638,12 +640,10 @@ impl FolderConfiguration {
             if pct <= 0.0 {
                 return Ok(()); // disabled
             }
-            // Go: freePct = (usage.Free / usage.Total) * 100
-            // We don't have total disk space, so approximate total = available (before req)
-            // This is conservative: real total >= available, so our freePct <= real freePct
-            let total_approx = available; // best we have without a syscall
-            let free_pct = if total_approx > 0 {
-                (remaining as f64 / total_approx as f64) * 100.0
+            // C1: Go uses actual total: freePct = (usage.Free / usage.Total) * 100
+            let disk_total = if total > 0 { total } else { available };
+            let free_pct = if disk_total > 0 {
+                (remaining as f64 / disk_total as f64) * 100.0
             } else {
                 0.0
             };
@@ -750,40 +750,80 @@ fn extract_xml_opening_tag<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
     Some(&rest[..=end])
 }
 
+/// C2: Wildcard matching aligned with Go's path.Match semantics.
+/// Supports `*` (any chars except `/`), `?` (single non-`/` char),
+/// and `[abc]`/`[a-z]`/`[^abc]` character classes.
 fn wildcard_match(pattern: &str, value: &str) -> bool {
-    if pattern == "*" {
-        return true;
-    }
-    if !pattern.contains('*') {
-        return pattern == value;
-    }
+    let mut pat = pattern.chars().peekable();
+    let mut val = value.chars().peekable();
 
-    let parts = pattern.split('*').collect::<Vec<_>>();
-    if parts.is_empty() {
-        return true;
-    }
-
-    let starts_with_wildcard = pattern.starts_with('*');
-    let ends_with_wildcard = pattern.ends_with('*');
-
-    let mut remaining = value;
-    for (i, part) in parts.iter().enumerate() {
-        if part.is_empty() {
-            continue;
-        }
-        if i == 0 && !starts_with_wildcard {
-            if !remaining.starts_with(part) {
+    while pat.peek().is_some() || val.peek().is_some() {
+        match pat.peek() {
+            Some('*') => {
+                pat.next();
+                // Try matching 0..n value chars (not '/')
+                // Save remaining pattern to try against each suffix
+                let rest_pat: String = pat.collect();
+                // Try matching rest_pat against every suffix of val
+                let rest_val: String = val.collect();
+                for i in 0..=rest_val.len() {
+                    if i > 0 && rest_val.as_bytes()[i - 1] == b'/' {
+                        break; // * doesn't match /
+                    }
+                    if wildcard_match(&rest_pat, &rest_val[i..]) {
+                        return true;
+                    }
+                }
                 return false;
             }
-            remaining = &remaining[part.len()..];
-            continue;
-        }
-        if i == parts.len() - 1 && !ends_with_wildcard {
-            return remaining.ends_with(part);
-        }
-        match remaining.find(part) {
-            Some(pos) => remaining = &remaining[pos + part.len()..],
-            None => return false,
+            Some('?') => {
+                pat.next();
+                match val.next() {
+                    Some('/') | None => return false, // ? doesn't match / or empty
+                    _ => {}
+                }
+            }
+            Some('[') => {
+                pat.next();
+                let negated = pat.peek() == Some(&'^') || pat.peek() == Some(&'!');
+                if negated {
+                    pat.next();
+                }
+                let c = match val.next() {
+                    Some(c) if c != '/' => c,
+                    _ => return false,
+                };
+                let mut matched = false;
+                while pat.peek().is_some() && *pat.peek().unwrap() != ']' {
+                    let lo = pat.next().unwrap();
+                    if pat.peek() == Some(&'-') {
+                        pat.next();
+                        if let Some(hi) = pat.next() {
+                            if c >= lo && c <= hi {
+                                matched = true;
+                            }
+                        }
+                    } else if c == lo {
+                        matched = true;
+                    }
+                }
+                if pat.peek() == Some(&']') {
+                    pat.next();
+                } else {
+                    return false; // unclosed bracket
+                }
+                if matched == negated {
+                    return false;
+                }
+            }
+            Some(&pc) => {
+                pat.next();
+                match val.next() {
+                    Some(vc) if vc == pc => {}
+                    _ => return false,
+                }
+            }
+            None => return val.peek().is_none(),
         }
     }
     true
@@ -1014,8 +1054,8 @@ mod tests {
         }"#;
         let cfg = FolderConfiguration::unmarshal_json(data).expect("json parse");
         assert_eq!(cfg.id, "f1");
-        assert!(cfg.check_available_space(200, 500).is_ok());
-        assert!(cfg.check_available_space(450, 500).is_err());
+        assert!(cfg.check_available_space(200, 500, 1000).is_ok());
+        assert!(cfg.check_available_space(450, 500, 1000).is_err());
 
         let xml_cfg = FolderConfiguration::unmarshal_xml(
             r#"<folder id="fx" label="FolderX" path="/tmp/fx" type="recvonly"></folder>"#,
@@ -1162,21 +1202,23 @@ mod tests {
 
         // Step 1: available(1000) >= required(100) ✓
         // Step 2: remaining=900, freePct = 900/1000*100 = 90% >= 10% ✓
-        assert!(cfg.check_available_space(100, 1000).is_ok());
+        // C1: total=2000, free=1000, required=100 → remaining=900 → freePct=900/2000*100=45% >= 10% ✓
+        assert!(cfg.check_available_space(100, 1000, 2000).is_ok());
 
         // Step 1: available(100) >= required(50) ✓
         // Step 2: remaining=50, freePct = 50/100*100 = 50% >= 10% ✓
-        assert!(cfg.check_available_space(50, 100).is_ok());
+        // C1: total=200, free=100, required=50 → remaining=50 → freePct=50/200*100=25% >= 10% ✓
+        assert!(cfg.check_available_space(50, 100, 200).is_ok());
 
         // Step 1: available(10) >= required(50) ✗ → fail immediately
-        assert!(cfg.check_available_space(50, 10).is_err());
+        assert!(cfg.check_available_space(50, 10, 100).is_err());
 
         // Disabled: 0% → skip entirely (Go: val<=0 returns nil)
         cfg.min_disk_free = Size {
             value: 0.0,
             unit: "%".to_string(),
         };
-        assert!(cfg.check_available_space(999, 1).is_ok());
+        assert!(cfg.check_available_space(999, 1, 1000).is_ok());
     }
 
     #[test]
@@ -1191,9 +1233,13 @@ mod tests {
         };
 
         // Need 100 bytes, 1GB available, 500MB min free → ok
-        assert!(cfg.check_available_space(100, 1_000_000_000).is_ok());
+        assert!(cfg
+            .check_available_space(100, 1_000_000_000, 2_000_000_000)
+            .is_ok());
 
         // Need 600MB, only 700MB available, 500MB min free → 600M+500M > 700M → fail
-        assert!(cfg.check_available_space(600_000_000, 700_000_000).is_err());
+        assert!(cfg
+            .check_available_space(600_000_000, 700_000_000, 1_000_000_000)
+            .is_err());
     }
 }

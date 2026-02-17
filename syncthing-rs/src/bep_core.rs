@@ -93,22 +93,147 @@ pub(crate) const LocalInvalidFlags: u32 = FlagLocalUnsupported
 pub(crate) const HelloMessageMagic: u32 = 0x2EA7D90B;
 pub(crate) const Version13HelloMagic: u32 = 0x9F79BC40;
 
-/// 11.3: Convert raw device ID bytes to hex string (lossless).
-pub(crate) fn device_id_from_bytes(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+/// B4: Syncthing base32 alphabet (Go: encoding.go)
+const SYNCTHING_BASE32: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+/// B4: Luhn mod 32 check digit (Go: luhn32.go)
+fn luhn32_generate(s: &str) -> char {
+    let factor = 1u32;
+    let mut sum = 0u32;
+    let n = 32u32;
+    let mut factor = factor;
+    for ch in s.chars().rev() {
+        let code = match ch {
+            'A'..='Z' => (ch as u32) - ('A' as u32),
+            '2'..='7' => (ch as u32) - ('2' as u32) + 26,
+            _ => 0,
+        };
+        let mut addend = factor * code;
+        factor = if factor == 2 { 1 } else { 2 };
+        addend = (addend / n) + (addend % n);
+        sum += addend;
+    }
+    let remainder = sum % n;
+    let check = (n - remainder) % n;
+    SYNCTHING_BASE32[check as usize] as char
 }
 
-/// 11.3: Convert hex-encoded device ID string back to raw bytes.
+/// B4: Validate Luhn32 check digit
+#[allow(dead_code)]
+fn luhn32_validate(s: &str) -> bool {
+    let n = 32u32;
+    let mut factor = 1u32;
+    let mut sum = 0u32;
+    for ch in s.chars().rev() {
+        let code = match ch {
+            'A'..='Z' => (ch as u32) - ('A' as u32),
+            '2'..='7' => (ch as u32) - ('2' as u32) + 26,
+            _ => return false,
+        };
+        let mut addend = factor * code;
+        factor = if factor == 2 { 1 } else { 2 };
+        addend = (addend / n) + (addend % n);
+        sum += addend;
+    }
+    sum % n == 0
+}
+
+/// B4: Manual base32 encode (RFC 4648, no padding, uppercase).
+fn base32_encode(data: &[u8]) -> String {
+    let mut result = String::new();
+    let mut buffer: u64 = 0;
+    let mut bits = 0u32;
+    for &byte in data {
+        buffer = (buffer << 8) | byte as u64;
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            let idx = ((buffer >> bits) & 0x1F) as usize;
+            result.push(SYNCTHING_BASE32[idx] as char);
+        }
+    }
+    if bits > 0 {
+        let idx = ((buffer << (5 - bits)) & 0x1F) as usize;
+        result.push(SYNCTHING_BASE32[idx] as char);
+    }
+    result
+}
+
+/// B4: Manual base32 decode (RFC 4648, no padding, uppercase).
+fn base32_decode(s: &str) -> Result<Vec<u8>, String> {
+    let mut result = Vec::new();
+    let mut buffer: u64 = 0;
+    let mut bits = 0u32;
+    for ch in s.chars() {
+        let val = match ch {
+            'A'..='Z' => (ch as u8) - b'A',
+            '2'..='7' => (ch as u8) - b'2' + 26,
+            _ => return Err(format!("invalid base32 char: {ch}")),
+        };
+        buffer = (buffer << 5) | val as u64;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            result.push((buffer >> bits) as u8);
+        }
+    }
+    Ok(result)
+}
+
+/// B4: Convert raw device ID bytes to Go's canonical base32+Luhn format.
+/// Format: 7-char groups separated by dashes, each group has 6 data chars + 1 Luhn check.
+/// Example: MFZWI3D-BORSXE5-...
+pub(crate) fn device_id_from_bytes(bytes: &[u8]) -> String {
+    let raw_b32 = base32_encode(bytes);
+    // Split into 13-char chunks (each chunk → 2 groups of 6 data + check)
+    let mut groups = Vec::new();
+    let chars: Vec<char> = raw_b32.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let end = std::cmp::min(i + 13, chars.len());
+        let chunk: String = chars[i..end].iter().collect();
+        // Split chunk into groups of 6-7 chars for Luhn check insertion
+        let mut j = 0;
+        let chunk_chars: Vec<char> = chunk.chars().collect();
+        while j < chunk_chars.len() {
+            let gend = std::cmp::min(j + 6, chunk_chars.len());
+            let group: String = chunk_chars[j..gend].iter().collect();
+            let check = luhn32_generate(&group);
+            groups.push(format!("{}{}", group, check));
+            j += 6;
+        }
+        i += 13;
+    }
+    groups.join("-")
+}
+
+/// B4: Convert Go's canonical device ID format back to raw bytes.
+/// Handles both base32+Luhn format (7-char dash-separated groups) and legacy hex format.
 #[allow(dead_code)]
 pub(crate) fn device_id_to_bytes(id: &str) -> Vec<u8> {
-    if id.len() % 2 == 0 && id.chars().all(|c| c.is_ascii_hexdigit()) {
-        (0..id.len())
+    // If it looks like hex (all hex chars, no dashes), decode as hex
+    let clean = id.replace('-', "");
+    if clean.len() % 2 == 0
+        && clean.chars().all(|c| c.is_ascii_hexdigit())
+        && !clean.chars().any(|c| c.is_ascii_uppercase())
+    {
+        return (0..clean.len())
             .step_by(2)
-            .filter_map(|i| u8::from_str_radix(&id[i..i + 2], 16).ok())
-            .collect()
-    } else {
-        id.as_bytes().to_vec()
+            .filter_map(|i| u8::from_str_radix(&clean[i..i + 2], 16).ok())
+            .collect();
     }
+    // Strip Luhn check digits: every 7th character in each group
+    let groups: Vec<&str> = id.split('-').collect();
+    let mut data = String::new();
+    for group in &groups {
+        if group.len() == 7 {
+            data.push_str(&group[..6]);
+        } else {
+            data.push_str(group);
+        }
+    }
+    // Decode base32
+    base32_decode(&data).unwrap_or_else(|_| id.as_bytes().to_vec())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -666,6 +791,12 @@ fn fileinfo_to_index_entry(file: &FileInfo) -> IndexEntry {
         blocks_hash: file.BlocksHash.clone(),
         previous_blocks_hash: file.PreviousBlocksHash.clone(),
         encrypted: file.Encrypted.clone(),
+        // B1: Platform preserved (bep_core→bep_core is identity)
+        platform: None, // TBD: bep_core::PlatformData → bep::PlatformData conversion
+        // B5: Preserve additional wire fields
+        version_hash: file.VersionHash.clone(),
+        inode_change_ns: file.InodeChangeNs,
+        encryption_trailer_size: file.EncryptionTrailerSize,
     }
 }
 
@@ -710,7 +841,11 @@ fn index_entry_to_fileinfo(entry: &IndexEntry) -> FileInfo {
         PreviousBlocksHash: entry.previous_blocks_hash.clone(),
         // 2c: Encrypted as raw bytes
         Encrypted: entry.encrypted.clone(),
-        ..Default::default()
+        // B5: Explicit fields instead of ..Default::default()
+        VersionHash: entry.version_hash.clone(),
+        InodeChangeNs: entry.inode_change_ns,
+        EncryptionTrailerSize: entry.encryption_trailer_size,
+        Platform: PlatformData::default(), // B1: TBD platform conversion
     }
 }
 

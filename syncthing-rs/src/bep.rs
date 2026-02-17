@@ -134,6 +134,16 @@ pub(crate) struct IndexEntry {
     pub(crate) previous_blocks_hash: Vec<u8>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) encrypted: Vec<u8>,
+    // B1: Platform data for round-trip preservation
+    #[serde(default)]
+    pub(crate) platform: Option<crate::bep_core::PlatformData>,
+    // B5: Additional wire fields for full fidelity
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) version_hash: Vec<u8>,
+    #[serde(default)]
+    pub(crate) inode_change_ns: i64,
+    #[serde(default)]
+    pub(crate) encryption_trailer_size: i64,
 }
 
 // A3: Block entry with full (hash, offset, size) tuple from wire
@@ -303,6 +313,9 @@ pub(crate) fn decode_frame(frame: &[u8]) -> Result<BepMessage, String> {
 
 // A10: Old Syncthing v0.x magic number for legacy detection (Go: Version13HelloMagic)
 const HELLO_MAGIC_OLD: u32 = 0x9F79BC40;
+// B3: Too-old Syncthing magic numbers (Go: Version12Magic, Version13LegacyMagic)
+const HELLO_MAGIC_TOO_OLD_V12: u32 = 0x00010001;
+const HELLO_MAGIC_TOO_OLD_V13: u32 = 0x00010000;
 
 fn is_hello_packet(frame: &[u8]) -> bool {
     if frame.len() < 6 {
@@ -310,6 +323,15 @@ fn is_hello_packet(frame: &[u8]) -> bool {
     }
     let magic = u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]);
     magic == HelloMessageMagic || magic == HELLO_MAGIC_OLD
+}
+
+/// B3: Returns true if the magic number indicates a too-old Syncthing version
+fn is_too_old_magic(frame: &[u8]) -> bool {
+    if frame.len() < 4 {
+        return false;
+    }
+    let magic = u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]);
+    magic == HELLO_MAGIC_TOO_OLD_V12 || magic == HELLO_MAGIC_TOO_OLD_V13
 }
 
 fn encode_hello_packet(message: &BepMessage) -> Result<Vec<u8>, String> {
@@ -685,12 +707,14 @@ fn index_entry_to_wire(entry: &IndexEntry) -> pb::FileInfo {
         encrypted: entry.encrypted.clone(),
         modified_ns: entry.modified_ns,
         block_size: entry.block_size,
+        // B1: Platform round-trip TBD (bep_core::PlatformData ≠ pb::PlatformData)
         platform: None,
+        // B5: Emit preserved wire fields instead of zeros
         // BEP-2: local_flags must be 0 on wire — Go strips internal flags
         local_flags: 0,
-        version_hash: Vec::new(),
-        inode_change_ns: 0,
-        encryption_trailer_size: 0,
+        version_hash: entry.version_hash.clone(),
+        inode_change_ns: entry.inode_change_ns,
+        encryption_trailer_size: entry.encryption_trailer_size as i32,
         deleted: entry.deleted,
         invalid: entry.invalid,
         no_permissions: entry.no_permissions,
@@ -738,6 +762,12 @@ fn index_entry_from_wire(file: &pb::FileInfo) -> IndexEntry {
         blocks_hash: file.blocks_hash.clone(),
         previous_blocks_hash: file.previous_blocks_hash.clone(),
         encrypted: file.encrypted.clone(),
+        // B1: Platform preserved (pb→bep_core conversion TBD)
+        platform: None,
+        // B5: Preserve additional wire fields
+        version_hash: file.version_hash.clone(),
+        inode_change_ns: file.inode_change_ns,
+        encryption_trailer_size: file.encryption_trailer_size as i64,
     }
 }
 

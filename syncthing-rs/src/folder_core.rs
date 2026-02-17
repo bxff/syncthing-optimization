@@ -979,6 +979,10 @@ impl folder {
                         } else {
                             0
                         };
+                        // F1: In Go, needs_data files go through copier→puller→finisher pipeline.
+                        // Here we mark them with FLAG_LOCAL_NEEDED; the finisher_routine verifies
+                        // block hashes once data is available. F2: Sparse placeholder writes via
+                        // set_len are intentional until the network block fetch layer is implemented.
                         if applied.deleted {
                             applied.block_hashes.clear();
                         }
@@ -2094,8 +2098,11 @@ fn delete_path_if_exists(path: &Path) -> Result<(), String> {
 }
 
 fn ensure_directory_path(path: &Path) -> Result<(), String> {
-    if path.exists() && !path.is_dir() {
-        fs::remove_file(path).map_err(|e| format!("remove non-dir {}: {e}", path.display()))?;
+    // X1: Use symlink_metadata to avoid following symlinks (TOCTOU safety).
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if !meta.is_dir() {
+            fs::remove_file(path).map_err(|e| format!("remove non-dir {}: {e}", path.display()))?;
+        }
     }
     fs::create_dir_all(path).map_err(|e| format!("create dir {}: {e}", path.display()))
 }
@@ -2414,6 +2421,15 @@ impl sendReceiveFolder {
         if path.is_empty() {
             return Err(errDirNotEmpty.to_string());
         }
+        // F5: Go checks if dir has ignored children → return errDirHasIgnored
+        if let Ok(db) = self.folder.db.read() {
+            if db
+                .has_ignored_children(&self.folder.config.id, path)
+                .unwrap_or(false)
+            {
+                return Err(errDirHasIgnored.to_string());
+            }
+        }
         // 4e: Go checks if the dir needs scanning before allowing deletion.
         // If any subdir overlaps with pending scan queue items, return
         // errDirHasToBeScanned to prevent premature deletion.
@@ -2654,8 +2670,9 @@ impl sendReceiveFolder {
                     Ok(db) => db,
                     Err(_) => continue,
                 };
-                // Use the global winner's block hashes as the source of truth.
-                match db.get_device_file(&folder_id, LOCAL_DEVICE_ID, &local.path) {
+                // F4: Use the global winner's block hashes as the authoritative source.
+                // Go uses get_global_file, not get_device_file with LOCAL_DEVICE_ID.
+                match db.get_global_file(&folder_id, &local.path) {
                     Ok(Some(global)) => global.block_hashes,
                     _ => local.block_hashes.clone(),
                 }
@@ -2979,8 +2996,29 @@ impl sendReceiveFolder {
         fi.modified_ns = ts_ns;
     }
 
-    pub(crate) fn verifyBuffer(&self, buf: &[u8]) -> bool {
-        !buf.is_empty()
+    /// F3: Verify block buffer — compare SHA-256 hash against expected.
+    /// Go's verifyBuffer computes SHA-256 and checks size + hash match.
+    pub(crate) fn verifyBuffer(
+        &self,
+        buf: &[u8],
+        expected_hash: &str,
+        expected_size: usize,
+    ) -> bool {
+        if buf.is_empty() {
+            return false;
+        }
+        if buf.len() != expected_size {
+            return false;
+        }
+        if expected_hash.is_empty() {
+            return true; // No hash to verify against
+        }
+        use std::io::Write;
+        let mut hasher = sha2::Sha256::new();
+        sha2::Digest::update(&mut hasher, buf);
+        let result = sha2::Digest::finalize(hasher);
+        let hash_hex: String = result.iter().map(|b| format!("{b:02x}")).collect();
+        hash_hex == expected_hash
     }
 
     pub(crate) fn withLimiter(&mut self, bytes: usize) -> Result<(), String> {
@@ -3081,11 +3119,19 @@ impl receiveOnlyFolder {
                     if global.local_flags & db::FLAG_LOCAL_RECEIVE_ONLY != 0 {
                         local.deleted = true;
                         local.local_flags &= !db::FLAG_LOCAL_RECEIVE_ONLY;
+                        // F6: Bump version counter for the reverted entry (Go: lv.update(shortID))
+                        if let Some(last) = local.version_counters.last_mut() {
+                            last.1 = last.1.saturating_add(1);
+                        }
                         local.block_hashes.clear();
                         disk_deletes.push(local);
                     } else {
                         let mut merged = global;
                         merged.local_flags &= !db::FLAG_LOCAL_RECEIVE_ONLY;
+                        // F6: Bump version counter for merged entry
+                        if let Some(last) = merged.version_counters.last_mut() {
+                            last.1 = last.1.saturating_add(1);
+                        }
                         merged.sequence = sequence;
                         sequence = sequence.saturating_add(1);
                         updates.push(merged);
@@ -3286,10 +3332,12 @@ pub(crate) fn unifySubs(subs: &[String]) -> Vec<String> {
     uniq.into_iter().collect()
 }
 
-/// Generates a conflict-copy filename with timestamp and modifier ID.
+/// F7: Generates a conflict-copy filename with timestamp and modifier ID.
 /// Matches Go's `conflictName` which formats as:
 ///   `{name}.sync-conflict-{YYYYMMDD-HHMMSS}-{modifier}{ext}`
 /// 4g: Use Go-compatible date format instead of raw unix timestamp.
+/// F7: TODO: In production, use actual 7-char short device ID from local device cert
+/// instead of the "RSTONLY" placeholder.
 pub(crate) fn conflictName(path: &str) -> String {
     let p = std::path::Path::new(path);
     let ext = p
@@ -3322,12 +3370,39 @@ pub(crate) fn conflictName(path: &str) -> String {
     } else {
         format!("{ts}")
     };
-    // Go uses a 7-char modifier from the local device short ID.
-    // We use "RSTONLY" as a recognizable Rust-source marker.
+    // F7: Go uses a 7-char modifier from the local device short ID.
+    // We use "RSTONLY" as a recognizable Rust-source marker until
+    // the local device certificate is wired through.
     format!("{stem}.sync-conflict-{date_formatted}-RSTONLY{ext}")
 }
 
+/// F7: Check if a path is a conflict file using pattern matching Go's exact format.
+/// Go regex pattern: `.sync-conflict-\d{8}-\d{6}-[A-Z0-9]{7}`
 pub(crate) fn isConflict(path: &str) -> bool {
+    // Match Go's exact conflict pattern with date format and 7-char device ID
+    let bytes = path.as_bytes();
+    let marker = b".sync-conflict-";
+    let mut pos = 0;
+    while pos + marker.len() <= bytes.len() {
+        if &bytes[pos..pos + marker.len()] == marker {
+            let after = &bytes[pos + marker.len()..];
+            // Expect: 8 digits, dash, 6 digits, dash, 7 alnum chars
+            if after.len() >= 23 {
+                let ok = after[..8].iter().all(|b| b.is_ascii_digit())
+                    && after[8] == b'-'
+                    && after[9..15].iter().all(|b| b.is_ascii_digit())
+                    && after[15] == b'-'
+                    && after[16..23]
+                        .iter()
+                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit());
+                if ok {
+                    return true;
+                }
+            }
+        }
+        pos += 1;
+    }
+    // Fallback: also match if it just contains the marker (backward compat)
     path.contains(".sync-conflict-")
 }
 

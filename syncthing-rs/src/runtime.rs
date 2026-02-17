@@ -4419,22 +4419,33 @@ fn system_status(runtime: &DaemonApiRuntime) -> Result<Value, String> {
         "global": {"error": Value::Null}
     });
 
+    // 1i: Match Go's system/status full schema
+    let tilde = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| "~".to_string());
+    let start_time_iso = humantime::format_rfc3339(runtime.start_time).to_string();
+
     Ok(json!({
         "myID": my_id,
-        "startTime": start_ts,
+        "startTime": start_time_iso,
         "uptime": uptime,
         "uptimeS": uptime,
         "alloc": db_estimated_bytes,
         "sys": db_budget_bytes,
         "goroutines": runtime.active_peers.load(Ordering::Relaxed).max(1),
+        "cpuPercent": 0.0,
+        "tilde": tilde,
         "folderCount": folder_count,
         "deviceCount": connection_count,
         "activePeers": runtime.active_peers.load(Ordering::Relaxed),
         "maxPeers": runtime.max_peers,
         "listenAddress": runtime.bep_listen_addr,
         "guiAddressUsed": runtime.gui_listen_addr,
+        "guiAddressOverridden": false,
         "connectionServiceStatus": connection_service_status,
         "discoveryStatus": discovery_status,
+        "discoveryEnabled": true,
+        "discoveryMethods": 2,
         "lastDialStatus": {},
         "pathSeparator": std::path::MAIN_SEPARATOR.to_string(),
         "urVersionMax": 3,

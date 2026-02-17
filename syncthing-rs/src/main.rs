@@ -35,11 +35,13 @@ fn main() {
     }
 
     if matches!(args[1].as_str(), "--version" | "version") {
+        // 1k: Match Go's `syncthing vX.Y.Z "Codename" (os arch) builder@date` format
         println!(
-            "syncthing-rs {} ({} {})",
+            "syncthing v{} \"Fermium Flea\" ({} {}) syncthing-rs@{}",
             env!("CARGO_PKG_VERSION"),
             std::env::consts::OS,
-            std::env::consts::ARCH
+            std::env::consts::ARCH,
+            env!("CARGO_PKG_VERSION"),
         );
         return;
     }

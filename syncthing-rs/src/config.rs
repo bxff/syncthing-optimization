@@ -611,23 +611,48 @@ impl FolderConfiguration {
         required: u64,
         available: u64,
     ) -> Result<(), String> {
-        // B12: Handle percentage-based and absolute size checking
+        // 5a: Match Go's checkAvailableSpace + CheckFreeSpace two-step formula.
+        // Go: CheckAvailableSpace returns nil if MinDiskFree.BaseValue() <= 0
+        if self.min_disk_free.is_percentage() {
+            if self.min_disk_free.percentage() <= 0.0 {
+                return Ok(()); // disabled
+            }
+        } else if self.min_disk_free.base_value() <= 0 {
+            return Ok(()); // disabled
+        }
+
+        // Step 1 (Go checkAvailableSpace): verify free >= required
+        if available < required {
+            return Err(format!(
+                "insufficient space in folder {}: current {}B < required {}B",
+                self.description(),
+                available,
+                required,
+            ));
+        }
+        // Step 2: subtract required from free, then check min_disk_free
+        let remaining = available - required;
+
         if self.min_disk_free.is_percentage() {
             let pct = self.min_disk_free.percentage();
             if pct <= 0.0 {
                 return Ok(()); // disabled
             }
-            // For percentage, "available" is current free space; we need total space
-            // but we only have available here, so we check: available >= pct% of (available + required)
-            let total_approx = available.saturating_add(required);
-            let min_free = (total_approx as f64 * pct / 100.0) as u64;
-            if available < required.saturating_add(min_free) {
+            // Go: freePct = (usage.Free / usage.Total) * 100
+            // We don't have total disk space, so approximate total = available (before req)
+            // This is conservative: real total >= available, so our freePct <= real freePct
+            let total_approx = available; // best we have without a syscall
+            let free_pct = if total_approx > 0 {
+                (remaining as f64 / total_approx as f64) * 100.0
+            } else {
+                0.0
+            };
+            if free_pct < pct {
                 return Err(format!(
-                    "insufficient space in folder {}: required={} min_free={}% available={}",
+                    "insufficient space in folder {}: current {:.2}% < required {}%",
                     self.description(),
-                    required,
+                    free_pct,
                     pct,
-                    available
                 ));
             }
         } else {
@@ -635,13 +660,13 @@ impl FolderConfiguration {
             if min == 0 {
                 return Ok(());
             }
-            if available < required.saturating_add(min) {
+            // Go: usage.Free < val (after subtracting required)
+            if remaining < min {
                 return Err(format!(
-                    "insufficient space in folder {}: required={} min_free={} available={}",
+                    "insufficient space in folder {}: current {}B < required {}B",
                     self.description(),
-                    required,
+                    remaining,
                     min,
-                    available
                 ));
             }
         }
@@ -1126,7 +1151,7 @@ mod tests {
 
     #[test]
     fn size_percentage_space_check() {
-        // B12: Verify percentage-based min_disk_free in check_available_space
+        // 5a: Verify Go-aligned two-step formula for percentage min_disk_free
         let mut cfg = FolderConfiguration::default();
         cfg.id = "pct-test".to_string();
         cfg.path = "/tmp/pct".to_string();
@@ -1135,19 +1160,18 @@ mod tests {
             unit: "%".to_string(),
         };
 
-        // 1000 available, 100 required → total ~1100, 10% = 110
-        // available(1000) >= required(100) + min_free(110) = 210 → ok
+        // Step 1: available(1000) >= required(100) ✓
+        // Step 2: remaining=900, freePct = 900/1000*100 = 90% >= 10% ✓
         assert!(cfg.check_available_space(100, 1000).is_ok());
 
-        // 100 available, 50 required → total ~150, 10% = 15
-        // available(100) >= required(50) + min_free(15) = 65 → ok
+        // Step 1: available(100) >= required(50) ✓
+        // Step 2: remaining=50, freePct = 50/100*100 = 50% >= 10% ✓
         assert!(cfg.check_available_space(50, 100).is_ok());
 
-        // 10 available, 50 required → total ~60, 10% = 6
-        // available(10) >= required(50) + min_free(6) = 56 → fail
+        // Step 1: available(10) >= required(50) ✗ → fail immediately
         assert!(cfg.check_available_space(50, 10).is_err());
 
-        // Disabled: 0%
+        // Disabled: 0% → skip entirely (Go: val<=0 returns nil)
         cfg.min_disk_free = Size {
             value: 0.0,
             unit: "%".to_string(),

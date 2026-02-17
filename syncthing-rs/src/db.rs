@@ -1562,6 +1562,13 @@ fn file_info_to_store(folder: &str, device: &str, info: &FileInfo) -> StoreFileM
             .iter()
             .map(|(id, val)| (*id as u64, *val as u64))
             .collect(),
+        // 3f: Persist extended metadata through store layer
+        permissions: info.permissions,
+        modified_by: info.modified_by,
+        symlink_target: info.symlink_target.clone(),
+        block_size: info.block_size,
+        blocks_hash: info.blocks_hash.clone(),
+        encrypted: info.encrypted.clone(),
     }
 }
 
@@ -1583,14 +1590,14 @@ fn store_to_file_info(meta: &StoreFileMetadata) -> FileInfo {
             .iter()
             .map(|(id, val)| (*id as i64, *val as i64))
             .collect(),
-        // C3: Extended metadata defaults (not stored in compact store format)
-        permissions: 0,
-        modified_by: 0,
-        symlink_target: Vec::new(),
-        block_size: 0,
-        blocks_hash: Vec::new(),
+        // 3f: Restore extended metadata from store layer
+        permissions: meta.permissions,
+        modified_by: meta.modified_by,
+        symlink_target: meta.symlink_target.clone(),
+        block_size: meta.block_size,
+        blocks_hash: meta.blocks_hash.clone(),
         previous_blocks_hash: Vec::new(),
-        encrypted: Vec::new(),
+        encrypted: meta.encrypted.clone(),
     }
 }
 
@@ -1612,14 +1619,14 @@ fn store_to_file_info_without_blocks(meta: &StoreFileMetadata) -> FileInfo {
             .iter()
             .map(|(id, val)| (*id as i64, *val as i64))
             .collect(),
-        // C3: Extended metadata defaults (not stored in compact store format)
-        permissions: 0,
-        modified_by: 0,
-        symlink_target: Vec::new(),
-        block_size: 0,
-        blocks_hash: Vec::new(),
+        // 3f: Restore extended metadata even without blocks
+        permissions: meta.permissions,
+        modified_by: meta.modified_by,
+        symlink_target: meta.symlink_target.clone(),
+        block_size: meta.block_size,
+        blocks_hash: meta.blocks_hash.clone(),
         previous_blocks_hash: Vec::new(),
-        encrypted: Vec::new(),
+        encrypted: meta.encrypted.clone(),
     }
 }
 

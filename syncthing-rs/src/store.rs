@@ -68,6 +68,19 @@ pub(crate) struct FileMetadata {
     pub(crate) block_hashes: Vec<String>,
     /// D1: Version vector counters for conflict resolution (device_short_id, counter_value).
     pub(crate) version_counters: Vec<(u64, u64)>,
+    // 3f: Extended metadata fields for Go parity round-trip.
+    #[serde(default)]
+    pub(crate) permissions: u32,
+    #[serde(default)]
+    pub(crate) modified_by: u64,
+    #[serde(default)]
+    pub(crate) symlink_target: Vec<u8>,
+    #[serde(default)]
+    pub(crate) block_size: i32,
+    #[serde(default)]
+    pub(crate) blocks_hash: Vec<u8>,
+    #[serde(default)]
+    pub(crate) encrypted: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,6 +95,13 @@ struct StoredFileMetadata {
     block_hashes: StoredBlockHashes,
     /// D1: Version vector counters persisted for conflict resolution.
     version_counters: Vec<(u64, u64)>,
+    // 3f: Extended metadata for Go parity.
+    permissions: u32,
+    modified_by: u64,
+    symlink_target: Vec<u8>,
+    block_size: i32,
+    blocks_hash: Vec<u8>,
+    encrypted: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1373,6 +1393,12 @@ fn decode_op(payload: &[u8]) -> Option<JournalOp> {
                 size,
                 block_hashes,
                 version_counters: Vec::new(),
+                permissions: 0,
+                modified_by: 0,
+                symlink_target: Vec::new(),
+                block_size: 0,
+                blocks_hash: Vec::new(),
+                encrypted: Vec::new(),
             }))
         }
         // 3a: Handle both 12-field (legacy, no version_counters) and
@@ -1432,6 +1458,12 @@ fn decode_op(payload: &[u8]) -> Option<JournalOp> {
                 size,
                 block_hashes,
                 version_counters,
+                permissions: 0,
+                modified_by: 0,
+                symlink_target: Vec::new(),
+                block_size: 0,
+                blocks_hash: Vec::new(),
+                encrypted: Vec::new(),
             }))
         }
         "D" if parts.len() == 4 => Some(JournalOp::Delete {
@@ -1791,6 +1823,12 @@ fn stored_from_file(file: &FileMetadata) -> StoredFileMetadata {
         size,
         block_hashes: stored_block_hashes_from_runtime_hashes(&file.block_hashes),
         version_counters: file.version_counters.clone(),
+        permissions: file.permissions,
+        modified_by: file.modified_by,
+        symlink_target: file.symlink_target.clone(),
+        block_size: file.block_size,
+        blocks_hash: file.blocks_hash.clone(),
+        encrypted: file.encrypted.clone(),
     }
 }
 
@@ -1819,6 +1857,12 @@ fn file_from_parts(
         size: stored.size,
         block_hashes: runtime_hashes_from_stored_block_hashes(&stored.block_hashes),
         version_counters: stored.version_counters.clone(),
+        permissions: stored.permissions,
+        modified_by: stored.modified_by,
+        symlink_target: stored.symlink_target.clone(),
+        block_size: stored.block_size,
+        blocks_hash: stored.blocks_hash.clone(),
+        encrypted: stored.encrypted.clone(),
     })
 }
 
@@ -1886,6 +1930,12 @@ mod tests {
             size: sequence,
             block_hashes: vec![format!("h-{sequence:08}")],
             version_counters: Vec::new(),
+            permissions: 0,
+            modified_by: 0,
+            symlink_target: Vec::new(),
+            block_size: 0,
+            blocks_hash: Vec::new(),
+            encrypted: Vec::new(),
         }
     }
 
@@ -2247,6 +2297,12 @@ mod tests {
                 size: 1,
                 block_hashes: vec!["h-1".to_string()],
                 version_counters: Vec::new(),
+                permissions: 0,
+                modified_by: 0,
+                symlink_target: Vec::new(),
+                block_size: 0,
+                blocks_hash: Vec::new(),
+                encrypted: Vec::new(),
             })
             .expect("upsert");
 
@@ -2654,6 +2710,12 @@ mod tests {
                 size: 1,
                 block_hashes: vec![],
                 version_counters: Vec::new(),
+                permissions: 0,
+                modified_by: 0,
+                symlink_target: Vec::new(),
+                block_size: 0,
+                blocks_hash: Vec::new(),
+                encrypted: Vec::new(),
             })
             .expect("upsert");
 

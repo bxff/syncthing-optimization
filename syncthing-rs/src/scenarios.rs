@@ -660,6 +660,12 @@ fn meta(
         size: 0,
         block_hashes: block_hashes.into_iter().map(str::to_string).collect(),
         version_counters: Vec::new(),
+        permissions: 0,
+        modified_by: 0,
+        symlink_target: Vec::new(),
+        block_size: 0,
+        blocks_hash: Vec::new(),
+        encrypted: Vec::new(),
     }
 }
 

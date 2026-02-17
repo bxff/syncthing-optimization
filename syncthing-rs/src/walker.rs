@@ -28,6 +28,7 @@ impl WalkConfig {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct WalkStats {
     pub(crate) directories_seen: usize,
+    pub(crate) directories_emitted: usize,
     pub(crate) files_emitted: usize,
     pub(crate) spill_files_created: usize,
     pub(crate) spill_bytes_written: u64,
@@ -79,6 +80,16 @@ pub(crate) fn walk_deterministic(
                         Err(_) => continue,
                     };
                     if meta.is_dir() {
+                        // 4i: Emit directory entries during scan for Go-style
+                        // directory metadata handling parity.  Go's walker emits
+                        // a FileInfo for every directory it visits so that
+                        // directory permissions, timestamps, and ownership can
+                        // be tracked and synced.  We emit the relative path
+                        // (no trailing slash) — the caller can distinguish dirs
+                        // from files by checking if the path appears as a
+                        // directory in the DB or on disk.
+                        emit_file(path_to_slash_string(&rel_path));
+                        stats.directories_emitted += 1;
                         push_items.push(WorkItem::Dir(rel_path));
                     } else if meta.is_file() || (meta.file_type().is_symlink() && !cfg!(windows)) {
                         push_items.push(WorkItem::File(path_to_slash_string(&rel_path)));
@@ -260,9 +271,16 @@ mod tests {
         let mut emitted = Vec::new();
         let stats = walk_deterministic(&root, &cfg, |path| emitted.push(path)).expect("walk");
 
-        assert_eq!(emitted, vec!["a/x.txt", "a/z.txt", "a.d/x.txt", "b.txt"]);
+        // 4i: Directories are now emitted when discovered as children.
+        // With spill_threshold=2, order is: a (dir), a.d (dir) emitted at root level,
+        // then stack-based LIFO expansion gives a.d children then a children, then b.txt.
+        assert_eq!(
+            emitted,
+            vec!["a", "a.d", "a/x.txt", "a/z.txt", "a.d/x.txt", "b.txt"]
+        );
         assert!(stats.directories_seen >= 3);
         assert_eq!(stats.files_emitted, 4);
+        assert_eq!(stats.directories_emitted, 2);
 
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(spill);
@@ -283,6 +301,7 @@ mod tests {
         let mut emitted = Vec::new();
         walk_deterministic(&root, &cfg, |path| emitted.push(path)).expect("walk");
 
+        assert!(emitted.contains(&"dir".to_string())); // 4i: dir entry emitted
         assert!(emitted.contains(&"dir/a.txt".to_string()));
         assert!(emitted.contains(&"link_to_dir".to_string()));
         assert!(!emitted.contains(&"link_to_dir/a.txt".to_string()));

@@ -261,6 +261,13 @@ pub(crate) trait Db {
     fn put_kv(&mut self, key: &str, val: &[u8]) -> Result<(), String>;
     fn delete_kv(&mut self, key: &str) -> Result<(), String>;
     fn prefix_kv(&self, prefix: &str) -> Result<Vec<KeyValue>, String>;
+
+    /// 4e: Check if a directory has a pending scan queued.
+    /// Returns true if a scan is pending for the given path or any parent.
+    /// Stub: always returns false — scan queue is managed at folder level.
+    fn has_pending_scan(&self, _folder: &str, _path: &str) -> Result<bool, String> {
+        Ok(false)
+    }
 }
 
 pub(crate) fn collect_stream<T>(stream: DbStream<'_, T>) -> Result<Vec<T>, String> {

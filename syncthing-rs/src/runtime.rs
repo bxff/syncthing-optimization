@@ -4551,7 +4551,10 @@ fn build_gui_response(method: &Method, path: &str, runtime: &DaemonApiRuntime) -
         file_path = file_path.join("index.html");
     }
     if !file_path.is_file() {
-        return make_api_error(404, "not found");
+        // Return empty body with correct MIME type for the extension so
+        // the browser doesn't reject it (e.g. CSS served as application/json).
+        let mime = mime_type_for_path(&file_path);
+        return ApiReply::bytes(404, Vec::new(), mime);
     }
 
     let body = match fs::read(&file_path) {
@@ -6228,8 +6231,29 @@ fn system_connections(runtime: &DaemonApiRuntime) -> Result<Value, String> {
             }),
         );
     }
+    // Go's ConnectionStatistics — the GUI JS expects an object with
+    // traffic counters, not a simple count.  When the Rust daemon has
+    // no real traffic stats yet, emit zeroes so the JS doesn't crash
+    // ("Cannot create property 'inbps' on number '0'").
+    let now_iso = now_rfc3339();
     Ok(json!({
-        "total": connections.len(),
+        "total": {
+            "at": now_iso,
+            "inBytesTotal": 0,
+            "outBytesTotal": 0,
+            "startedAt": now_iso,
+            "address": "",
+            "type": "",
+            "connected": false,
+            "paused": false,
+            "clientVersion": "",
+            "crypto": "",
+            "primary": {
+                "at": now_iso,
+                "inBytesTotal": 0,
+                "outBytesTotal": 0,
+            }
+        },
         "connections": connections,
     }))
 }

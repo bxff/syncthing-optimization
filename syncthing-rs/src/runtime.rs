@@ -1328,6 +1328,7 @@ fn start_api_server(
     runtime: DaemonApiRuntime,
 ) -> Result<thread::JoinHandle<()>, String> {
     let server = Server::http(addr).map_err(|err| format!("listen api {addr}: {err}"))?;
+    let server = Arc::new(server);
     let handle = thread::spawn(move || {
         for mut request in server.incoming_requests() {
             let mut url = request.url().to_string();
@@ -1358,133 +1359,146 @@ fn start_api_server(
                 let _ = request.respond(response);
                 continue;
             }
-            let session_cookie = session_cookie_name(&runtime);
-            let csrf_header = csrf_header_name(&runtime);
-            let (token_query_key, csrf_query_key, apikey_query_key) = runtime
-                .state
-                .read()
-                .map(|state| {
-                    (
-                        auth_query_token_key(&state),
-                        auth_query_csrf_key(&state),
-                        auth_query_apikey_key(&state),
-                    )
-                })
-                .unwrap_or_else(|_| {
-                    (
-                        "_auth_token".to_string(),
-                        "_auth_csrf".to_string(),
-                        "_auth_apikey".to_string(),
-                    )
-                });
-            if let Some(api_key) = request
-                .headers()
-                .iter()
-                .find(|h| h.field.equiv("X-API-Key"))
-                .map(|h| h.value.to_string())
-            {
-                url = append_query_param(&url, &apikey_query_key, &api_key);
-            }
-            if let Some(auth) = request
-                .headers()
-                .iter()
-                .find(|h| h.field.equiv("Authorization"))
-                .map(|h| h.value.to_string())
-            {
-                // RT-3: Case-insensitive Bearer prefix, matching Go's net/http canonical form
-                let bearer_token = if auth.len() > 7 && auth[..7].eq_ignore_ascii_case("bearer ") {
-                    Some(&auth[7..])
-                } else {
-                    None
-                };
-                if let Some(token) = bearer_token {
-                    // AUDIT-MARKER(bearer-apikey): W16J-A1 — Go's hasValidAPIKeyHeader
-                    // (api_csrf.go:102-104) treats Bearer token as API key, NOT session.
-                    url = append_query_param(&url, &apikey_query_key, token.trim());
-                }
-                // B3: Extract Basic auth credentials and pass through as _auth_basic param
-                if auth.len() > 6 && auth[..6].eq_ignore_ascii_case("basic ") {
-                    url = append_query_param(&url, "_auth_basic", auth[6..].trim());
-                }
-            }
-            if let Some(cookie_header) = request
-                .headers()
-                .iter()
-                .find(|h| h.field.equiv("Cookie"))
-                .map(|h| h.value.to_string())
-            {
-                // RT-2: Only accept sessionid-<shortID> cookie, no bare "sessionid" fallback
-                if let Some(session_token) = extract_cookie_value(&cookie_header, &session_cookie) {
-                    url = append_query_param(&url, &token_query_key, session_token);
-                }
-            }
-            for header in request.headers() {
-                let field = header.field.to_string();
-                if field.eq_ignore_ascii_case(&csrf_header) {
-                    let value = header.value.to_string();
-                    url = append_query_param(&url, &csrf_query_key, value.trim());
-                    break;
-                }
-            }
-            if let Some(lang) = request
-                .headers()
-                .iter()
-                .find(|h| h.field.equiv("Accept-Language"))
-                .map(|h| h.value.to_string())
-            {
-                url = append_query_param(&url, "accept-language", lang.trim());
-            }
-
-            let mut body = Vec::new();
-            let _ = request.as_reader().read_to_end(&mut body);
-            if !body.is_empty() {
-                url = append_body_params(&url, request.method(), &body);
-            }
-
-            let reply = build_api_response(request.method(), &url, &runtime);
-            let mut response = Response::from_data(reply.body).with_status_code(reply.status_code);
-            if let Ok(content_type) =
-                Header::from_bytes(&b"Content-Type"[..], reply.content_type.as_bytes())
-            {
-                response = response.with_header(content_type);
-            }
-            for (name, value) in reply.headers {
-                if let Ok(header) = Header::from_bytes(name.as_bytes(), value.as_bytes()) {
-                    response = response.with_header(header);
-                }
-            }
-            // W13-4: Emit Set-Cookie for session token minted during basic-auth
-            let pending_cookie: Option<String> = PENDING_SESSION_COOKIE.with(|cell| {
-                cell.borrow_mut().take().map(|token| {
-                    format!(
-                        "{}={}; Path=/; HttpOnly; SameSite=Lax",
-                        session_cookie, token
-                    )
-                })
-            });
-            if let Some(cookie_value) = pending_cookie {
-                if let Ok(header) = Header::from_bytes(&b"Set-Cookie"[..], cookie_value.as_bytes())
+            // Spawn a thread per request so long-polling endpoints (events)
+            // don't block the entire server. Go uses goroutines for the same.
+            let rt = runtime.clone();
+            thread::spawn(move || {
+                let session_cookie = session_cookie_name(&rt);
+                let csrf_header = csrf_header_name(&rt);
+                let (token_query_key, csrf_query_key, apikey_query_key) = rt
+                    .state
+                    .read()
+                    .map(|state| {
+                        (
+                            auth_query_token_key(&state),
+                            auth_query_csrf_key(&state),
+                            auth_query_apikey_key(&state),
+                        )
+                    })
+                    .unwrap_or_else(|_| {
+                        (
+                            "_auth_token".to_string(),
+                            "_auth_csrf".to_string(),
+                            "_auth_apikey".to_string(),
+                        )
+                    });
+                if let Some(api_key) = request
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("X-API-Key"))
+                    .map(|h| h.value.to_string())
                 {
-                    response = response.with_header(header);
+                    url = append_query_param(&url, &apikey_query_key, &api_key);
                 }
-            }
-            // AUDIT-MARKER(cors-security-headers): W16I — Go's CORS/security
-            // header policy (api.go:545-584):
-            //   - ACAO:* ONLY on OPTIONS preflight + API-key paths (api_csrf.go:53)
-            //   - X-Frame-Options: SAMEORIGIN (when allowFrameLoading=false, the default)
-            //   - X-XSS-Protection, X-Content-Type-Options on all non-OPTIONS
-            // Do NOT re-flag as "CORS/security header policy mismatch".
-            for (hdr_name, hdr_value) in [
-                ("X-Content-Type-Options", "nosniff"),
-                ("X-XSS-Protection", "1; mode=block"),
-                ("X-Frame-Options", "SAMEORIGIN"),
-                ("Cache-Control", "max-age=0, no-cache, no-store"),
-            ] {
-                if let Ok(header) = Header::from_bytes(hdr_name.as_bytes(), hdr_value.as_bytes()) {
-                    response = response.with_header(header);
+                if let Some(auth) = request
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("Authorization"))
+                    .map(|h| h.value.to_string())
+                {
+                    // RT-3: Case-insensitive Bearer prefix, matching Go's net/http canonical form
+                    let bearer_token =
+                        if auth.len() > 7 && auth[..7].eq_ignore_ascii_case("bearer ") {
+                            Some(&auth[7..])
+                        } else {
+                            None
+                        };
+                    if let Some(token) = bearer_token {
+                        // AUDIT-MARKER(bearer-apikey): W16J-A1 — Go's hasValidAPIKeyHeader
+                        // (api_csrf.go:102-104) treats Bearer token as API key, NOT session.
+                        url = append_query_param(&url, &apikey_query_key, token.trim());
+                    }
+                    // B3: Extract Basic auth credentials and pass through as _auth_basic param
+                    if auth.len() > 6 && auth[..6].eq_ignore_ascii_case("basic ") {
+                        url = append_query_param(&url, "_auth_basic", auth[6..].trim());
+                    }
                 }
-            }
-            let _ = request.respond(response);
+                if let Some(cookie_header) = request
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("Cookie"))
+                    .map(|h| h.value.to_string())
+                {
+                    // RT-2: Only accept sessionid-<shortID> cookie, no bare "sessionid" fallback
+                    if let Some(session_token) =
+                        extract_cookie_value(&cookie_header, &session_cookie)
+                    {
+                        url = append_query_param(&url, &token_query_key, session_token);
+                    }
+                }
+                for header in request.headers() {
+                    let field = header.field.to_string();
+                    if field.eq_ignore_ascii_case(&csrf_header) {
+                        let value = header.value.to_string();
+                        url = append_query_param(&url, &csrf_query_key, value.trim());
+                        break;
+                    }
+                }
+                if let Some(lang) = request
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("Accept-Language"))
+                    .map(|h| h.value.to_string())
+                {
+                    url = append_query_param(&url, "accept-language", lang.trim());
+                }
+
+                let method = request.method().clone();
+                let mut body = Vec::new();
+                let _ = request.as_reader().read_to_end(&mut body);
+                if !body.is_empty() {
+                    url = append_body_params(&url, &method, &body);
+                }
+
+                let reply = build_api_response(&method, &url, &rt);
+                let mut response =
+                    Response::from_data(reply.body).with_status_code(reply.status_code);
+                if let Ok(content_type) =
+                    Header::from_bytes(&b"Content-Type"[..], reply.content_type.as_bytes())
+                {
+                    response = response.with_header(content_type);
+                }
+                for (name, value) in reply.headers {
+                    if let Ok(header) = Header::from_bytes(name.as_bytes(), value.as_bytes()) {
+                        response = response.with_header(header);
+                    }
+                }
+                // W13-4: Emit Set-Cookie for session token minted during basic-auth
+                let pending_cookie: Option<String> = PENDING_SESSION_COOKIE.with(|cell| {
+                    cell.borrow_mut().take().map(|token| {
+                        format!(
+                            "{}={}; Path=/; HttpOnly; SameSite=Lax",
+                            session_cookie, token
+                        )
+                    })
+                });
+                if let Some(cookie_value) = pending_cookie {
+                    if let Ok(header) =
+                        Header::from_bytes(&b"Set-Cookie"[..], cookie_value.as_bytes())
+                    {
+                        response = response.with_header(header);
+                    }
+                }
+                // AUDIT-MARKER(cors-security-headers): W16I — Go's CORS/security
+                // header policy (api.go:545-584):
+                //   - ACAO:* ONLY on OPTIONS preflight + API-key paths (api_csrf.go:53)
+                //   - X-Frame-Options: SAMEORIGIN (when allowFrameLoading=false, the default)
+                //   - X-XSS-Protection, X-Content-Type-Options on all non-OPTIONS
+                // Do NOT re-flag as "CORS/security header policy mismatch".
+                for (hdr_name, hdr_value) in [
+                    ("X-Content-Type-Options", "nosniff"),
+                    ("X-XSS-Protection", "1; mode=block"),
+                    ("X-Frame-Options", "SAMEORIGIN"),
+                    ("Cache-Control", "max-age=0, no-cache, no-store"),
+                ] {
+                    if let Ok(header) =
+                        Header::from_bytes(hdr_name.as_bytes(), hdr_value.as_bytes())
+                    {
+                        response = response.with_header(header);
+                    }
+                }
+                let _ = request.respond(response);
+            }); // end thread::spawn per request
         }
     });
     Ok(handle)

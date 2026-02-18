@@ -2027,6 +2027,7 @@ mod tests {
             block_size: 0,
             blocks_hash: Vec::new(),
             encrypted: Vec::new(),
+            previous_blocks_hash: Vec::new(),
         }
     }
 
@@ -2394,6 +2395,7 @@ mod tests {
                 block_size: 0,
                 blocks_hash: Vec::new(),
                 encrypted: Vec::new(),
+                previous_blocks_hash: Vec::new(),
             })
             .expect("upsert");
 
@@ -2807,6 +2809,7 @@ mod tests {
                 block_size: 0,
                 blocks_hash: Vec::new(),
                 encrypted: Vec::new(),
+                previous_blocks_hash: Vec::new(),
             })
             .expect("upsert");
 

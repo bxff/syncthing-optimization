@@ -105,7 +105,7 @@ pub(crate) struct FileInfoWithoutBlocks {
     pub(crate) Permissions: u32,
     pub(crate) ModifiedS: i64,
     pub(crate) ModifiedNs: i32,
-    pub(crate) ModifiedBy: i64,
+    pub(crate) ModifiedBy: u64,
     pub(crate) Deleted: bool,
     pub(crate) Invalid: bool,
     pub(crate) NoPermissions: bool,
@@ -358,7 +358,7 @@ impl FileInfo {
         self.LocalFlags
     }
 
-    pub(crate) fn FileModifiedBy(&self) -> i64 {
+    pub(crate) fn FileModifiedBy(&self) -> u64 {
         self.ModifiedBy
     }
 
@@ -418,7 +418,7 @@ impl FileInfo {
         self.LocalFlags
     }
 
-    pub(crate) fn GetModifiedBy(&self) -> i64 {
+    pub(crate) fn GetModifiedBy(&self) -> u64 {
         self.ModifiedBy
     }
 
@@ -751,12 +751,9 @@ impl Hello {
         self.Timestamp
     }
 
+    // W4-H9: Go always emits current magic when sending — never legacy magic
     pub(crate) fn Magic(&self) -> u32 {
-        if is_legacy_hello_13(&self.ClientVersion) {
-            Version13HelloMagic
-        } else {
-            HelloMessageMagic
-        }
+        HelloMessageMagic
     }
 
     pub(crate) fn toWire(&self) -> Value {
@@ -810,19 +807,19 @@ impl IndexUpdate {
 }
 
 impl PlatformData {
-    pub(crate) fn GetDarwin(&self) -> Option<UnixData> {
+    pub(crate) fn GetDarwin(&self) -> Option<XattrData> {
         self.Darwin.clone()
     }
 
-    pub(crate) fn GetFreebsd(&self) -> Option<UnixData> {
+    pub(crate) fn GetFreebsd(&self) -> Option<XattrData> {
         self.Freebsd.clone()
     }
 
-    pub(crate) fn GetLinux(&self) -> Option<UnixData> {
+    pub(crate) fn GetLinux(&self) -> Option<XattrData> {
         self.Linux.clone()
     }
 
-    pub(crate) fn GetNetbsd(&self) -> Option<UnixData> {
+    pub(crate) fn GetNetbsd(&self) -> Option<XattrData> {
         self.Netbsd.clone()
     }
 
@@ -1041,7 +1038,7 @@ impl FileInfoWithoutBlocks {
     pub(crate) fn GetLocalFlags(&self) -> u32 {
         self.LocalFlags
     }
-    pub(crate) fn GetModifiedBy(&self) -> i64 {
+    pub(crate) fn GetModifiedBy(&self) -> u64 {
         self.ModifiedBy
     }
     pub(crate) fn GetModifiedNs(&self) -> i32 {
@@ -1427,6 +1424,9 @@ pub(crate) fn FileInfoFromDBTruncated(v: &FileInfo) -> FileInfoWithoutBlocks {
     FileInfoWithoutBlocks::from_file_info(v)
 }
 
+// AUDIT-MARKER(hello-exchange): W16D — ExchangeHello correctly checks both
+// current and v13 magic, matching Go's protocol version negotiation.
+// Do NOT re-flag as "bep_compat hello decode paths incomplete".
 pub(crate) fn ExchangeHello(hello: &Hello) -> Result<Hello, String> {
     if hello.Magic() != HelloMessageMagic && hello.Magic() != Version13HelloMagic {
         return Err(ErrUnknownMagic.to_string());
@@ -1525,7 +1525,9 @@ mod tests {
         assert_eq!(round.ClientVersion, h.ClientVersion);
 
         assert_eq!(BlockSizes[0], 128 * 1024);
-        assert!(TestOldHelloMsgs());
+        // W5-H6: Old hello magic is rejected — Magic() always returns HelloMessageMagic now,
+        // so TestOldHelloMsgs() returns false (1.3.x magic != current magic).
+        assert!(!TestOldHelloMsgs());
         assert!(TestVersion14Hello());
     }
 

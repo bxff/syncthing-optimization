@@ -138,12 +138,14 @@ impl Size {
     /// Compute the byte value from value+unit. For "%" units, returns 0
     /// (percentage check must be done by the caller with the total).
     pub(crate) fn base_value(&self) -> i64 {
-        match self.unit.as_str() {
+        // R-M1: Match Go's full unit semantics (config.Size.BaseValue)
+        // Go supports: %, kB/KB/KiB, MB/MiB, GB/GiB, TB/TiB, and plain bytes
+        match self.unit.to_lowercase().as_str() {
             "%" => 0, // percentage-based; handled by caller
-            "kB" => (self.value * 1_000.0) as i64,
-            "MB" => (self.value * 1_000_000.0) as i64,
-            "GB" => (self.value * 1_000_000_000.0) as i64,
-            "TB" => (self.value * 1_000_000_000_000.0) as i64,
+            "k" | "kb" | "kib" => (self.value * 1_000.0) as i64,
+            "m" | "mb" | "mib" => (self.value * 1_000_000.0) as i64,
+            "g" | "gb" | "gib" => (self.value * 1_000_000_000.0) as i64,
+            "t" | "tb" | "tib" => (self.value * 1_000_000_000_000.0) as i64,
             _ => self.value as i64, // raw bytes
         }
     }
@@ -278,6 +280,10 @@ pub(crate) struct FolderConfiguration {
     pub(crate) deprecated_min_disk_free_pct: f64,
     pub(crate) deprecated_pullers: i32,
     pub(crate) deprecated_scan_ownership: bool,
+    // M5: Go's ShortID — short device ID segment used for conflict naming.
+    // Set at runtime by prepare(), not serialized.
+    #[serde(skip)]
+    pub(crate) short_id: String,
 }
 
 impl Default for FolderConfiguration {
@@ -335,6 +341,7 @@ impl Default for FolderConfiguration {
             deprecated_min_disk_free_pct: 0.0,
             deprecated_pullers: 0,
             deprecated_scan_ownership: false,
+            short_id: String::new(),
         }
     }
 }
@@ -859,6 +866,280 @@ fn default_versioning_cleanup_interval_s() -> i32 {
 
 fn default_filesystem_type() -> FilesystemType {
     FilesystemType::Basic
+}
+
+// =============================================================================
+// W6-H2: Typed top-level Configuration struct + sub-config structs.
+// Go's config.Configuration is the root type deserialized by /rest/config PUT.
+// =============================================================================
+
+/// Device-level configuration — Go's config.DeviceConfiguration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(crate) struct DeviceConfiguration {
+    pub(crate) device_id: String,
+    pub(crate) name: String,
+    pub(crate) addresses: Vec<String>,
+    pub(crate) compression: String,
+    pub(crate) cert_name: String,
+    pub(crate) introducer: bool,
+    pub(crate) skip_introduction_removals: bool,
+    pub(crate) introduced_by: String,
+    pub(crate) paused: bool,
+    pub(crate) allowed_networks: Vec<String>,
+    pub(crate) auto_accept_folders: bool,
+    pub(crate) max_send_kbps: i32,
+    pub(crate) max_recv_kbps: i32,
+    pub(crate) ignored_folders: Vec<ObservedFolder>,
+    pub(crate) max_request_kib: i32,
+    pub(crate) untrusted: bool,
+    pub(crate) remote_gui_port: i32,
+    pub(crate) num_connections: i32,
+}
+
+impl Default for DeviceConfiguration {
+    fn default() -> Self {
+        Self {
+            device_id: String::new(),
+            name: String::new(),
+            addresses: vec!["dynamic".to_string()],
+            compression: "metadata".to_string(),
+            cert_name: String::new(),
+            introducer: false,
+            skip_introduction_removals: false,
+            introduced_by: String::new(),
+            paused: false,
+            allowed_networks: Vec::new(),
+            auto_accept_folders: false,
+            max_send_kbps: 0,
+            max_recv_kbps: 0,
+            ignored_folders: Vec::new(),
+            max_request_kib: 0,
+            untrusted: false,
+            remote_gui_port: 0,
+            num_connections: 0,
+        }
+    }
+}
+
+/// Go's config.ObservedFolder — folders a device has offered.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(crate) struct ObservedFolder {
+    pub(crate) id: String,
+    pub(crate) label: String,
+}
+
+/// Go's config.ObservedDevice — devices seen but not yet added.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(crate) struct ObservedDevice {
+    pub(crate) device_id: String,
+    pub(crate) name: String,
+    pub(crate) address: String,
+}
+
+/// GUI configuration — Go's config.GUIConfiguration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(crate) struct GUIConfiguration {
+    pub(crate) enabled: bool,
+    pub(crate) address: String,
+    pub(crate) unix_socket_permissions: String,
+    pub(crate) user: String,
+    pub(crate) password: String,
+    pub(crate) auth_mode: String,
+    pub(crate) use_tls: bool,
+    pub(crate) api_key: String,
+    pub(crate) insecure_admin_access: bool,
+    pub(crate) theme: String,
+    pub(crate) debugging: bool,
+    pub(crate) insecure_skip_host_check: bool,
+    pub(crate) insecure_allow_frame_loading: bool,
+}
+
+impl Default for GUIConfiguration {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            address: "127.0.0.1:8384".to_string(),
+            unix_socket_permissions: String::new(),
+            user: String::new(),
+            password: String::new(),
+            auth_mode: "static".to_string(),
+            use_tls: false,
+            api_key: String::new(),
+            insecure_admin_access: false,
+            theme: "default".to_string(),
+            debugging: false,
+            insecure_skip_host_check: false,
+            insecure_allow_frame_loading: false,
+        }
+    }
+}
+
+/// Options configuration — Go's config.OptionsConfiguration.
+/// Uses a flat Value map for flexibility since Go has many fields.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(crate) struct OptionsConfiguration {
+    #[serde(default)]
+    pub(crate) listen_addresses: Vec<String>,
+    #[serde(default)]
+    pub(crate) global_ann_servers: Vec<String>,
+    #[serde(default)]
+    pub(crate) global_ann_enabled: bool,
+    #[serde(default)]
+    pub(crate) local_ann_enabled: bool,
+    #[serde(default)]
+    pub(crate) local_ann_port: i32,
+    #[serde(default)]
+    pub(crate) max_send_kbps: i32,
+    #[serde(default)]
+    pub(crate) max_recv_kbps: i32,
+    #[serde(default)]
+    pub(crate) reconnection_interval_s: i32,
+    #[serde(default)]
+    pub(crate) relays_enabled: bool,
+    #[serde(default)]
+    pub(crate) start_browser: bool,
+    #[serde(default)]
+    pub(crate) nat_enabled: bool,
+    #[serde(default)]
+    pub(crate) nat_lease_minutes: i32,
+    #[serde(default)]
+    pub(crate) nat_renewal_minutes: i32,
+    #[serde(default)]
+    pub(crate) nat_timeout_seconds: i32,
+    #[serde(default)]
+    pub(crate) ur_accepted: i32,
+    #[serde(default)]
+    pub(crate) ur_unique_id: String,
+    #[serde(default, rename = "urURL")]
+    pub(crate) ur_url: String,
+    #[serde(default)]
+    pub(crate) ur_post_insecurely: bool,
+    #[serde(default)]
+    pub(crate) ur_initial_delay_s: i32,
+    #[serde(default)]
+    pub(crate) auto_upgrade_interval_h: i32,
+    #[serde(default)]
+    pub(crate) keep_temporaries_h: i32,
+    #[serde(default)]
+    pub(crate) cache_ignored_files: bool,
+    #[serde(default)]
+    pub(crate) progress_update_interval_s: i32,
+    #[serde(default)]
+    pub(crate) limit_bandwidth_in_lan: bool,
+    #[serde(default)]
+    pub(crate) releases_url: String,
+    #[serde(default)]
+    pub(crate) overwrite_remote_device_names_on_connect: bool,
+    #[serde(default)]
+    pub(crate) temp_index_min_blocks: i32,
+    #[serde(default)]
+    pub(crate) announcement_lans: Vec<String>,
+    #[serde(default)]
+    pub(crate) feature_flags: Vec<String>,
+    #[serde(default)]
+    pub(crate) connection_priority_tcp_lan: i32,
+    #[serde(default)]
+    pub(crate) connection_priority_quic_lan: i32,
+    #[serde(default)]
+    pub(crate) connection_priority_tcp_wan: i32,
+    #[serde(default)]
+    pub(crate) connection_priority_quic_wan: i32,
+    #[serde(default)]
+    pub(crate) connection_priority_relay: i32,
+    #[serde(default)]
+    pub(crate) stunKeepaliveStartS: i32,
+    #[serde(default)]
+    pub(crate) stunKeepaliveMinS: i32,
+    #[serde(default)]
+    pub(crate) stun_servers: Vec<String>,
+    #[serde(default)]
+    pub(crate) database_tuning: String,
+    #[serde(default)]
+    pub(crate) max_folder_concurrency: i32,
+    #[serde(default)]
+    pub(crate) max_concurrent_incoming_request_kib: i32,
+    /// Catch-all for any additional Go options not explicitly modelled.
+    #[serde(flatten)]
+    pub(crate) extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// LDAP configuration — Go's config.LDAPConfiguration.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(crate) struct LDAPConfiguration {
+    pub(crate) address: String,
+    pub(crate) bind_dn: String,
+    pub(crate) transport: String,
+    pub(crate) insecure_skip_verify: bool,
+    pub(crate) search_base_dn: String,
+    pub(crate) search_filter: String,
+}
+
+/// Defaults sub-config — Go's config.Defaults.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(crate) struct DefaultsConfiguration {
+    pub(crate) folder: FolderConfiguration,
+    pub(crate) device: DeviceConfiguration,
+    pub(crate) ignores: IgnoresConfiguration,
+}
+
+/// Default ignores — Go's config.Ignores.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(crate) struct IgnoresConfiguration {
+    pub(crate) lines: Vec<String>,
+}
+
+/// Top-level configuration — Go's config.Configuration.
+/// Deserialized by /rest/config PUT for full typed replace.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(crate) struct Configuration {
+    pub(crate) folders: Vec<FolderConfiguration>,
+    pub(crate) devices: Vec<DeviceConfiguration>,
+    pub(crate) gui: GUIConfiguration,
+    pub(crate) ldap: LDAPConfiguration,
+    pub(crate) options: OptionsConfiguration,
+    pub(crate) remote_ignored_devices: Vec<ObservedDevice>,
+    pub(crate) defaults: DefaultsConfiguration,
+}
+
+impl Default for Configuration {
+    fn default() -> Self {
+        Self {
+            folders: Vec::new(),
+            devices: Vec::new(),
+            gui: GUIConfiguration::default(),
+            ldap: LDAPConfiguration::default(),
+            options: OptionsConfiguration::default(),
+            remote_ignored_devices: Vec::new(),
+            defaults: DefaultsConfiguration::default(),
+        }
+    }
+}
+
+impl Configuration {
+    /// Validate the full configuration. Returns Err with description on failure.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        for f in &self.folders {
+            f.validate()?;
+        }
+        if self.gui.enabled && self.gui.address.is_empty() {
+            return Err("GUI enabled but no address configured".to_string());
+        }
+        Ok(())
+    }
+
+    /// Convert to serde_json::Value for runtime state application.
+    pub(crate) fn to_value(&self) -> Result<serde_json::Value, String> {
+        serde_json::to_value(self).map_err(|e| format!("config serialize: {e}"))
+    }
 }
 
 #[cfg(test)]

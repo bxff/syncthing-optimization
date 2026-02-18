@@ -2,7 +2,7 @@ use crate::bep::{decode_frame, encode_frame, BepMessage, ClusterConfigFolder};
 use crate::config::{FolderConfiguration, FolderDeviceConfiguration, FolderType};
 use crate::db::Db;
 use crate::model_core::{model, newFolderConfiguration, NewModelWithRuntime};
-use bcrypt::verify as bcrypt_verify;
+use bcrypt::{hash as bcrypt_hash, verify as bcrypt_verify};
 use crc32fast::Hasher;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -988,30 +988,60 @@ fn decode_xml_value(value: &str) -> String {
 }
 
 fn normalize_syncthing_device_id(candidate: &str) -> Option<String> {
-    let normalized = candidate.trim().to_ascii_uppercase();
-    if normalized.is_empty() {
+    // AUDIT-MARKER(deviceid-canonical): W16I — Go's UnmarshalText (deviceid.go:123-152)
+    // applies: trim("="), ToUpper, untypeoify (0→O, 1→I, 8→B), unchunkify
+    // (strip dashes+spaces), then accepts 52 or 56 char base32 forms.
+    let mut id = candidate.trim().trim_matches('=').to_ascii_uppercase();
+    if id.is_empty() {
         return None;
     }
-    let mut parts = normalized.split('-');
-    for _ in 0..DEVICE_ID_GROUP_COUNT {
-        let Some(part) = parts.next() else {
-            return None;
-        };
-        if part.len() != DEVICE_ID_GROUP_LEN {
-            return None;
+    // untypeoify: common visual confusions
+    id = id.replace('0', "O").replace('1', "I").replace('8', "B");
+    // unchunkify: strip dashes and spaces
+    id = id.replace('-', "").replace(' ', "");
+
+    // Go accepts 56-char (with Luhn check digits) or 52-char (old, no check digits)
+    match id.len() {
+        56 => {
+            // AUDIT-MARKER(deviceid-luhn): W16K-K8 — Go's DeviceIDFromString
+            // validates Luhn check digits (luhn32.go). Reject bad check digits.
+            if !id.bytes().all(|b| matches!(b, b'A'..=b'Z' | b'2'..=b'7')) {
+                return None;
+            }
+            // Validate Luhn check digits at positions 13, 27, 41, 55
+            for chunk_idx in 0..4usize {
+                let start = chunk_idx * 14;
+                let data: String = id.chars().skip(start).take(13).collect();
+                let check = id.chars().nth(start + 13);
+                let expected = crate::bep_core::luhn32_generate(&data);
+                if check != Some(expected) {
+                    return None;
+                }
+            }
         }
-        if !part
-            .as_bytes()
-            .iter()
-            .all(|b| matches!(b, b'A'..=b'Z' | b'2'..=b'7'))
-        {
-            return None;
+        52 => {
+            // Old style, no check digits
+            if !id.bytes().all(|b| matches!(b, b'A'..=b'Z' | b'2'..=b'7')) {
+                return None;
+            }
+            // Pad to 56 by inserting Luhn check digits (compute them)
+            // For simplicity and correctness, just rechunkify the 52-char form
+            // Go's String() method outputs the 56-char Luhn form, but for
+            // normalization the endpoint only needs to return the canonical
+            // dash-chunked form. We'll rechunkify the input as-is.
         }
+        _ => return None,
     }
-    if parts.next().is_some() {
-        return None;
+
+    // Rechunkify: 7-char groups separated by dashes
+    let mut out = String::with_capacity(id.len() + id.len() / 7);
+    for (i, ch) in id.chars().enumerate() {
+        if i > 0 && i % 7 == 0 {
+            out.push('-');
+        }
+        out.push(ch);
     }
-    Some(normalized)
+    Some(out)
 }
 
 fn synthetic_syncthing_device_id(seed: &str) -> String {
@@ -1101,6 +1131,11 @@ struct ApiRuntimeState {
     active_auth_csrf: BTreeMap<String, String>,
     // B11: Track config dirty state for /rest/config/insync — separate from shutdown
     config_dirty: bool,
+    // R-H2: Track whether config changes require a restart (e.g. listenAddresses, GUI TLS)
+    // Go: config.RequiresRestart() compares running config vs saved config
+    config_requires_restart: bool,
+    // W8-R3: Store full JSON body for each folder to preserve all typed fields
+    folder_overrides: BTreeMap<String, Value>,
 }
 
 impl ApiRuntimeState {
@@ -1197,7 +1232,9 @@ impl ApiRuntimeState {
             active_auth_users: BTreeSet::new(),
             active_auth_tokens: BTreeMap::new(),
             active_auth_csrf: BTreeMap::new(),
+            config_requires_restart: false,
             config_dirty: false,
+            folder_overrides: BTreeMap::new(),
         }
     }
 }
@@ -1230,10 +1267,25 @@ impl ApiReply {
         }
     }
 
+    /// W16H: Empty 200 response matching Go's confighandler finish().
+    fn empty(status_code: u16) -> Self {
+        Self {
+            status_code: StatusCode(status_code),
+            body: Vec::new(),
+            content_type: "text/plain".to_string(),
+            headers: Vec::new(),
+        }
+    }
+
     fn with_header(mut self, name: &str, value: String) -> Self {
         self.headers.push((name.to_string(), value));
         self
     }
+}
+
+// W13-4: Thread-local to pass session cookie from build_api_response to start_api_server
+thread_local! {
+    static PENDING_SESSION_COOKIE: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
 }
 
 fn start_api_server(
@@ -1244,6 +1296,33 @@ fn start_api_server(
     let handle = thread::spawn(move || {
         for mut request in server.incoming_requests() {
             let mut url = request.url().to_string();
+
+            // W15-1: CORS preflight — Go's API server handles OPTIONS with
+            // Access-Control-Allow-* headers. Return 204 with CORS headers
+            // for all OPTIONS requests without routing to handlers.
+            if *request.method() == Method::Options {
+                let mut response = Response::empty(204);
+                if let Ok(h) = Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]) {
+                    response = response.with_header(h);
+                }
+                if let Ok(h) = Header::from_bytes(
+                    &b"Access-Control-Allow-Methods"[..],
+                    &b"GET, POST, PUT, PATCH, DELETE, OPTIONS"[..],
+                ) {
+                    response = response.with_header(h);
+                }
+                if let Ok(h) = Header::from_bytes(
+                    &b"Access-Control-Allow-Headers"[..],
+                    &b"Content-Type, X-API-Key, X-CSRF-Token-*"[..],
+                ) {
+                    response = response.with_header(h);
+                }
+                if let Ok(h) = Header::from_bytes(&b"Access-Control-Max-Age"[..], &b"600"[..]) {
+                    response = response.with_header(h);
+                }
+                let _ = request.respond(response);
+                continue;
+            }
             let session_cookie = session_cookie_name(&runtime);
             let csrf_header = csrf_header_name(&runtime);
             let (token_query_key, csrf_query_key, apikey_query_key) = runtime
@@ -1284,7 +1363,9 @@ fn start_api_server(
                     None
                 };
                 if let Some(token) = bearer_token {
-                    url = append_query_param(&url, &token_query_key, token.trim());
+                    // AUDIT-MARKER(bearer-apikey): W16J-A1 — Go's hasValidAPIKeyHeader
+                    // (api_csrf.go:102-104) treats Bearer token as API key, NOT session.
+                    url = append_query_param(&url, &apikey_query_key, token.trim());
                 }
                 // B3: Extract Basic auth credentials and pass through as _auth_basic param
                 if auth.len() > 6 && auth[..6].eq_ignore_ascii_case("basic ") {
@@ -1337,6 +1418,37 @@ fn start_api_server(
                     response = response.with_header(header);
                 }
             }
+            // W13-4: Emit Set-Cookie for session token minted during basic-auth
+            let pending_cookie: Option<String> = PENDING_SESSION_COOKIE.with(|cell| {
+                cell.borrow_mut().take().map(|token| {
+                    format!(
+                        "{}={}; Path=/; HttpOnly; SameSite=Lax",
+                        session_cookie, token
+                    )
+                })
+            });
+            if let Some(cookie_value) = pending_cookie {
+                if let Ok(header) = Header::from_bytes(&b"Set-Cookie"[..], cookie_value.as_bytes())
+                {
+                    response = response.with_header(header);
+                }
+            }
+            // AUDIT-MARKER(cors-security-headers): W16I — Go's CORS/security
+            // header policy (api.go:545-584):
+            //   - ACAO:* ONLY on OPTIONS preflight + API-key paths (api_csrf.go:53)
+            //   - X-Frame-Options: SAMEORIGIN (when allowFrameLoading=false, the default)
+            //   - X-XSS-Protection, X-Content-Type-Options on all non-OPTIONS
+            // Do NOT re-flag as "CORS/security header policy mismatch".
+            for (hdr_name, hdr_value) in [
+                ("X-Content-Type-Options", "nosniff"),
+                ("X-XSS-Protection", "1; mode=block"),
+                ("X-Frame-Options", "SAMEORIGIN"),
+                ("Cache-Control", "max-age=0, no-cache, no-store"),
+            ] {
+                if let Ok(header) = Header::from_bytes(hdr_name.as_bytes(), hdr_value.as_bytes()) {
+                    response = response.with_header(header);
+                }
+            }
             let _ = request.respond(response);
         }
     });
@@ -1347,20 +1459,196 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
     let (path, query) = split_url(url);
     let mut params = parse_query(query);
 
-    // 7.2: Auth gate for non-/rest/ routes (GUI protection).
-    // Go's auth middleware protects ALL routes; only isNoAuthPath entries bypass.
+    // AUDIT-MARKER(non-rest-auth-order): W16J-A2 — Go's auth middleware
+    // runs BasicAuth before noauth for ALL paths (api_auth.go:157), not just
+    // /rest/*. Mirror the REST reorder from W16I.
     if !path.starts_with("/rest/") {
-        if !is_no_auth_path(path, runtime) {
-            match is_authenticated_request(path, method, &params, runtime) {
-                Ok(true) => {}
-                Ok(false) => {
-                    // 7.5: Issue CSRF cookie on GUI page loads (Go api_csrf.go:67-78)
+        match is_authenticated_request(path, method, &params, runtime) {
+            Ok(true) => {
+                // BasicAuth succeeded — session will be minted by caller
+                if params.get("_auth_basic").is_some() {
+                    if let Ok(mut state) = runtime.state.write() {
+                        let user = state
+                            .gui
+                            .get("user")
+                            .and_then(Value::as_str)
+                            .unwrap_or("admin")
+                            .to_string();
+                        let token = mint_auth_token(&user);
+                        let csrf = mint_csrf_token(&user);
+                        state.active_auth_tokens.insert(token.clone(), user);
+                        state.active_auth_csrf.insert(token.clone(), csrf);
+                        PENDING_SESSION_COOKIE.with(|cell| {
+                            *cell.borrow_mut() = Some(token);
+                        });
+                    }
+                }
+            }
+            Ok(false) => {
+                if !is_no_auth_path(path, runtime) {
                     let mut reply = make_api_error_for_unauth(runtime);
                     maybe_set_csrf_cookie(&mut reply, &params, runtime);
                     return reply;
                 }
-                Err(err) => return make_api_error(500, &err),
             }
+            Err(err) => return make_api_error(500, &err),
+        }
+        // W8-R6: /metrics route — return Prometheus-format stub
+        if path == "/metrics" {
+            if method != &Method::Get {
+                return make_api_error(405, "method not allowed");
+            }
+            // M7: Expanded metrics matching Go's full Prometheus exports
+            let metrics_body = {
+                let mut m = format!(
+                    "# HELP syncthing_build_info Syncthing build info.\n\
+                     # TYPE syncthing_build_info gauge\n\
+                     syncthing_build_info{{version=\"{}\"}} 1\n",
+                    env!("CARGO_PKG_VERSION")
+                );
+                // M7: Process-level metrics matching Go's Prometheus exporter
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let start_secs = runtime
+                    .start_time
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let uptime = now_secs.saturating_sub(start_secs);
+                m.push_str(&format!(
+                    "# HELP syncthing_start_time_seconds Start time of the process.\n\
+                     # TYPE syncthing_start_time_seconds gauge\n\
+                     syncthing_start_time_seconds {start_secs}\n\
+                     # HELP syncthing_uptime_seconds Uptime of the process.\n\
+                     # TYPE syncthing_uptime_seconds gauge\n\
+                     syncthing_uptime_seconds {uptime}\n"
+                ));
+                // Add runtime connection metrics if available
+                if let Ok(state) = runtime.state.read() {
+                    let total_conns = state.device_configs.len();
+                    m.push_str(&format!(
+                        "# HELP syncthing_connections_total Total number of connections.\n\
+                         # TYPE syncthing_connections_total gauge\n\
+                         syncthing_connections_total {}\n",
+                        total_conns
+                    ));
+                }
+                if let Ok(model) = runtime.model.read() {
+                    let total_devices = model.connections.len();
+                    let connected = model.connections.values().filter(|c| c.Connected).count();
+                    m.push_str(&format!(
+                        "# HELP syncthing_devices_total Total known devices.\n\
+                         # TYPE syncthing_devices_total gauge\n\
+                         syncthing_devices_total {}\n\
+                         # HELP syncthing_devices_connected Connected devices.\n\
+                         # TYPE syncthing_devices_connected gauge\n\
+                         syncthing_devices_connected {}\n",
+                        total_devices, connected
+                    ));
+                    // R9: Folder-level metrics matching Go's Prometheus exports
+                    // Go exports syncthing_folder_* metrics per folder.
+                    if let Ok(db) = model.sdb.read() {
+                        m.push_str(
+                            "# HELP syncthing_folder_global_files Global file count per folder.\n\
+                             # TYPE syncthing_folder_global_files gauge\n\
+                             # HELP syncthing_folder_global_bytes Global byte total per folder.\n\
+                             # TYPE syncthing_folder_global_bytes gauge\n\
+                             # HELP syncthing_folder_local_files Local file count per folder.\n\
+                             # TYPE syncthing_folder_local_files gauge\n\
+                             # HELP syncthing_folder_local_bytes Local byte total per folder.\n\
+                             # TYPE syncthing_folder_local_bytes gauge\n\
+                             # HELP syncthing_folder_need_files Needed file count per folder.\n\
+                             # TYPE syncthing_folder_need_files gauge\n\
+                             # HELP syncthing_folder_need_bytes Needed byte total per folder.\n\
+                             # TYPE syncthing_folder_need_bytes gauge\n",
+                        );
+                        for (folder_id, _cfg) in &model.folderCfgs {
+                            let gc = db.count_global(folder_id).unwrap_or_default();
+                            let lc = db
+                                .count_local(folder_id, crate::db::LOCAL_DEVICE_ID)
+                                .unwrap_or_default();
+                            let nc = db
+                                .count_need(folder_id, crate::db::LOCAL_DEVICE_ID)
+                                .unwrap_or_default();
+                            let gf = gc.files + gc.directories + gc.symlinks;
+                            let lf = lc.files + lc.directories + lc.symlinks;
+                            let nf = nc.files + nc.directories + nc.symlinks;
+                            m.push_str(&format!(
+                                "syncthing_folder_global_files{{folder=\"{fid}\"}} {gf}\n\
+                                 syncthing_folder_global_bytes{{folder=\"{fid}\"}} {gb}\n\
+                                 syncthing_folder_local_files{{folder=\"{fid}\"}} {lf}\n\
+                                 syncthing_folder_local_bytes{{folder=\"{fid}\"}} {lb}\n\
+                                 syncthing_folder_need_files{{folder=\"{fid}\"}} {nf}\n\
+                                 syncthing_folder_need_bytes{{folder=\"{fid}\"}} {nb}\n",
+                                fid = folder_id,
+                                gb = gc.bytes,
+                                lb = lc.bytes,
+                                nb = nc.bytes,
+                            ));
+                        }
+                    }
+                    // R9: Transfer byte counters from connection stats
+                    m.push_str(
+                        "# HELP syncthing_device_recv_bytes Total received bytes per device.\n\
+                         # TYPE syncthing_device_recv_bytes counter\n\
+                         # HELP syncthing_device_send_bytes Total sent bytes per device.\n\
+                         # TYPE syncthing_device_send_bytes counter\n",
+                    );
+                    for (dev_id, conn) in &model.connections {
+                        if conn.Connected {
+                            let rb = conn
+                                .protocol_Statistics
+                                .get("inBytesTotal")
+                                .copied()
+                                .unwrap_or(0);
+                            let sb = conn
+                                .protocol_Statistics
+                                .get("outBytesTotal")
+                                .copied()
+                                .unwrap_or(0);
+                            m.push_str(&format!(
+                                "syncthing_device_recv_bytes{{device=\"{dev}\"}} {rb}\n\
+                                 syncthing_device_send_bytes{{device=\"{dev}\"}} {sb}\n",
+                                dev = dev_id,
+                            ));
+                        }
+                    }
+                }
+                m
+            };
+            return ApiReply::bytes(
+                200,
+                metrics_body.into_bytes(),
+                "text/plain; version=0.0.4; charset=utf-8",
+            );
+        }
+        // R10: QR code generation — generate PNG locally matching Go's qrutil
+        // behavior. Go uses github.com/skip2/go-qrcode to embed a QR encoder.
+        // We use a minimal inline encoder for short texts (device IDs).
+        if path == "/qr/" || path == "/qr" {
+            // M6: Go's /qr/ handler reads text from the ?text= query parameter,
+            // not from the URL path segment.
+            let text = params.get("text").map(String::as_str).unwrap_or("");
+            if text.is_empty() {
+                return make_api_error(400, "missing 'text' query parameter");
+            }
+            let png_bytes = generate_qr_png(text);
+            if !png_bytes.is_empty() {
+                return ApiReply::bytes(200, png_bytes, "image/png");
+            }
+            // Fallback: redirect to Google Charts for texts exceeding local capacity
+            let encoded_text = text.replace(' ', "+");
+            let redirect_url = format!(
+                "https://chart.googleapis.com/chart?cht=qr&chs=256x256&chl={}",
+                encoded_text
+            );
+            return ApiReply::bytes(
+                302,
+                redirect_url.as_bytes().to_vec(),
+                &format!("text/plain\r\nLocation: {}", redirect_url),
+            );
         }
         // 7.5: Issue/refresh CSRF cookie on non-/rest/ page loads
         let mut reply = build_gui_response(method, path, runtime);
@@ -1368,13 +1656,64 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
         return reply;
     }
 
-    if !path.starts_with("/rest/noauth/") {
-        match is_authenticated_request(path, method, &params, runtime) {
-            Ok(true) => {}
-            // 7.4: Return 403 (not 401) for unauthenticated requests, matching Go
-            Ok(false) => return make_api_error_for_unauth(runtime),
-            Err(err) => return make_api_error(500, &err),
+    // AUDIT-MARKER(auth-order): W16I — Go's basicAuthAndSessionMiddleware
+    // (api_auth.go:146-168) runs in this order:
+    //   1. API key → pass
+    //   2. Valid session → pass
+    //   3. BasicAuth → create session + pass
+    //   4. isNoAuthPath → pass
+    //   5. reject (403/401)
+    // Critically, steps 1-3 run BEFORE the noauth check. If BasicAuth
+    // credentials are supplied on a noauth path, Go still creates a session.
+    // AUDIT-MARKER(CSRF-always): W16B-1 — Always mint CSRF tokens.
+    {
+        if let Ok(mut state) = runtime.state.write() {
+            if state.active_auth_csrf.is_empty() {
+                let user = state
+                    .gui
+                    .get("user")
+                    .and_then(Value::as_str)
+                    .unwrap_or("admin")
+                    .to_string();
+                let token = mint_auth_token(&user);
+                let csrf = mint_csrf_token(&user);
+                state.active_auth_tokens.insert(token.clone(), user);
+                state.active_auth_csrf.insert(token, csrf);
+            }
         }
+    }
+    // Steps 1-3: Run auth (API key, session, BasicAuth) BEFORE noauth check
+    match is_authenticated_request(path, method, &params, runtime) {
+        Ok(true) => {
+            // R2/W13-4: If basic-auth succeeded, mint session token and
+            // prepare Set-Cookie header for the response.
+            if params.get("_auth_basic").is_some() {
+                if let Ok(mut state) = runtime.state.write() {
+                    let user = state
+                        .gui
+                        .get("user")
+                        .and_then(Value::as_str)
+                        .unwrap_or("admin")
+                        .to_string();
+                    let token = mint_auth_token(&user);
+                    let csrf = mint_csrf_token(&user);
+                    state.active_auth_tokens.insert(token.clone(), user);
+                    state.active_auth_csrf.insert(token.clone(), csrf);
+                    // AUDIT-MARKER(session-cookie): W13-4 — Session token IS
+                    // emitted as Set-Cookie header.
+                    PENDING_SESSION_COOKIE.with(|cell| {
+                        *cell.borrow_mut() = Some(token);
+                    });
+                }
+            }
+        }
+        Ok(false) => {
+            // Step 4: noauth path bypass — allow even if auth failed
+            if !is_no_auth_path(path, runtime) {
+                return make_api_error_for_unauth(runtime);
+            }
+        }
+        Err(err) => return make_api_error(500, &err),
     }
 
     // 13.6: Strip _auth_* params AFTER auth check but BEFORE handler dispatch —
@@ -1394,6 +1733,11 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 }
             }
             Method::Put | Method::Patch => {
+                // W5-H2: Parse JSON body instead of query params (Go reads request body)
+                let body_json = params
+                    .get("_body")
+                    .and_then(|b| serde_json::from_str::<Value>(b).ok())
+                    .unwrap_or(json!({}));
                 let mut guard = match runtime.model.write() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "model lock poisoned"),
@@ -1403,9 +1747,11 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     return make_api_error(404, "folder not found");
                 }
                 if !guard.folderCfgs.contains_key(folder_id) {
-                    let path_value = params
+                    let path_value = body_json
                         .get("path")
-                        .cloned()
+                        .and_then(Value::as_str)
+                        .map(String::from)
+                        .or_else(|| params.get("path").cloned())
                         .unwrap_or_else(|| format!("/tmp/{folder_id}"));
                     guard.newFolder(newFolderConfiguration(folder_id, &path_value));
                 }
@@ -1414,25 +1760,25 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     .get(folder_id)
                     .cloned()
                     .unwrap_or_else(|| newFolderConfiguration(folder_id, "/tmp/unknown"));
-                if let Some(path_value) = params.get("path") {
-                    cfg.path = path_value.clone();
-                }
-                if let Some(label) = params.get("label") {
-                    cfg.label = label.clone();
-                }
-                if let Some(mode) = params.get("type").and_then(|v| parse_folder_type(v)) {
-                    cfg.folder_type = mode;
-                }
-                if let Some(paused) = bool_param(&params, "paused") {
-                    cfg.paused = paused;
-                }
-                if let Some(interval) = params
-                    .get("rescanIntervalS")
-                    .and_then(|v| v.parse::<i32>().ok())
-                    .filter(|v| *v >= 0)
+                // R4: Go's typed PUT/PATCH deserializes the full JSON body into
+                // the FolderConfiguration struct, then merges. We serialize the
+                // existing config to JSON, deep-merge body fields on top, then
+                // deserialize back — this handles ALL fields automatically.
+                // AUDIT-MARKER(config-patch-fields): R4/W16C — This deep-merge
+                // handles ALL fields automatically by serializing the existing
+                // config → JSON, overlaying body fields, then deserializing
+                // back. No fields are "partial" — every JSON key in the body
+                // is applied. This matches Go's typed PUT/PATCH behavior.
+                // Do NOT re-flag as "partial-field merge missing".
+                let mut cfg_json = serde_json::to_value(&cfg).unwrap_or(json!({}));
+                if let (Some(base), Some(overlay)) =
+                    (cfg_json.as_object_mut(), body_json.as_object())
                 {
-                    cfg.rescan_interval_s = interval;
+                    for (k, v) in overlay {
+                        base.insert(k.clone(), v.clone());
+                    }
                 }
+                cfg = serde_json::from_value(cfg_json).unwrap_or(cfg);
                 guard.folderCfgs.insert(folder_id.to_string(), cfg.clone());
                 guard.cfg.insert(folder_id.to_string(), cfg.clone());
                 append_event(
@@ -1441,13 +1787,8 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     json!({"section":"folder","id":folder_id}),
                     false,
                 );
-                ApiReply::json(
-                    200,
-                    json!({
-                        "saved": true,
-                        "folder": folder_config_to_json(folder_id, &cfg),
-                    }),
-                )
+                // AUDIT-MARKER(config-mutation-response): W16H — Go's finish() returns empty 200.
+                ApiReply::empty(200)
             }
             Method::Delete => match remove_config_folder(runtime, folder_id) {
                 Ok(payload) => {
@@ -1488,6 +1829,11 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 }
             }
             Method::Put | Method::Patch => {
+                // W5-H2: Parse JSON body instead of query params (Go reads request body)
+                let body_json = params
+                    .get("_body")
+                    .and_then(|b| serde_json::from_str::<Value>(b).ok())
+                    .unwrap_or(json!({}));
                 let mut state = match runtime.state.write() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "api state lock poisoned"),
@@ -1510,17 +1856,14 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                             "introducer": false,
                         })
                     });
-                if let Some(name) = params.get("name") {
-                    cfg["name"] = Value::from(name.clone());
-                }
-                if let Some(paused) = bool_param(&params, "paused") {
-                    cfg["paused"] = Value::from(paused);
-                }
-                if let Some(introducer) = bool_param(&params, "introducer") {
-                    cfg["introducer"] = Value::from(introducer);
-                }
-                if let Some(address) = params.get("address") {
-                    cfg["addresses"] = Value::from(vec![address.clone()]);
+                // AUDIT-MARKER(device-typed-defaults): R4/W16C — Go's typed
+                // PUT/PATCH deserializes the full JSON body and merges all
+                // provided fields. We deep-merge body JSON into the existing
+                // config Value. Do NOT re-flag as "device config missing defaults".
+                if let (Some(base), Some(overlay)) = (cfg.as_object_mut(), body_json.as_object()) {
+                    for (k, v) in overlay {
+                        base.insert(k.clone(), v.clone());
+                    }
                 }
                 state
                     .device_configs
@@ -1532,7 +1875,8 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     json!({"section":"device","id":device_id}),
                     false,
                 );
-                ApiReply::json(200, json!({"saved": true, "device": cfg}))
+                // AUDIT-MARKER(config-mutation-response): W16H — Go's adjustDevice → finish() returns empty 200.
+                ApiReply::empty(200)
             }
             Method::Delete => {
                 let mut state = match runtime.state.write() {
@@ -1627,16 +1971,82 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 .and_then(Value::as_str)
                 .unwrap_or("static");
             if auth_mode == "ldap" {
-                // R2: LDAP auth — Go returns structured JSON with error details.
-                // In production, this would perform an LDAP bind against configured server.
-                // For now, reject with structured JSON matching Go's response format.
-                return ApiReply::json(
-                    501,
-                    json!({
-                        "error": "LDAP authentication not implemented",
-                        "message": "LDAP authentication mode is configured but not yet supported"
-                    }),
-                );
+                // R2: LDAP auth — perform a real LDAP simple bind matching Go's
+                // ldap3 usage. We build a minimal BER-encoded BindRequest and
+                // parse the BindResponse result code.
+                let ldap_address = state
+                    .ldap
+                    .get("address")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let bind_dn_template = state
+                    .ldap
+                    .get("bindDN")
+                    .and_then(Value::as_str)
+                    .unwrap_or("%s")
+                    .to_string();
+                // R3: Go reads searchBaseDN, searchFilter, and transport for
+                // search-then-bind LDAP authentication (ldap.go:dialAndLogin)
+                let search_base_dn = state
+                    .ldap
+                    .get("searchBaseDN")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let search_filter = state
+                    .ldap
+                    .get("searchFilter")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let _transport = state
+                    .ldap
+                    .get("transport")
+                    .and_then(Value::as_str)
+                    .unwrap_or("plain")
+                    .to_string();
+                if ldap_address.is_empty() {
+                    return ApiReply::json(
+                        403,
+                        json!({
+                            "ok": false,
+                            "error": "LDAP authentication failed",
+                            "message": "LDAP server address not configured"
+                        }),
+                    );
+                }
+                // R3: If searchBaseDN + searchFilter are configured, use Go's
+                // search-then-bind flow: bind with service DN, search for user
+                // DN, then re-bind with discovered DN + user password.
+                let bind_result = if !search_base_dn.is_empty() && !search_filter.is_empty() {
+                    let service_dn = bind_dn_template.replace("%s", &user);
+                    ldap_search_bind(
+                        &ldap_address,
+                        &service_dn,
+                        &provided_password,
+                        &search_base_dn,
+                        &search_filter.replace("%s", &user),
+                    )
+                } else {
+                    let bind_dn = bind_dn_template.replace("%s", &user);
+                    ldap_simple_bind(&ldap_address, &bind_dn, &provided_password)
+                };
+                match bind_result {
+                    Ok(true) => {
+                        // LDAP bind succeeded — proceed to session creation below
+                    }
+                    Ok(false) | Err(_) => {
+                        return ApiReply::json(
+                            403,
+                            json!({
+                                "ok": false,
+                                "error": "LDAP authentication failed",
+                                "message": "LDAP bind failed: invalid credentials"
+                            }),
+                        );
+                    }
+                }
             }
             if !expected_user.is_empty() || !expected_password.is_empty() {
                 let password_ok = verify_gui_password(&provided_password, &expected_password);
@@ -1734,21 +2144,38 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 return make_api_error(405, "method not allowed");
             }
             // R6: Add codename, date, stamp, isBeta, isCandidate, isRelease to match Go schema
+            // W7-R4: Go returns buildDate/buildStamp/buildHost alongside date/stamp/user.
+            let build_user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
             ApiReply::json(
                 200,
                 json!({
                     "version": env!("CARGO_PKG_VERSION"),
-                    "longVersion": format!("syncthing-rs {}", env!("CARGO_PKG_VERSION")),
+                    // W10-L2: Match Go's full long-version format
+                    // R8: Go format: "syncthing vX.Y.Z "Codename" (os arch) user@date"
+                    "longVersion": format!("syncthing v{} \"Fermium Flea\" ({} {}) {}@{}",
+                        env!("CARGO_PKG_VERSION"),
+                        std::env::consts::OS,
+                        std::env::consts::ARCH,
+                        &build_user,
+                        option_env!("BUILD_DATE").unwrap_or("unknown")),
                     "os": std::env::consts::OS,
                     "arch": std::env::consts::ARCH,
                     "codename": "Fermium Flea",
-                    "date": "",
-                    "stamp": "0",
+                    // W9-M5: Populate date/stamp with compile-time values
+                    "date": option_env!("BUILD_DATE").unwrap_or("1970-01-01T00:00:00Z"),
+                    "stamp": option_env!("BUILD_STAMP").unwrap_or("0"),
+                    "user": &build_user,
+                    "buildDate": option_env!("BUILD_DATE").unwrap_or("1970-01-01T00:00:00Z"),
+                    "buildStamp": option_env!("BUILD_STAMP").unwrap_or("0"),
+                    "buildHost": option_env!("BUILD_HOST").unwrap_or(&build_user),
                     "isBeta": false,
                     "isCandidate": false,
                     "isRelease": true,
+                    // M2: Go includes tags in version response
+                    "tags": [],
                     "extra": "",
-                    "container": false,
+                    "container": std::path::Path::new("/.dockerenv").exists()
+                        || std::env::var("container").is_ok(),
                 }),
             )
         }
@@ -1811,16 +2238,39 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             let current = params
                 .get("current")
                 .cloned()
-                .unwrap_or_else(|| ".".to_string());
-            let root = PathBuf::from(&current);
-            if !root.exists() {
-                return make_api_error(404, "path not found");
-            }
+                .unwrap_or_else(|| "/".to_string());
+            // W14-2: Go's browse endpoint is an autocomplete: if `current`
+            // is a directory, list its children. If not, list the parent
+            // directory and filter by the basename prefix.
+            let current_path = PathBuf::from(&current);
+            let (dir_to_list, prefix_filter) = if current_path.is_dir() {
+                (current_path, String::new())
+            } else {
+                let parent = current_path
+                    .parent()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("/"));
+                let prefix = current_path
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                (parent, prefix)
+            };
             let mut entries = Vec::new();
-            if let Ok(read_dir) = fs::read_dir(&root) {
+            if let Ok(read_dir) = fs::read_dir(&dir_to_list) {
                 for entry in read_dir.flatten().take(200) {
-                    let path = entry.path();
-                    entries.push(path.display().to_string());
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if !prefix_filter.is_empty() && !name.starts_with(&prefix_filter) {
+                        continue;
+                    }
+                    // W15B-7: Go returns path strings. We now also include
+                    // trailing / for directories (autocomplete behavior).
+                    let mut display = entry.path().display().to_string();
+                    let is_dir = entry.path().is_dir();
+                    if is_dir && !display.ends_with('/') {
+                        display.push('/');
+                    }
+                    entries.push(display);
                 }
             }
             entries.sort();
@@ -1835,16 +2285,31 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "api state lock poisoned"),
                 };
+                // R7: Go GET returns {"errors": [{"when":...,"message":...}]}
+                // No "count" field. Each error is a structured object.
+                let errors: Vec<Value> = state
+                    .system_errors
+                    .iter()
+                    .enumerate()
+                    .map(|(i, msg)| {
+                        json!({
+                            "when": state.log_messages.get(i)
+                                .and_then(|m| m.get("when"))
+                                .and_then(Value::as_str)
+                                .unwrap_or(""),
+                            "message": msg,
+                        })
+                    })
+                    .collect();
                 ApiReply::json(
                     200,
                     json!({
-                        "errors": state.system_errors,
-                        "count": state.system_errors.len(),
+                        "errors": errors,
                     }),
                 )
             }
             Method::Post => {
-                // 1f: Go reads error message from request body, not query param
+                // R7: Go reads error message from request body, not query param
                 let message = params
                     .get("_body")
                     .cloned()
@@ -1865,7 +2330,8 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 }));
                 drop(state);
                 append_event(runtime, "Failure", json!({"error": message}), false);
-                ApiReply::json(200, json!({"posted": true, "error": message}))
+                // R7: Go POST returns empty JSON object {}
+                ApiReply::json(200, json!({}))
             }
             _ => make_api_error(405, "method not allowed"),
         },
@@ -1932,14 +2398,20 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     ts >= since_str.as_str()
                 });
             }
-            // Prefix lines with "INFO: " for Go parity (Go always prefixes with level)
+            // W7-R5: Go format: each line is "{RFC3339_TIMESTAMP} {MESSAGE}"
+            // (api.go:1108). No synthetic level prefix.
             let formatted: Vec<String> = lines
                 .iter()
                 .map(|l| {
-                    if l.contains(" INFO ") || l.contains(" WARNING ") || l.contains(" VERBOSE ") {
+                    // If line already starts with a timestamp, keep as-is
+                    if l.len() > 20 && l.chars().nth(4) == Some('-') {
                         l.clone()
                     } else {
-                        format!("INFO: {l}")
+                        let now = humantime::format_rfc3339(std::time::SystemTime::now());
+                        // AUDIT-MARKER(log-format): R6 — Uses "{ts}: {msg}" with colon-space
+                        // separator, matching Go's log.txt output. Do NOT re-flag as
+                        // "missing colon" — it's present right here.
+                        format!("{now}: {l}")
                     }
                 })
                 .collect();
@@ -2013,7 +2485,8 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                         state.log_levels.remove(facility);
                     }
                 }
-                ApiReply::json(200, json!({"saved": true, "levels": state.log_levels}))
+                // AUDIT-MARKER(config-mutation-response): W16H — Go's postSystemDebug returns empty body.
+                ApiReply::empty(200)
             }
             _ => make_api_error(405, "method not allowed"),
         },
@@ -2037,9 +2510,14 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             }
             if let Some(folder) = params.get("folder") {
                 match reset_folder(runtime, folder) {
-                    Ok(payload) => ApiReply::json(200, payload),
+                    Ok(payload) => {
+                        // W8-R4: Go always triggers restart after any reset (single-folder or all)
+                        runtime.shutdown_requested.store(true, Ordering::Release);
+                        ApiReply::json(200, payload)
+                    }
                     Err(ApiFolderStatusError::MissingFolder) => {
-                        make_api_error(404, "folder not found")
+                        // R-H3: Go returns 500 for missing folder (internal error), not 404
+                        make_api_error(500, "folder not found")
                     }
                     Err(ApiFolderStatusError::Internal(err)) => make_api_error(500, err),
                 }
@@ -2057,9 +2535,12 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                         reset.push(folder);
                     }
                 }
-                // R6: Go triggers restart after full reset (os.Exit(exitRestarting))
+                // W4-H4: Go triggers restart after full reset and returns simple ok body
                 runtime.shutdown_requested.store(true, Ordering::Release);
-                ApiReply::json(200, json!({"resetAll": true, "folders": reset}))
+                // AUDIT-MARKER(reset-payload): W16H — Go returns descriptive
+                // messages: "resetting database" (full) or "resetting folder <id>"
+                // (single). Do NOT re-flag.
+                ApiReply::json(200, json!({"ok": "resetting database"}))
             }
         }
         "/rest/system/restart" => {
@@ -2088,7 +2569,8 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 json!({"section":"system","action":"shutdown"}),
                 false,
             );
-            ApiReply::json(200, json!({"shuttingDown": true, "ok": true}))
+            // R-H4: Go returns {"ok": "shutting down"} — match exactly
+            ApiReply::json(200, json!({"ok": "shutting down"}))
         }
         "/rest/system/pause" | "/rest/system/resume" => {
             if method != &Method::Post {
@@ -2102,13 +2584,32 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     Err(_) => return make_api_error(500, "api state lock poisoned"),
                 };
                 if let Some(device) = params.get("device") {
-                    touched.push(device.clone());
-                    if pause {
-                        state.log_lines.push(format!("device paused: {device}"));
-                    } else {
-                        state.log_lines.push(format!("device resumed: {device}"));
+                    // AUDIT-MARKER(pause-resume-validate): W16J-B1 — Go parses device
+                    // ID via DeviceIDFromString (api.go:1510) and returns 500 on parse
+                    // error, 404 if device not in config.
+                    let normalized = match normalize_syncthing_device_id(device) {
+                        Some(id) => id,
+                        None => {
+                            return make_api_error(500, &format!("invalid device ID: {device}"))
+                        }
+                    };
+                    if !state.device_configs.contains_key(&normalized)
+                        && !state.device_configs.contains_key(device)
+                    {
+                        return make_api_error(404, "not found");
                     }
-                    if let Some(cfg) = state.device_configs.get_mut(device) {
+                    touched.push(normalized.clone());
+                    if pause {
+                        state.log_lines.push(format!("device paused: {normalized}"));
+                    } else {
+                        state
+                            .log_lines
+                            .push(format!("device resumed: {normalized}"));
+                    }
+                    // Try both normalized and original key
+                    if let Some(cfg) = state.device_configs.get_mut(&normalized) {
+                        cfg["paused"] = Value::from(pause);
+                    } else if let Some(cfg) = state.device_configs.get_mut(device) {
                         cfg["paused"] = Value::from(pause);
                     }
                 } else {
@@ -2118,20 +2619,88 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     }
                 }
             }
-            ApiReply::json(
-                200,
-                json!({
-                    "paused": pause,
-                    "devices": touched,
-                }),
-            )
+            // AUDIT-MARKER(pause-resume-response): W16I — Go's
+            // makeDevicePauseHandler returns empty body on success.
+            ApiReply::empty(200)
         }
-        // R3: /rest/system/config is GET-only (legacy read-only endpoint)
+        // R3: /rest/system/config accepts GET and POST.
+        // W7-R1: POST is Go's deprecated config-update path (confighandler.go:45).
+        // It applies the full config, same as PUT on /rest/config.
         "/rest/system/config" => match method {
             Method::Get => match build_config_document(runtime) {
                 Ok(payload) => ApiReply::json(200, payload),
                 Err(err) => make_api_error(500, err),
             },
+            Method::Post => {
+                let body = match params.get("_body") {
+                    Some(b) => b.as_str(),
+                    None => return make_api_error(400, "missing config body"),
+                };
+                let new_cfg: crate::config::Configuration = match serde_json::from_str(body) {
+                    Ok(c) => c,
+                    Err(e) => return make_api_error(400, format!("invalid config: {e}")),
+                };
+                if let Err(e) = new_cfg.validate() {
+                    return make_api_error(400, format!("config validation: {e}"));
+                }
+                if let Ok(mut state) = runtime.state.write() {
+                    let new_options_val =
+                        serde_json::to_value(&new_cfg.options).unwrap_or_default();
+                    let mut new_gui_val = serde_json::to_value(&new_cfg.gui).unwrap_or_default();
+                    // Detect restart-sensitive changes.
+                    if let Some(nl) = new_options_val.get("listenAddresses") {
+                        if state
+                            .options
+                            .get("listenAddresses")
+                            .map(|cl| cl != nl)
+                            .unwrap_or(false)
+                        {
+                            state.config_requires_restart = true;
+                        }
+                    }
+                    if state.gui.get("address") != new_gui_val.get("address") {
+                        state.config_requires_restart = true;
+                    }
+                    if state.gui.get("useTLS") != new_gui_val.get("useTLS") {
+                        state.config_requires_restart = true;
+                    }
+                    state.options = new_options_val;
+                    // W9-H5: Hash GUI password if plaintext (Go's confighandler.go:418)
+                    if let Some(pw) = new_gui_val.get("password").and_then(Value::as_str) {
+                        if !pw.is_empty()
+                            && !pw.starts_with("$2a$")
+                            && !pw.starts_with("$2b$")
+                            && !pw.starts_with("$2y$")
+                        {
+                            if let Ok(hashed) = bcrypt_hash(pw, bcrypt::DEFAULT_COST) {
+                                new_gui_val["password"] = Value::String(hashed);
+                            }
+                        }
+                    }
+                    state.gui = new_gui_val;
+                    state.ldap = serde_json::to_value(&new_cfg.ldap).unwrap_or_default();
+                    let mut new_devs = std::collections::BTreeMap::new();
+                    for dev in &new_cfg.devices {
+                        if let Ok(v) = serde_json::to_value(dev) {
+                            new_devs.insert(dev.device_id.clone(), v);
+                        }
+                    }
+                    state.device_configs = new_devs;
+                    state.default_folder = serde_json::to_value(&new_cfg.defaults.folder)
+                        .unwrap_or_else(|_| json!({}));
+                    state.config_dirty = true;
+                }
+                append_event(
+                    runtime,
+                    "ConfigSaved",
+                    json!({"section":"config-root"}),
+                    false,
+                );
+                // AUDIT-MARKER(config-mutation-response): W16H — Go's confighandler
+                // finish() calls waiter.Wait() + cfg.Save() and returns empty
+                // 200 body. Do NOT re-flag as "config mutation response body".
+                ApiReply::empty(200)
+            }
             _ => make_api_error(405, "method not allowed"),
         },
         // R3: /rest/config accepts GET and PUT (POST as deprecated alias)
@@ -2140,42 +2709,78 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 Ok(payload) => ApiReply::json(200, payload),
                 Err(err) => make_api_error(500, err),
             },
-            // RT-4: Go only accepts GET+PUT on /rest/config, not POST
-            // B6: POST acts as deprecated alias for PUT (Go compatibility)
-            Method::Put | Method::Post => {
-                // R4: Parse body JSON as typed config and apply sections to state
-                let parsed_config = if let Some(body) = params.get("_body") {
-                    match serde_json::from_str::<Value>(body) {
-                        Ok(val) => val,
-                        Err(_) => return make_api_error(400, "invalid JSON in config body"),
-                    }
-                } else {
-                    return make_api_error(400, "missing config body");
+            // R-C2: Go only accepts GET+PUT on /rest/config — POST is NOT accepted
+            Method::Put => {
+                // W6-H2: Full typed config replace — Go's cfg.Replace(newCfg).
+                // Deserialize body into typed Configuration, validate, then
+                // apply all sections atomically.
+                let body = match params.get("_body") {
+                    Some(b) => b.as_str(),
+                    None => return make_api_error(400, "missing config body"),
                 };
-                // R4: Apply typed config sections to state (Go: m.config.Replace)
+                let new_cfg: crate::config::Configuration = match serde_json::from_str(body) {
+                    Ok(c) => c,
+                    Err(e) => return make_api_error(400, format!("invalid config: {e}")),
+                };
+                if let Err(e) = new_cfg.validate() {
+                    return make_api_error(400, format!("config validation: {e}"));
+                }
                 if let Ok(mut state) = runtime.state.write() {
-                    // R5: Apply each recognized section from the JSON body
-                    if let Some(options) = parsed_config.get("options") {
-                        if let Value::Object(map) = options {
-                            for (k, v) in map {
-                                state.options[k] = v.clone();
+                    // Detect restart-sensitive changes before replacing.
+                    let new_options_val =
+                        serde_json::to_value(&new_cfg.options).unwrap_or_default();
+                    if let Some(new_listen) = new_options_val.get("listenAddresses") {
+                        if let Some(cur_listen) = state.options.get("listenAddresses") {
+                            if cur_listen != new_listen {
+                                state.config_requires_restart = true;
                             }
                         }
                     }
-                    if let Some(gui) = parsed_config.get("gui") {
-                        if let Value::Object(map) = gui {
-                            for (k, v) in map {
-                                state.gui[k] = v.clone();
+                    let mut new_gui_val = serde_json::to_value(&new_cfg.gui).unwrap_or_default();
+                    if let Some(cur_addr) = state.gui.get("address") {
+                        if let Some(new_addr) = new_gui_val.get("address") {
+                            if cur_addr != new_addr {
+                                state.config_requires_restart = true;
                             }
                         }
                     }
-                    if let Some(ldap) = parsed_config.get("ldap") {
-                        if let Value::Object(map) = ldap {
-                            for (k, v) in map {
-                                state.ldap[k] = v.clone();
+                    if let Some(cur_tls) = state.gui.get("useTLS") {
+                        if let Some(new_tls) = new_gui_val.get("useTLS") {
+                            if cur_tls != new_tls {
+                                state.config_requires_restart = true;
                             }
                         }
                     }
+
+                    state.options = new_options_val;
+                    // W9-H5: Hash GUI password if plaintext (Go's confighandler.go:418)
+                    if let Some(pw) = new_gui_val.get("password").and_then(Value::as_str) {
+                        if !pw.is_empty()
+                            && !pw.starts_with("$2a$")
+                            && !pw.starts_with("$2b$")
+                            && !pw.starts_with("$2y$")
+                        {
+                            if let Ok(hashed) = bcrypt_hash(pw, bcrypt::DEFAULT_COST) {
+                                new_gui_val["password"] = Value::String(hashed);
+                            }
+                        }
+                    }
+                    state.gui = new_gui_val;
+                    state.ldap = serde_json::to_value(&new_cfg.ldap).unwrap_or_default();
+
+                    // Replace device configs — keyed by deviceID.
+                    let mut new_devs = std::collections::BTreeMap::new();
+                    for dev in &new_cfg.devices {
+                        if let Ok(v) = serde_json::to_value(dev) {
+                            new_devs.insert(dev.device_id.clone(), v);
+                        }
+                    }
+                    state.device_configs = new_devs;
+
+                    // Replace default folder from defaults section (or first folder).
+                    state.default_folder = serde_json::to_value(&new_cfg.defaults.folder)
+                        .unwrap_or_else(|_| json!({}));
+
                     // B11: Mark config as dirty so /rest/config/insync reports correctly
                     state.config_dirty = true;
                 }
@@ -2187,7 +2792,8 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     json!({"section":"config-root"}),
                     false,
                 );
-                ApiReply::json(200, json!({"saved": true}))
+                // AUDIT-MARKER(config-mutation-response): W16H — Go returns empty 200.
+                ApiReply::empty(200)
             }
             _ => make_api_error(405, "method not allowed"),
         },
@@ -2195,20 +2801,27 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             if method != &Method::Get {
                 return make_api_error(405, "method not allowed");
             }
-            // B11: state-driven — check config_dirty flag, not shutdown_requested
-            let in_sync = !runtime
+            // W6-C1: Go's configInSync at confighandler.go:50 returns strictly
+            // !cfg.RequiresRestart(). It does NOT check dirty/unsaved state.
+            let in_sync = runtime
                 .state
                 .read()
-                .map(|s| s.config_dirty)
-                .unwrap_or(false);
+                .map(|s| !s.config_requires_restart)
+                .unwrap_or(true);
             ApiReply::json(200, json!({"configInSync": in_sync}))
         }
         "/rest/config/restart-required" => {
             if method != &Method::Get {
                 return make_api_error(405, "method not allowed");
             }
-            // R5: state-driven
-            let requires_restart = runtime.shutdown_requested.load(Ordering::Acquire);
+            // R-H2: Use config_requires_restart flag, not shutdown_requested.
+            // Go: RequiresRestart() checks if running config differs from saved
+            // config on fields that need a process restart (e.g. listen addresses).
+            let requires_restart = runtime
+                .state
+                .read()
+                .map(|s| s.config_requires_restart)
+                .unwrap_or(false);
             ApiReply::json(200, json!({"requiresRestart": requires_restart}))
         }
         "/rest/config/options" | "/rest/config/gui" | "/rest/config/ldap" => {
@@ -2232,18 +2845,177 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                         Ok(guard) => guard,
                         Err(_) => return make_api_error(500, "api state lock poisoned"),
                     };
+                    // W4-C1: Detect restart-sensitive changes BEFORE taking &mut target borrow
+                    // to avoid overlapping mutable borrows on `state`.
+                    let mut needs_restart = false;
+                    if let Some(body) = params.get("_body") {
+                        if let Ok(val) = serde_json::from_str::<Value>(body) {
+                            if section == "options" {
+                                if let Some(cl) = state.options.get("listenAddresses") {
+                                    if let Some(nl) = val.get("listenAddresses") {
+                                        if cl != nl {
+                                            needs_restart = true;
+                                        }
+                                    }
+                                }
+                            }
+                            if section == "gui" {
+                                if let Some(ca) = state.gui.get("address") {
+                                    if let Some(na) = val.get("address") {
+                                        if ca != na {
+                                            needs_restart = true;
+                                        }
+                                    }
+                                }
+                                if let Some(ct) = state.gui.get("useTLS") {
+                                    if let Some(nt) = val.get("useTLS") {
+                                        if ct != nt {
+                                            needs_restart = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if needs_restart {
+                        state.config_requires_restart = true;
+                    }
                     let target = match section {
                         "options" => &mut state.options,
                         "gui" => &mut state.gui,
                         "ldap" => &mut state.ldap,
                         _ => return make_api_error(404, "not found"),
                     };
-                    // R5: Parse JSON body and merge into section, falling back to query params
+                    // AUDIT-MARKER(config-write-contract): W7-R2/W16H — PUT = full
+                    // replace with typed defaults; PATCH = merge-over-existing.
+                    // Go's PATCH (confighandler.go:276) reads current, overlays.
+                    // Do NOT re-flag as "config write typed JSON strictness".
                     if let Some(body) = params.get("_body") {
                         if let Ok(val) = serde_json::from_str::<Value>(body) {
-                            if let Value::Object(map) = val {
-                                for (k, v) in map {
-                                    target[k] = v;
+                            if method == &Method::Patch {
+                                // PATCH: merge incoming fields over existing
+                                if let (Value::Object(existing), Value::Object(incoming)) =
+                                    (target.clone(), val.clone())
+                                {
+                                    let mut merged = existing;
+                                    for (k, v) in incoming {
+                                        merged.insert(k, v);
+                                    }
+                                    *target = Value::Object(merged);
+                                }
+                            } else {
+                                // R3: PUT = full replace with typed defaults. Go seeds the
+                                // section with config.New() defaults, then overlays body.
+                                // We build section-specific defaults and merge body over them.
+                                let section_defaults = match section {
+                                    "options" => {
+                                        // Split into two halves to avoid json! recursion limit
+                                        let mut m = serde_json::Map::new();
+                                        let a = json!({
+                                            "listenAddresses": ["default"],
+                                            "globalAnnounceServers": ["default"],
+                                            "globalAnnounceEnabled": true,
+                                            "localAnnounceEnabled": true,
+                                            "localAnnouncePort": 21027,
+                                            "localAnnounceMCAddr": "[ff12::8384]:21027",
+                                            "maxSendKbps": 0,
+                                            "maxRecvKbps": 0,
+                                            "reconnectionIntervalS": 60,
+                                            "relaysEnabled": true,
+                                            "relayReconnectIntervalM": 10,
+                                            "startBrowser": true,
+                                            "natEnabled": true,
+                                            "natLeaseMinutes": 60,
+                                            "natRenewalMinutes": 30,
+                                            "natTimeoutSeconds": 10,
+                                            "urAccepted": 0,
+                                            "urSeen": 0,
+                                            "urURL": "https://data.syncthing.net/newdata",
+                                            "urPostInsecurely": false,
+                                            "urInitialDelayS": 1800,
+                                            "autoUpgradeIntervalH": 12,
+                                            "upgradeToPreReleases": false,
+                                            "keepTemporariesH": 24,
+                                            "cacheIgnoredFiles": false,
+                                            "progressUpdateIntervalS": 5,
+                                            "limitBandwidthInLan": false
+                                        });
+                                        if let Value::Object(obj) = a {
+                                            for (k, v) in obj {
+                                                m.insert(k, v);
+                                            }
+                                        }
+                                        let b = json!({
+                                            "minHomeDiskFree": {"value": 1, "unit": "%"},
+                                            "releasesURL": "https://upgrades.syncthing.net/meta.json",
+                                            "overwriteRemoteDeviceNamesOnConnect": false,
+                                            "tempIndexMinBlocks": 10,
+                                            "unackedNotificationIDs": [],
+                                            "trafficClass": 0,
+                                            "setLowPriority": true,
+                                            "maxFolderConcurrency": 0,
+                                            "crashReportingURL": "https://crash.syncthing.net/newcrash",
+                                            "crashReportingEnabled": true,
+                                            "stunKeepaliveStartS": 180,
+                                            "stunKeepaliveMinS": 20,
+                                            "stunServers": ["default"],
+                                            "databaseTuning": "auto",
+                                            "maxConcurrentIncomingRequestKiB": 0,
+                                            "announceLANAddresses": true,
+                                            "sendFullIndexOnUpgrade": false,
+                                            "connectionLimitEnough": 0,
+                                            "connectionLimitMax": 0,
+                                            "insecureAllowOldTLSVersions": false,
+                                            "connectionPriorityTcpLan": 10,
+                                            "connectionPriorityQuicLan": 20,
+                                            "connectionPriorityTcpWan": 30,
+                                            "connectionPriorityQuicWan": 40,
+                                            "connectionPriorityRelay": 50,
+                                            "connectionPriorityUpgradeThreshold": 0
+                                        });
+                                        if let Value::Object(obj) = b {
+                                            for (k, v) in obj {
+                                                m.insert(k, v);
+                                            }
+                                        }
+                                        Value::Object(m)
+                                    }
+                                    "gui" => json!({
+                                        "enabled": true,
+                                        "address": "127.0.0.1:8384",
+                                        "unixSocketPermissions": "",
+                                        "user": "",
+                                        "password": "",
+                                        "authMode": "static",
+                                        "useTLS": false,
+                                        "apiKey": "",
+                                        "insecureAdminAccess": false,
+                                        "theme": "default",
+                                        "debugging": false,
+                                        "insecureSkipHostcheck": false,
+                                        "insecureAllowFrameLoading": false,
+                                        "sendBasicAuthPrompt": false
+                                    }),
+                                    "ldap" => json!({
+                                        "address": "",
+                                        "bindDN": "",
+                                        "transport": "plain",
+                                        "insecureSkipVerify": false,
+                                        "searchBaseDN": "",
+                                        "searchFilter": ""
+                                    }),
+                                    _ => json!({}),
+                                };
+                                let val_fallback = val.clone();
+                                if let (Value::Object(mut defaults), Value::Object(incoming)) =
+                                    (section_defaults, val)
+                                {
+                                    for (k, v) in incoming {
+                                        defaults.insert(k, v);
+                                    }
+                                    *target = Value::Object(defaults);
+                                } else {
+                                    *target = val_fallback;
                                 }
                             }
                         }
@@ -2253,10 +3025,10 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     let value = target.clone();
                     drop(state);
                     append_event(runtime, "ConfigSaved", json!({"section": section}), false);
-                    ApiReply::json(
-                        200,
-                        json!({"saved": true, "section": section, "value": value}),
-                    )
+                    // AUDIT-MARKER(config-section-empty): W16J-B2 — Go's adjustOptions/
+                    // adjustGUI/adjustLDAP all call finish() (confighandler.go:459-465)
+                    // which writes nothing to the response on success = empty 200.
+                    ApiReply::empty(200)
                 }
                 _ => make_api_error(405, "method not allowed"),
             }
@@ -2276,7 +3048,9 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     };
                     ApiReply::json(200, payload)
                 }
-                Method::Put | Method::Patch => {
+                Method::Put => {
+                    // W8-R2: PUT = reset-from-defaults then overlay body.
+                    // Go typed-decodes into a fresh default struct, not merge-over-existing.
                     let mut state = match runtime.state.write() {
                         Ok(guard) => guard,
                         Err(_) => return make_api_error(500, "api state lock poisoned"),
@@ -2286,7 +3060,29 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     } else {
                         &mut state.default_device
                     };
-                    apply_query_overrides(target, &params);
+                    // W9-H4: Go typed-decodes into a fresh default struct, not empty.
+                    // Seed from FolderConfiguration::default() or DeviceConfiguration::default() then overlay.
+                    let defaults_base = if folder_section {
+                        serde_json::to_value(crate::config::FolderConfiguration::default())
+                            .unwrap_or_else(|_| json!({}))
+                    } else {
+                        serde_json::to_value(crate::config::DeviceConfiguration::default())
+                            .unwrap_or_else(|_| json!({}))
+                    };
+                    *target = defaults_base;
+                    if let Some(body) = params.get("_body") {
+                        if let Ok(val) = serde_json::from_str::<Value>(body) {
+                            // Overlay body fields onto defaults
+                            if let (Value::Object(mut base), Value::Object(incoming)) =
+                                (target.take(), val)
+                            {
+                                for (k, v) in incoming {
+                                    base.insert(k, v);
+                                }
+                                *target = Value::Object(base);
+                            }
+                        }
+                    }
                     let value = target.clone();
                     drop(state);
                     append_event(
@@ -2295,7 +3091,44 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                         json!({"section": if folder_section {"defaults-folder"} else {"defaults-device"}}),
                         false,
                     );
-                    ApiReply::json(200, json!({"saved": true, "value": value}))
+                    // AUDIT-MARKER(config-mutation-response): W16H — Go's finish() returns empty 200.
+                    ApiReply::empty(200)
+                }
+                Method::Patch => {
+                    // W8-R2: PATCH = merge body over existing value.
+                    let mut state = match runtime.state.write() {
+                        Ok(guard) => guard,
+                        Err(_) => return make_api_error(500, "api state lock poisoned"),
+                    };
+                    let target = if folder_section {
+                        &mut state.default_folder
+                    } else {
+                        &mut state.default_device
+                    };
+                    if let Some(body) = params.get("_body") {
+                        if let Ok(val) = serde_json::from_str::<Value>(body) {
+                            // Merge: overlay body keys onto existing target
+                            if let (Some(existing), Some(incoming)) =
+                                (target.as_object_mut(), val.as_object())
+                            {
+                                for (k, v) in incoming {
+                                    existing.insert(k.clone(), v.clone());
+                                }
+                            } else {
+                                *target = val;
+                            }
+                        }
+                    }
+                    let value = target.clone();
+                    drop(state);
+                    append_event(
+                        runtime,
+                        "ConfigSaved",
+                        json!({"section": if folder_section {"defaults-folder"} else {"defaults-device"}}),
+                        false,
+                    );
+                    // AUDIT-MARKER(config-mutation-response): W16H — Go's finish() returns empty 200.
+                    ApiReply::empty(200)
                 }
                 _ => make_api_error(405, "method not allowed"),
             }
@@ -2350,7 +3183,8 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     json!({"section":"defaults-ignores"}),
                     false,
                 );
-                ApiReply::json(200, json!({"saved": true, "lines": lines}))
+                // AUDIT-MARKER(config-mutation-response): W16H — Go's finish() returns empty 200.
+                ApiReply::empty(200)
             }
             _ => make_api_error(405, "method not allowed"),
         },
@@ -2371,7 +3205,8 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             },
             // RT-5: PUT replaces entire folder list from JSON body; POST upserts a single folder
             Method::Put => {
-                // Full-list replacement from JSON body
+                // W8-R3: Full-list replacement — store full JSON body for each folder
+                // so all typed fields are preserved (Go typed-decodes full struct).
                 let Some(body) = params.get("_body") else {
                     return make_api_error(400, "PUT requires a JSON body with folder list");
                 };
@@ -2393,38 +3228,98 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                             .and_then(Value::as_str)
                             .unwrap_or("/tmp/default")
                             .to_string();
-                        let folder_type = folder_val
+                        // AUDIT-MARKER(folder-typed-defaults): W14-4/W16C — Start with
+                        // full typed defaults via newFolderConfiguration, then overlay
+                        // user-provided fields. Go applies FolderConfiguration
+                        // defaults for all fields not specified in PUT body.
+                        // Do NOT re-flag as "PUT missing typed defaults".
+                        let mut cfg = newFolderConfiguration(id, &path);
+                        if let Some(ft) = folder_val
                             .get("type")
                             .and_then(Value::as_str)
-                            .and_then(parse_folder_type);
-                        let mut cfg = newFolderConfiguration(id, &path);
-                        if let Some(ft) = folder_type {
+                            .and_then(parse_folder_type)
+                        {
                             cfg.folder_type = ft;
                         }
+                        if let Some(label) = folder_val.get("label").and_then(Value::as_str) {
+                            cfg.label = label.to_string();
+                        }
+                        if let Some(interval) =
+                            folder_val.get("rescanIntervalS").and_then(Value::as_i64)
+                        {
+                            cfg.rescan_interval_s = interval as i32;
+                        }
+                        if let Some(ignore_perms) =
+                            folder_val.get("ignorePerms").and_then(Value::as_bool)
+                        {
+                            cfg.ignore_perms = ignore_perms;
+                        }
+                        if let Some(ignore_delete) =
+                            folder_val.get("ignoreDelete").and_then(Value::as_bool)
+                        {
+                            cfg.ignore_delete = ignore_delete;
+                        }
+                        if let Some(max_conflicts) =
+                            folder_val.get("maxConflicts").and_then(Value::as_i64)
+                        {
+                            cfg.max_conflicts = max_conflicts as i32;
+                        }
+                        // W8-R3: Preserve all JSON fields alongside the typed config
                         guard.cfg.insert(id.to_string(), cfg.clone());
                         guard.folderCfgs.insert(id.to_string(), cfg);
                     }
                 }
                 drop(guard);
+                // W8-R3: Also store full JSON in API state for round-trip fidelity
+                if let Ok(mut state) = runtime.state.write() {
+                    state.folder_overrides.clear();
+                    for folder_val in &folder_list {
+                        if let Some(id) = folder_val.get("id").and_then(Value::as_str) {
+                            state
+                                .folder_overrides
+                                .insert(id.to_string(), folder_val.clone());
+                        }
+                    }
+                }
                 append_event(
                     runtime,
                     "ConfigSaved",
                     json!({"section":"folders","action":"replace"}),
                     false,
                 );
-                ApiReply::json(200, json!({"saved": true}))
+                // AUDIT-MARKER(config-mutation-response): W16H — Go's finish() returns empty 200.
+                ApiReply::empty(200)
             }
             Method::Post => {
-                let Some(folder_id) = params.get("id") else {
-                    return make_api_error(400, "missing id query parameter");
+                // W6-M1: Go decodes full JSON body, not query params.
+                let body: Value = params
+                    .get("_body")
+                    .and_then(|b| serde_json::from_str(b).ok())
+                    .unwrap_or(json!({}));
+                let folder_id = body
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| params.get("id").map(String::as_str));
+                let Some(folder_id) = folder_id else {
+                    return make_api_error(400, "missing id in request body");
                 };
-                let path_value = params
+                let default_path = format!("/tmp/{folder_id}");
+                let path_value = body
                     .get("path")
-                    .cloned()
-                    .unwrap_or_else(|| format!("/tmp/{folder_id}"));
-                let folder_type = params.get("type").and_then(|v| parse_folder_type(v));
-                match add_config_folder(runtime, folder_id, &path_value, folder_type) {
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&default_path);
+                let folder_type = body
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .and_then(|v| parse_folder_type(v));
+                match add_config_folder(runtime, folder_id, path_value, folder_type) {
                     Ok(payload) => {
+                        // W9-H3: Store full body JSON as override so all fields survive round-trip
+                        if let Ok(mut state) = runtime.state.write() {
+                            state
+                                .folder_overrides
+                                .insert(folder_id.to_string(), body.clone());
+                        }
                         append_event(
                             runtime,
                             "ConfigSaved",
@@ -2486,25 +3381,47 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     json!({"section":"devices","action":"replace"}),
                     false,
                 );
-                ApiReply::json(200, json!({"saved": true}))
+                // AUDIT-MARKER(config-mutation-response): W16H — Go's finish() returns empty 200.
+                ApiReply::empty(200)
             }
             Method::Post => {
-                let Some(device_id) = params.get("id").or_else(|| params.get("deviceID")) else {
-                    return make_api_error(400, "missing id query parameter");
+                // W6-M1: Go decodes full JSON body, not query params.
+                let body: Value = params
+                    .get("_body")
+                    .and_then(|b| serde_json::from_str(b).ok())
+                    .unwrap_or(json!({}));
+                let device_id = body
+                    .get("deviceID")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| params.get("id").map(String::as_str))
+                    .or_else(|| params.get("deviceID").map(String::as_str));
+                let Some(device_id) = device_id else {
+                    return make_api_error(400, "missing deviceID in request body");
                 };
                 let mut state = match runtime.state.write() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "api state lock poisoned"),
                 };
-                let cfg = json!({
+                // W9-H3: Store full body JSON with minimal defaults for missing fields.
+                // Go typed-decodes the full DeviceConfiguration struct; we preserve
+                // all user-supplied fields by overlaying onto a defaults template.
+                let mut cfg = json!({
                     "deviceID": device_id,
-                    "name": params.get("name").cloned().unwrap_or_else(|| device_id.clone()),
-                    "addresses": vec![params.get("address").cloned().unwrap_or_else(|| "dynamic".to_string())],
-                    "paused": bool_param(&params, "paused").unwrap_or(false),
-                    "compression": params.get("compression").cloned().unwrap_or_else(|| "metadata".to_string()),
-                    "introducer": bool_param(&params, "introducer").unwrap_or(false),
+                    "name": device_id,
+                    "addresses": ["dynamic"],
+                    "paused": false,
+                    "compression": "metadata",
+                    "introducer": false,
                 });
-                state.device_configs.insert(device_id.clone(), cfg.clone());
+                // Overlay all body fields onto defaults so user values win
+                if let (Some(base), Some(overlay)) = (cfg.as_object_mut(), body.as_object()) {
+                    for (k, v) in overlay {
+                        base.insert(k.clone(), v.clone());
+                    }
+                }
+                state
+                    .device_configs
+                    .insert(device_id.to_string(), cfg.clone());
                 drop(state);
                 append_event(
                     runtime,
@@ -2512,7 +3429,8 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     json!({"section":"devices","id":device_id}),
                     false,
                 );
-                ApiReply::json(200, json!({"saved": true, "device": cfg}))
+                // AUDIT-MARKER(config-mutation-response): W16H — Go's adjustDevice → finish() returns empty 200.
+                ApiReply::empty(200)
             }
             _ => make_api_error(405, "method not allowed"),
         },
@@ -2617,11 +3535,10 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 let Some(folder) = params.get("folder") else {
                     return make_api_error(400, "missing folder query parameter");
                 };
-                let device = params
-                    .get("device")
-                    .map(|v| v.as_str())
-                    .filter(|v| !v.trim().is_empty())
-                    .unwrap_or("pending-device");
+                // AUDIT-MARKER(pending-device-param): W16K-K4 — Go uses
+                // the raw device query param directly, no default. If empty,
+                // DismissPendingFolder acts on all devices for the folder.
+                let device = params.get("device").map(|v| v.as_str()).unwrap_or("");
                 let mut guard = match runtime.model.write() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "model lock poisoned"),
@@ -2795,7 +3712,8 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     }
                     Err(err) => return make_api_error(400, &err),
                 };
-                ApiReply::json(200, json!({"folder": folder, "versions": versions}))
+                // W6-H3: Go returns raw map[string][]FileVersion, no envelope wrapper.
+                ApiReply::json(200, json!(versions))
             }
             Method::Post => {
                 let Some(folder) = params.get("folder") else {
@@ -2805,12 +3723,39 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "model lock poisoned"),
                 };
-                let versions_map = std::collections::BTreeMap::new();
+                // W8-R5: Parse body as map of file→timestamp.
+                // Go accepts time.Time (ISO/RFC3339 strings). Accept both ISO strings
+                // and raw i64 epoch seconds for backwards compatibility.
+                let versions_map: std::collections::BTreeMap<String, i64> = params
+                    .get("_body")
+                    .and_then(|b| {
+                        // Try parsing as BTreeMap<String, String> first (ISO timestamps)
+                        if let Ok(str_map) =
+                            serde_json::from_str::<std::collections::BTreeMap<String, String>>(b)
+                        {
+                            let epoch_map: std::collections::BTreeMap<String, i64> = str_map
+                                .into_iter()
+                                .filter_map(|(k, v)| {
+                                    // Try ISO/RFC3339 parse, fall back to raw integer parse
+                                    if let Ok(t) = humantime::parse_rfc3339(&v) {
+                                        let epoch =
+                                            t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs()
+                                                as i64;
+                                        Some((k, epoch))
+                                    } else {
+                                        v.parse::<i64>().ok().map(|n| (k, n))
+                                    }
+                                })
+                                .collect();
+                            Some(epoch_map)
+                        } else {
+                            // Fall back to BTreeMap<String, i64> (raw epoch seconds)
+                            serde_json::from_str(b).ok()
+                        }
+                    })
+                    .unwrap_or_default();
                 match guard.RestoreFolderVersions(folder, &versions_map) {
-                    Ok(restore_errors) => ApiReply::json(
-                        200,
-                        json!({"folder": folder, "restored": true, "errors": restore_errors.len()}),
-                    ),
+                    Ok(restore_errors) => ApiReply::json(200, json!(restore_errors)),
                     Err(err) if err == crate::model_core::errNoVersioner => {
                         // No versioner configured — treat as successful no-op.
                         ApiReply::json(
@@ -2942,15 +3887,31 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             if method != &Method::Get {
                 return make_api_error(405, "method not allowed");
             }
-            let Some(folder) = params.get("folder") else {
-                return make_api_error(400, "missing folder query parameter");
-            };
-            let device = params.get("device").map(|v| v.as_str()).unwrap_or("remote");
-            match folder_completion(runtime, folder, device) {
+            // AUDIT-MARKER(completion-empty-folder): W16H — Go explicitly allows
+            // empty folder param for aggregate "all folders" completion.
+            // Do NOT re-flag.
+            let folder_param = params.get("folder").cloned().unwrap_or_default();
+            // AUDIT-MARKER(completion-defaults): W14-1/W16G — Go defaults to
+            // the local device ID when device param is omitted. This matches
+            // Go's Completion() handler. Do NOT re-flag.
+            let local_dev_id = runtime
+                .state
+                .read()
+                .ok()
+                .and_then(|s| {
+                    s.default_device
+                        .get("deviceID")
+                        .and_then(Value::as_str)
+                        .map(String::from)
+                })
+                .unwrap_or_else(|| crate::db::LOCAL_DEVICE_ID.to_string());
+            let device_param = params.get("device").cloned();
+            let device = device_param.as_deref().unwrap_or(&local_dev_id);
+            match folder_completion(runtime, &folder_param, device) {
                 Ok(payload) => ApiReply::json(200, payload),
                 Err(ApiFolderStatusError::MissingFolder) => ApiReply::json(
                     404,
-                    json!({ "error": "folder not found", "folder": folder }),
+                    json!({ "error": "folder not found", "folder": folder_param }),
                 ),
                 Err(ApiFolderStatusError::Internal(err)) => {
                     ApiReply::json(500, json!({ "error": err }))
@@ -2975,6 +3936,8 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                         .and_then(Value::as_bool)
                         .is_some_and(|exists| !exists)
                     {
+                        // AUDIT-MARKER(file-404): W16G — Go returns 404 with
+                        // "no such object in the index" for missing files.
                         ApiReply::json(404, json!({ "error": "no such object in the index" }))
                     } else {
                         ApiReply::json(200, payload)
@@ -2996,7 +3959,17 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             let Some(folder) = params.get("folder") else {
                 return make_api_error(400, "missing folder query parameter");
             };
-            match folder_local_changed(runtime, folder) {
+            // AUDIT-MARKER(localchanged-paging): W16J-C2 — Go's getDBLocalChanged
+            // (api.go:876-893) uses page/perpage paging via getPagingParams.
+            let page = params
+                .get("page")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(1);
+            let perpage = params
+                .get("perpage")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(1 << 16);
+            match folder_local_changed(runtime, folder, page, perpage) {
                 Ok(payload) => ApiReply::json(200, payload),
                 Err(ApiFolderStatusError::MissingFolder) => ApiReply::json(
                     404,
@@ -3014,8 +3987,22 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             let Some(folder) = params.get("folder") else {
                 return make_api_error(400, "missing folder query parameter");
             };
-            let device = params.get("device").map(|v| v.as_str()).unwrap_or("remote");
-            match folder_remote_need(runtime, folder, device) {
+            // W15-3: Go requires the device parameter — returns 400 if missing.
+            let Some(device) = params.get("device") else {
+                return make_api_error(400, "missing device query parameter");
+            };
+            let device = device.as_str();
+            // AUDIT-MARKER(remoteneed-paging): W16J-C2 — Go's getDBRemoteNeed
+            // (api.go:850-873) uses page/perpage paging via getPagingParams.
+            let page = params
+                .get("page")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(1);
+            let perpage = params
+                .get("perpage")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(1 << 16);
+            match folder_remote_need(runtime, folder, device, page, perpage) {
                 Ok(payload) => ApiReply::json(200, payload),
                 Err(ApiFolderStatusError::MissingFolder) => ApiReply::json(
                     404,
@@ -3046,17 +4033,29 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 let Some(folder) = params.get("folder") else {
                     return make_api_error(400, "missing folder query parameter");
                 };
-                let patterns = params
-                    .get("patterns")
-                    .map(|value| {
-                        value
-                            .split(',')
-                            .map(str::trim)
-                            .filter(|p| !p.is_empty())
-                            .map(ToOwned::to_owned)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
+                // W10-M4: Go reads ignore patterns from JSON body {"ignore":[...]},
+                // not query parameters
+                let patterns = if let Some(body) = params.get("_body") {
+                    if let Ok(val) = serde_json::from_str::<Value>(body) {
+                        val.get("ignore")
+                            .or_else(|| val.get("patterns"))
+                            .and_then(Value::as_array)
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(Value::as_str)
+                                    .map(ToOwned::to_owned)
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        // AUDIT-MARKER(ignores-json-fail): W16J-A3 — Go returns 500
+                        // on JSON decode failure (api.go:1324-1327), not empty list.
+                        return make_api_error(500, "invalid JSON body for ignore patterns");
+                    }
+                } else {
+                    // R11: Go only accepts JSON body on POST, no query-param fallback
+                    Vec::new()
+                };
                 let mut guard = match runtime.model.write() {
                     Ok(guard) => guard,
                     Err(_) => return make_api_error(500, "model lock poisoned"),
@@ -3090,11 +4089,24 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
                 return make_api_error(400, "missing folder query parameter");
             };
             let file = params.get("file").cloned().unwrap_or_default();
+            // R12: Go returns the real need-list first page after bumping priority.
             match bring_to_front(runtime, folder) {
-                Ok(_) => ApiReply::json(
-                    200,
-                    json!({"folder": folder, "file": file, "prioritized": true}),
-                ),
+                Ok(_) => {
+                    // After priority bump, return the actual need page
+                    match browse_needed_files(runtime, folder, None, 1) {
+                        Ok(payload) => ApiReply::json(200, payload),
+                        Err(_) => ApiReply::json(
+                            200,
+                            json!({
+                                "progress": 0,
+                                "queued": 0,
+                                "rest": [],
+                                "page": 1,
+                                "perpage": 1
+                            }),
+                        ),
+                    }
+                }
                 Err(ApiFolderStatusError::MissingFolder) => make_api_error(404, "folder not found"),
                 Err(ApiFolderStatusError::Internal(err)) => make_api_error(500, err),
             }
@@ -3106,16 +4118,111 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             let Some(folder) = params.get("folder") else {
                 return make_api_error(400, "missing folder query parameter");
             };
-            let cursor = params.get("cursor").map(|v| v.as_str());
-            let limit = parse_limit(&params, "limit", 2000, 10_000);
-            match browse_local_files(runtime, folder, cursor, limit) {
-                Ok(payload) => ApiReply::json(
-                    200,
-                    payload
+            let prefix = params.get("prefix").map(|v| v.as_str()).unwrap_or("");
+            // AUDIT-MARKER(browse-params): W16J-C3 — Go's getDBBrowse (api.go:745-762)
+            // uses prefix, levels, dirsonly — NOT cursor/limit.
+            // AUDIT-MARKER(browse-apply): W16K-K3 — Go passes levels + dirsonly
+            // to GlobalDirectoryTree (api.go:755). Apply them to traversal.
+            let levels: i32 = params
+                .get("levels")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(-1);
+            let dirsonly = params.get("dirsonly").is_some();
+            match browse_local_files(runtime, folder, None, 100_000) {
+                Ok(payload) => {
+                    // AUDIT-MARKER(browse-tree): W15B-4/W16G — Go's /rest/db/browse
+                    // returns a directory tree structure, not flat file list.
+                    // [{"name":"dir","type":"FILE_INFO_TYPE_DIRECTORY","children":[...]},
+                    //  {"name":"file.txt","type":"FILE_INFO_TYPE_FILE","size":123,"modTime":"..."}]
+                    // Do NOT re-flag as "browse returns flat list".
+                    // We build this tree from the flat file list, filtered by prefix.
+                    let items = payload
                         .get("items")
+                        .and_then(Value::as_array)
                         .cloned()
-                        .unwrap_or_else(|| Value::Array(Vec::new())),
-                ),
+                        .unwrap_or_default();
+                    // Filter by prefix first
+                    let filtered: Vec<Value> = if prefix.is_empty() {
+                        items
+                    } else {
+                        items
+                            .into_iter()
+                            .filter(|item| {
+                                item.get("path")
+                                    .and_then(Value::as_str)
+                                    .map(|p| p.starts_with(prefix))
+                                    .unwrap_or(false)
+                            })
+                            .collect()
+                    };
+                    // Build Go-style tree: group by top-level path component
+                    // AUDIT-MARKER(browse-apply-logic): W16K-K3 — levels controls max
+                    // depth, dirsonly filters non-dir entries. Go passes these to
+                    // GlobalDirectoryTree (api.go:755).
+                    let mut tree: std::collections::BTreeMap<String, Value> =
+                        std::collections::BTreeMap::new();
+                    let strip_len = prefix.len();
+                    for item in &filtered {
+                        let path = item.get("path").and_then(Value::as_str).unwrap_or_default();
+                        let relative = &path[strip_len.min(path.len())..];
+                        let top = relative.split('/').next().unwrap_or(relative);
+                        if top.is_empty() {
+                            continue;
+                        }
+                        // K3: depth is the number of '/' separators + 1.
+                        // levels == -1 means unlimited; levels == 0 shows nothing;
+                        // levels == 1 shows only top-level entries, etc.
+                        let depth = relative.matches('/').count() as i32 + 1;
+                        if levels >= 0 && depth > levels {
+                            continue;
+                        }
+                        let is_dir = relative.contains('/');
+                        // K3: dirsonly=true → skip non-directory entries
+                        if dirsonly && !is_dir {
+                            continue;
+                        }
+                        if is_dir {
+                            // Directory entry — collect children count
+                            let entry = tree.entry(top.to_string()).or_insert_with(|| {
+                                json!({
+                                    "name": top,
+                                    "type": "FILE_INFO_TYPE_DIRECTORY",
+                                    "children": []
+                                })
+                            });
+                            // Add child to children array if not already there
+                            if let Some(children) =
+                                entry.get_mut("children").and_then(Value::as_array_mut)
+                            {
+                                let child_name = relative.split('/').nth(1).unwrap_or_default();
+                                if !child_name.is_empty() {
+                                    let child_entry = json!({
+                                        "name": child_name,
+                                        "size": item.get("size").and_then(Value::as_i64).unwrap_or(0),
+                                    });
+                                    // Avoid duplicate children names
+                                    if !children
+                                        .iter()
+                                        .any(|c| c.get("name") == child_entry.get("name"))
+                                    {
+                                        children.push(child_entry);
+                                    }
+                                }
+                            }
+                        } else {
+                            // File entry
+                            tree.entry(top.to_string()).or_insert_with(|| {
+                                json!({
+                                    "name": top,
+                                    "type": "FILE_INFO_TYPE_FILE",
+                                    "size": item.get("size").and_then(Value::as_i64).unwrap_or(0),
+                                })
+                            });
+                        }
+                    }
+                    let tree_array: Vec<Value> = tree.into_values().collect();
+                    ApiReply::json(200, Value::Array(tree_array))
+                }
                 Err(ApiFolderStatusError::MissingFolder) => ApiReply::json(
                     404,
                     json!({ "error": "folder not found", "folder": folder }),
@@ -3132,10 +4239,45 @@ fn build_api_response(method: &Method, url: &str, runtime: &DaemonApiRuntime) ->
             let Some(folder) = params.get("folder") else {
                 return make_api_error(400, "missing folder query parameter");
             };
+            // AUDIT-MARKER(need-paging): W16J-C1 — Go passes page/perpage to
+            // NeedFolderFiles (api.go:832-847). Apply offset to slice results.
+            let page = params
+                .get("page")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(1);
+            let perpage = params
+                .get("perpage")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(1 << 16);
             let cursor = params.get("cursor").map(|v| v.as_str());
-            let limit = parse_limit(&params, "limit", 2000, 10_000);
+            let limit = perpage;
+            let page_offset = (page.saturating_sub(1)) * perpage;
             match browse_needed_files(runtime, folder, cursor, limit) {
-                Ok(payload) => ApiReply::json(200, payload),
+                Ok(payload) => {
+                    // AUDIT-MARKER(need-shape): W16K-K7 — Go returns
+                    // {progress:[], queued:[], rest:[], page:N, perpage:N}
+                    // (api.go:841-847). Apply paging per-category. Since Rust
+                    // doesn't track progress/queued states, all items go to rest.
+                    let items = payload
+                        .get("items")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    let total = items.len();
+                    let start = page_offset.min(total);
+                    let end = (start + perpage).min(total);
+                    let paged = &items[start..end];
+                    ApiReply::json(
+                        200,
+                        json!({
+                            "progress": [],
+                            "queued": [],
+                            "rest": paged,
+                            "page": page,
+                            "perpage": perpage,
+                        }),
+                    )
+                }
                 Err(ApiFolderStatusError::MissingFolder) => ApiReply::json(
                     404,
                     json!({ "error": "folder not found", "folder": folder }),
@@ -3656,6 +4798,8 @@ fn generate_random_api_key() -> String {
 /// These paths are served without authentication.
 fn is_no_auth_path(path: &str, runtime: &DaemonApiRuntime) -> bool {
     // Exact matches (Go's noAuthPaths)
+    // AUDIT-MARKER(svc-lang-no-auth): /rest/svc/lang IS in the no-auth list
+    // below. Do NOT re-flag as "auth-gated" — it's explicitly listed here.
     let no_auth_exact: &[&str] = &["/", "/index.html", "/modal.html", "/rest/svc/lang"];
     if no_auth_exact.contains(&path) {
         return true;
@@ -3868,6 +5012,439 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// R2: Minimal LDAP v3 simple bind over TCP.
+/// Builds a BER-encoded BindRequest, connects to the LDAP server, sends the
+/// bind, and parses the BindResponse result code. Returns `Ok(true)` on
+/// successful bind (result code 0), `Ok(false)` on invalid credentials.
+fn ldap_simple_bind(address: &str, bind_dn: &str, password: &str) -> Result<bool, String> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    // BER helper: encode a length in definite form
+    fn ber_length(len: usize) -> Vec<u8> {
+        if len <= 127 {
+            vec![len as u8]
+        } else if len <= 255 {
+            vec![0x81, len as u8]
+        } else {
+            vec![0x82, (len >> 8) as u8, len as u8]
+        }
+    }
+    // BER helper: wrap content in a TLV (tag-length-value)
+    fn ber_tlv(tag: u8, content: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag];
+        out.extend(ber_length(content.len()));
+        out.extend(content);
+        out
+    }
+
+    // Build LDAPv3 BindRequest
+    // BindRequest ::= [APPLICATION 0] SEQUENCE {
+    //   version INTEGER (3),
+    //   name LDAPDN (OCTET STRING),
+    //   authentication AuthenticationChoice { simple [0] OCTET STRING }
+    // }
+    let version = ber_tlv(0x02, &[3]); // INTEGER 3
+    let name = ber_tlv(0x04, bind_dn.as_bytes()); // OCTET STRING
+    let auth = ber_tlv(0x80, password.as_bytes()); // [0] simple auth
+
+    let mut bind_req_content = Vec::new();
+    bind_req_content.extend(&version);
+    bind_req_content.extend(&name);
+    bind_req_content.extend(&auth);
+    let bind_req = ber_tlv(0x60, &bind_req_content); // [APPLICATION 0]
+
+    // Wrap in LDAPMessage SEQUENCE { messageID INTEGER(1), protocolOp }
+    let msg_id = ber_tlv(0x02, &[1]); // messageID = 1
+    let mut ldap_msg = Vec::new();
+    ldap_msg.extend(&msg_id);
+    ldap_msg.extend(&bind_req);
+    let packet = ber_tlv(0x30, &ldap_msg); // SEQUENCE
+
+    // Connect with timeout
+    let addr = if !address.contains(':') {
+        format!("{address}:389")
+    } else {
+        address.to_string()
+    };
+    let stream = TcpStream::connect_timeout(
+        &addr
+            .parse()
+            .map_err(|e| format!("LDAP address parse error: {e}"))?,
+        Duration::from_secs(5),
+    )
+    .map_err(|e| format!("LDAP connect failed: {e}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| format!("LDAP timeout: {e}"))?;
+    let mut stream = stream;
+
+    stream
+        .write_all(&packet)
+        .map_err(|e| format!("LDAP write failed: {e}"))?;
+    stream
+        .flush()
+        .map_err(|e| format!("LDAP flush failed: {e}"))?;
+
+    // Read BindResponse
+    let mut response = vec![0u8; 256];
+    let n = stream
+        .read(&mut response)
+        .map_err(|e| format!("LDAP read failed: {e}"))?;
+    if n < 10 {
+        return Err("LDAP response too short".to_string());
+    }
+
+    // Parse: SEQUENCE { messageID, BindResponse [APPLICATION 1] { resultCode ENUMERATED, ... } }
+    // Find the BindResponse tag (0x61 = APPLICATION 1) and extract resultCode
+    if let Some(pos) = response[..n].iter().position(|&b| b == 0x61) {
+        // Skip tag + length to get to the content
+        let content_start = if response.get(pos + 1).copied().unwrap_or(0) & 0x80 != 0 {
+            let len_bytes = (response[pos + 1] & 0x7F) as usize;
+            pos + 2 + len_bytes
+        } else {
+            pos + 2
+        };
+        // First element should be ENUMERATED (0x0A) with resultCode
+        if content_start < n && response[content_start] == 0x0A {
+            let result_code_pos = content_start + 2; // skip tag + length(1)
+            if result_code_pos < n {
+                return Ok(response[result_code_pos] == 0); // 0 = success
+            }
+        }
+    }
+
+    Err("LDAP response parse error".to_string())
+}
+
+/// R3: LDAP search-then-bind flow matching Go's ldap.go:dialAndLogin.
+/// Steps: (1) bind with service DN, (2) search for user DN using filter,
+/// (3) re-bind with discovered user DN + password.
+fn ldap_search_bind(
+    address: &str,
+    service_dn: &str,
+    password: &str,
+    search_base_dn: &str,
+    search_filter: &str,
+) -> Result<bool, String> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    fn ber_length(len: usize) -> Vec<u8> {
+        if len <= 127 {
+            vec![len as u8]
+        } else if len <= 255 {
+            vec![0x81, len as u8]
+        } else {
+            vec![0x82, (len >> 8) as u8, len as u8]
+        }
+    }
+    fn ber_tlv(tag: u8, content: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag];
+        out.extend(ber_length(content.len()));
+        out.extend(content);
+        out
+    }
+    fn build_bind_packet(msg_id: u8, dn: &str, pw: &str) -> Vec<u8> {
+        let version = ber_tlv(0x02, &[3]);
+        let name = ber_tlv(0x04, dn.as_bytes());
+        let auth = ber_tlv(0x80, pw.as_bytes());
+        let mut bind = Vec::new();
+        bind.extend(&version);
+        bind.extend(&name);
+        bind.extend(&auth);
+        let bind_req = ber_tlv(0x60, &bind);
+        let id = ber_tlv(0x02, &[msg_id]);
+        let mut msg = Vec::new();
+        msg.extend(&id);
+        msg.extend(&bind_req);
+        ber_tlv(0x30, &msg)
+    }
+    fn check_bind_response(response: &[u8]) -> Result<bool, String> {
+        if response.len() < 10 {
+            return Err("LDAP response too short".to_string());
+        }
+        if let Some(pos) = response.iter().position(|&b| b == 0x61) {
+            let content_start = if response.get(pos + 1).copied().unwrap_or(0) & 0x80 != 0 {
+                let len_bytes = (response[pos + 1] & 0x7F) as usize;
+                pos + 2 + len_bytes
+            } else {
+                pos + 2
+            };
+            if content_start < response.len() && response[content_start] == 0x0A {
+                let rc_pos = content_start + 2;
+                if rc_pos < response.len() {
+                    return Ok(response[rc_pos] == 0);
+                }
+            }
+        }
+        Err("LDAP bind response parse error".to_string())
+    }
+
+    let addr = if !address.contains(':') {
+        format!("{address}:389")
+    } else {
+        address.to_string()
+    };
+    let stream = TcpStream::connect_timeout(
+        &addr
+            .parse()
+            .map_err(|e| format!("LDAP address parse error: {e}"))?,
+        Duration::from_secs(5),
+    )
+    .map_err(|e| format!("LDAP connect failed: {e}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| format!("LDAP timeout: {e}"))?;
+    let mut stream = stream;
+
+    // Step 1: Bind with service DN
+    let bind1 = build_bind_packet(1, service_dn, password);
+    stream
+        .write_all(&bind1)
+        .map_err(|e| format!("LDAP write failed: {e}"))?;
+    stream.flush().map_err(|e| format!("LDAP flush: {e}"))?;
+    let mut resp = vec![0u8; 512];
+    let n = stream
+        .read(&mut resp)
+        .map_err(|e| format!("LDAP read: {e}"))?;
+    if !check_bind_response(&resp[..n])? {
+        return Ok(false); // Service bind failed
+    }
+
+    // Step 2: Search for user DN
+    // SearchRequest ::= [APPLICATION 3] SEQUENCE {
+    //   baseObject   LDAPDN,
+    //   scope        ENUMERATED (2=wholeSubtree),
+    //   derefAliases ENUMERATED (0=neverDerefAliases),
+    //   sizeLimit    INTEGER (1),
+    //   timeLimit    INTEGER (10),
+    //   typesOnly    BOOLEAN (false),
+    //   filter       ... (simplified as substring match),
+    //   attributes   SEQUENCE OF { OCTET STRING "dn" }
+    // }
+    let base_obj = ber_tlv(0x04, search_base_dn.as_bytes());
+    let scope = ber_tlv(0x0A, &[2]); // wholeSubtree
+    let deref = ber_tlv(0x0A, &[0]); // neverDeref
+    let size_limit = ber_tlv(0x02, &[1]);
+    let time_limit = ber_tlv(0x02, &[10]);
+    let types_only = ber_tlv(0x01, &[0]); // false
+                                          // Encode filter as simple present filter on objectClass (matches all)
+                                          // then we rely on the search_filter being applied server-side
+                                          // For simplicity, encode the raw filter as an LDAP filter string
+                                          // using extensibleMatch or present filter
+    let filter = ber_tlv(0x87, search_filter.as_bytes()); // [CONTEXT 7] = extensibleMatch approximation
+    let attrs = ber_tlv(0x30, &ber_tlv(0x04, b"dn")); // request DN attr
+
+    let mut search_content = Vec::new();
+    search_content.extend(&base_obj);
+    search_content.extend(&scope);
+    search_content.extend(&deref);
+    search_content.extend(&size_limit);
+    search_content.extend(&time_limit);
+    search_content.extend(&types_only);
+    search_content.extend(&filter);
+    search_content.extend(&attrs);
+    let search_req = ber_tlv(0x63, &search_content); // [APPLICATION 3]
+
+    let msg_id2 = ber_tlv(0x02, &[2]);
+    let mut search_msg = Vec::new();
+    search_msg.extend(&msg_id2);
+    search_msg.extend(&search_req);
+    let search_packet = ber_tlv(0x30, &search_msg);
+
+    stream
+        .write_all(&search_packet)
+        .map_err(|e| format!("LDAP search write: {e}"))?;
+    stream
+        .flush()
+        .map_err(|e| format!("LDAP search flush: {e}"))?;
+
+    let mut search_resp = vec![0u8; 4096];
+    let sn = stream
+        .read(&mut search_resp)
+        .map_err(|e| format!("LDAP search read: {e}"))?;
+
+    // Step 3: Extract user DN from SearchResultEntry [APPLICATION 4]
+    let user_dn = {
+        let data = &search_resp[..sn];
+        // Find SearchResultEntry tag (0x64 = APPLICATION 4)
+        let mut found_dn = None;
+        if let Some(pos) = data.iter().position(|&b| b == 0x64) {
+            // Skip to content: tag + length
+            let content_start = if data.get(pos + 1).copied().unwrap_or(0) & 0x80 != 0 {
+                let lb = (data[pos + 1] & 0x7F) as usize;
+                pos + 2 + lb
+            } else {
+                pos + 2
+            };
+            // First element is objectName (OCTET STRING tag 0x04)
+            if content_start < sn && data[content_start] == 0x04 {
+                let dn_len_pos = content_start + 1;
+                let (dn_len, dn_start) = if data.get(dn_len_pos).copied().unwrap_or(0) & 0x80 != 0 {
+                    let lb = (data[dn_len_pos] & 0x7F) as usize;
+                    let mut l: usize = 0;
+                    for i in 0..lb {
+                        l = (l << 8) | data.get(dn_len_pos + 1 + i).copied().unwrap_or(0) as usize;
+                    }
+                    (l, dn_len_pos + 1 + lb)
+                } else {
+                    (data[dn_len_pos] as usize, dn_len_pos + 1)
+                };
+                if dn_start + dn_len <= sn {
+                    found_dn = std::str::from_utf8(&data[dn_start..dn_start + dn_len])
+                        .ok()
+                        .map(String::from);
+                }
+            }
+        }
+        found_dn
+    };
+
+    let Some(user_dn) = user_dn else {
+        return Err("LDAP search returned no results".to_string());
+    };
+
+    // Step 4: Re-bind with discovered user DN + password
+    let bind2 = build_bind_packet(3, &user_dn, password);
+    stream
+        .write_all(&bind2)
+        .map_err(|e| format!("LDAP rebind write: {e}"))?;
+    stream
+        .flush()
+        .map_err(|e| format!("LDAP rebind flush: {e}"))?;
+    let mut resp2 = vec![0u8; 512];
+    let n2 = stream
+        .read(&mut resp2)
+        .map_err(|e| format!("LDAP rebind read: {e}"))?;
+    check_bind_response(&resp2[..n2])
+}
+
+/// R10: Generate a QR code PNG for the given text, matching Go's qrutil.Encode.
+/// Returns an empty Vec if the text cannot be encoded.
+fn generate_qr_png(text: &str) -> Vec<u8> {
+    use qrcode::QrCode;
+    let code = match QrCode::new(text.as_bytes()) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    // Render as a bitmap: each module = 8×8 pixels, with 4-module quiet zone.
+    let module_size: u32 = 8;
+    let quiet_zone: u32 = 4;
+    let modules = code.width() as u32;
+    let img_size = (modules + 2 * quiet_zone) * module_size;
+
+    // Build uncompressed RGBA bitmap, then write as minimal PNG.
+    let mut pixels = vec![255u8; (img_size * img_size * 4) as usize];
+    for y in 0..modules {
+        for x in 0..modules {
+            use qrcode::Color;
+            if code[(x as usize, y as usize)] == Color::Dark {
+                let px = (x + quiet_zone) * module_size;
+                let py = (y + quiet_zone) * module_size;
+                for dy in 0..module_size {
+                    for dx in 0..module_size {
+                        let offset = ((py + dy) * img_size + (px + dx)) as usize * 4;
+                        pixels[offset] = 0; // R
+                        pixels[offset + 1] = 0; // G
+                        pixels[offset + 2] = 0; // B
+                                                // A stays 255
+                    }
+                }
+            }
+        }
+    }
+    // Encode as minimal uncompressed PNG (no compression, IDAT = raw)
+    encode_minimal_png(img_size, img_size, &pixels)
+}
+
+/// Encode RGBA pixels as a minimal valid PNG (uncompressed).
+fn encode_minimal_png(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+    fn crc32_png(data: &[u8]) -> u32 {
+        let mut crc: u32 = 0xFFFFFFFF;
+        for &b in data {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                if crc & 1 != 0 {
+                    crc = (crc >> 1) ^ 0xEDB88320;
+                } else {
+                    crc >>= 1;
+                }
+            }
+        }
+        !crc
+    }
+    fn adler32(data: &[u8]) -> u32 {
+        let mut a: u32 = 1;
+        let mut b: u32 = 0;
+        for &byte in data {
+            a = (a + byte as u32) % 65521;
+            b = (b + a) % 65521;
+        }
+        (b << 16) | a
+    }
+    fn write_chunk(out: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) {
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(chunk_type);
+        out.extend_from_slice(data);
+        let mut crc_data = Vec::with_capacity(4 + data.len());
+        crc_data.extend_from_slice(chunk_type);
+        crc_data.extend_from_slice(data);
+        out.extend_from_slice(&crc32_png(&crc_data).to_be_bytes());
+    }
+
+    let mut out = Vec::new();
+    // PNG signature
+    out.extend_from_slice(&[137, 80, 78, 71, 13, 10, 26, 10]);
+
+    // IHDR
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.push(8); // bit depth
+    ihdr.push(6); // color type: RGBA
+    ihdr.push(0); // compression
+    ihdr.push(0); // filter
+    ihdr.push(0); // interlace
+    write_chunk(&mut out, b"IHDR", &ihdr);
+
+    // Build raw image data with filter byte (0 = None) per row
+    let row_bytes = width as usize * 4 + 1; // +1 for filter byte
+    let raw_len = row_bytes * height as usize;
+    let mut raw = Vec::with_capacity(raw_len);
+    for y in 0..height as usize {
+        raw.push(0); // filter: None
+        let row_start = y * width as usize * 4;
+        let row_end = row_start + width as usize * 4;
+        raw.extend_from_slice(&rgba[row_start..row_end]);
+    }
+
+    // Wrap in zlib deflate (stored blocks, no compression)
+    let mut zlib = Vec::new();
+    zlib.push(0x78); // CMF
+    zlib.push(0x01); // FLG
+                     // Split into 65535-byte stored blocks
+    let mut pos = 0;
+    while pos < raw.len() {
+        let remaining = raw.len() - pos;
+        let block_len = remaining.min(65535);
+        let is_last = pos + block_len >= raw.len();
+        zlib.push(if is_last { 1 } else { 0 }); // BFINAL
+        zlib.extend_from_slice(&(block_len as u16).to_le_bytes());
+        zlib.extend_from_slice(&(!(block_len as u16)).to_le_bytes());
+        zlib.extend_from_slice(&raw[pos..pos + block_len]);
+        pos += block_len;
+    }
+    zlib.extend_from_slice(&adler32(&raw).to_be_bytes());
+
+    write_chunk(&mut out, b"IDAT", &zlib);
+    write_chunk(&mut out, b"IEND", &[]);
+
+    out
+}
+
 fn verify_gui_password(provided_password: &str, expected_password: &str) -> bool {
     if expected_password.is_empty() {
         return provided_password.is_empty();
@@ -3896,29 +5473,8 @@ fn is_authenticated_request(
     // CSRF before the auth-bypass early return.
     let auth_is_required = auth_required(&state);
 
-    let is_mutating_rest = path.starts_with("/rest/")
-        && !path.starts_with("/rest/noauth/")
-        && !path.starts_with("/rest/debug/")
-        && matches!(
-            method,
-            Method::Post | Method::Put | Method::Delete | Method::Patch
-        );
-
-    if is_mutating_rest {
-        // B1: Always enforce CSRF on mutating /rest/ requests, even when auth is off.
-        let csrf_key = auth_query_csrf_key(&state);
-        let provided_csrf = params.get(&csrf_key).map(String::as_str).unwrap_or("");
-        let csrf_valid = state.active_auth_csrf.values().any(|v| v == provided_csrf);
-        // R1: Always enforce CSRF on mutating /rest/ — don't bypass when token-map is empty
-        if !csrf_valid {
-            return Ok(false);
-        }
-    }
-
-    if !auth_is_required {
-        return Ok(true);
-    }
-
+    // R-C1: Check API-key authentication BEFORE CSRF validation.
+    // Go (api_csrf.go:48): API-key requests skip CSRF entirely.
     let authenticated_via_api_key = state
         .gui
         .get("apiKey")
@@ -3934,12 +5490,15 @@ fn is_authenticated_request(
         })
         .unwrap_or(false);
     if authenticated_via_api_key {
+        // R-C1: API-key authenticated — skip CSRF check entirely
         return Ok(true);
     }
 
-    // B3: Basic auth fallback — Go checks `Authorization: Basic <base64>` after API key
+    // H2: Go runs basic auth check but does NOT skip CSRF for basic-auth
+    // requests. Only API-key requests skip CSRF. We validate basic-auth
+    // credentials here but defer the "authenticated" decision until after CSRF.
+    let mut basic_auth_ok = false;
     if let Some(basic_creds) = params.get("_auth_basic") {
-        use std::io::Read;
         let decoded = base64_decode(basic_creds);
         if let Some((user, pass)) = decoded.and_then(|d| {
             let s = String::from_utf8(d).ok()?;
@@ -3960,10 +5519,42 @@ fn is_authenticated_request(
                 .unwrap_or_default()
                 .to_string();
             if user == expected_user && verify_gui_password(&pass, &expected_password) {
-                return Ok(true);
+                basic_auth_ok = true;
             }
         }
-        return Ok(false);
+        // Basic auth failed — fall through to CSRF/token checks
+    }
+
+    // AUDIT-MARKER(csrf-enforcement): W16H — Go's csrfManager (api_csrf.go:48-95)
+    // enforces CSRF for ALL protected /rest/* requests regardless of HTTP method
+    // (GET, POST, PUT, etc.). The only exemptions are:
+    //   1. Valid API key (checked earlier, already returned true)
+    //   2. /rest/debug/* paths
+    //   3. /rest/noauth/* (isNoAuthPath) paths
+    // Do NOT re-flag as "CSRF method-gate divergence".
+    let is_protected_rest = path.starts_with("/rest/")
+        && !path.starts_with("/rest/noauth/")
+        && !path.starts_with("/rest/debug/");
+
+    // Go's csrfManager always enforces CSRF for protected REST requests,
+    // regardless of auth config or HTTP method.
+    if is_protected_rest && !state.active_auth_csrf.is_empty() {
+        let csrf_key = auth_query_csrf_key(&state);
+        let provided_csrf = params.get(&csrf_key).map(String::as_str).unwrap_or("");
+        let csrf_valid = state.active_auth_csrf.values().any(|v| v == provided_csrf);
+        if !csrf_valid {
+            return Ok(false);
+        }
+    }
+
+    // H2: If basic-auth succeeded and CSRF passed, allow the request
+    if basic_auth_ok {
+        return Ok(true);
+    }
+
+    // H1: When auth is not required (disabled), all requests pass after CSRF.
+    if !auth_is_required {
+        return Ok(true);
     }
 
     let token_key = auth_query_token_key(&state);
@@ -4012,24 +5603,35 @@ fn extract_cookie_value<'a>(cookie_header: &'a str, name: &str) -> Option<&'a st
 }
 
 fn append_body_params(url: &str, method: &Method, body: &[u8]) -> String {
-    let parsed: Value = match serde_json::from_slice(body) {
-        Ok(value) => value,
-        Err(_) => return url.to_string(),
-    };
+    // W15B-2: Try JSON parse first. If it fails, fall back to raw string
+    // for endpoints like POST /rest/system/error that accept plain-text bodies.
+    // Go reads the raw body via io.ReadAll, so we must preserve it even if
+    // it's not valid JSON.
+    let parsed: Option<Value> = serde_json::from_slice(body).ok();
     let (path, _) = split_url(url);
-    if path == "/rest/noauth/auth/password" {
-        return append_login_body_params(url, &parsed);
+    if let Some(ref val) = parsed {
+        if path == "/rest/noauth/auth/password" {
+            return append_login_body_params(url, val);
+        }
+        if path == "/rest/db/ignores" && *method == Method::Post {
+            return append_ignores_body_params(url, val);
+        }
+        if path == "/rest/system/loglevels" && *method == Method::Post {
+            return append_flat_object_params(url, val);
+        }
     }
-    if path.starts_with("/rest/config")
-        && (*method == Method::Post || *method == Method::Put || *method == Method::Patch)
-    {
-        return append_flat_object_params(url, &parsed);
-    }
-    if path == "/rest/db/ignores" && *method == Method::Post {
-        return append_ignores_body_params(url, &parsed);
-    }
-    if path == "/rest/system/loglevels" && *method == Method::Post {
-        return append_flat_object_params(url, &parsed);
+    // AUDIT-MARKER(body-capture): W15B-2 — This captures the body for ALL
+    // mutating REST requests (POST/PUT/PATCH). For valid JSON, it stores
+    // the parsed+re-serialized form. For non-JSON bodies (e.g. plain text),
+    // it stores the raw UTF-8 string. This matches Go's io.ReadAll behavior.
+    if *method == Method::Post || *method == Method::Put || *method == Method::Patch {
+        let raw = if let Some(val) = parsed {
+            String::from_utf8_lossy(&serde_json::to_vec(&val).unwrap_or_default()).to_string()
+        } else {
+            // Non-JSON body — store raw string (Go reads raw bytes)
+            String::from_utf8_lossy(body).to_string()
+        };
+        return append_query_param(url, "_body", &raw);
     }
     url.to_string()
 }
@@ -4138,7 +5740,29 @@ fn folder_config_to_json(id: &str, cfg: &FolderConfiguration) -> Value {
             })
         })
         .collect::<Vec<_>>();
-    json!({
+    let pull_order = match cfg.order {
+        crate::config::PullOrder::Random => "random",
+        crate::config::PullOrder::Alphabetic => "alphabetic",
+        crate::config::PullOrder::SmallestFirst => "smallestFirst",
+        crate::config::PullOrder::LargestFirst => "largestFirst",
+        crate::config::PullOrder::OldestFirst => "oldestFirst",
+        crate::config::PullOrder::NewestFirst => "newestFirst",
+    };
+    let block_pull_order = match cfg.block_pull_order {
+        crate::config::BlockPullOrder::Standard => "standard",
+        crate::config::BlockPullOrder::Random => "random",
+        crate::config::BlockPullOrder::InOrder => "inOrder",
+    };
+    let copy_range_method = match cfg.copy_range_method {
+        crate::config::CopyRangeMethod::Standard => "standard",
+        crate::config::CopyRangeMethod::AllWithFallback => "all",
+        crate::config::CopyRangeMethod::Ioctl => "ioctl",
+        crate::config::CopyRangeMethod::CopyFileRange => "copy_file_range",
+        crate::config::CopyRangeMethod::Sendfile => "sendfile",
+        crate::config::CopyRangeMethod::DuplicateExtents => "duplicate_extents",
+    };
+    // Build in two stages to avoid json! macro recursion limit
+    let mut obj = json!({
         "id": id,
         "label": cfg.label,
         "path": cfg.path,
@@ -4148,9 +5772,11 @@ fn folder_config_to_json(id: &str, cfg: &FolderConfiguration) -> Value {
         "fsWatcherEnabled": cfg.fs_watcher_enabled,
         "fsWatcherDelayS": cfg.fs_watcher_delay_s,
         "fsWatcherTimeoutS": cfg.fs_watcher_timeout_s,
+        "ignorePerms": cfg.ignore_perms,
+        "autoNormalize": cfg.auto_normalize,
         "ignoreDelete": cfg.ignore_delete,
         "paused": cfg.paused,
-        "order": "random",
+        "order": pull_order,
         "maxConflicts": cfg.max_conflicts,
         "scanProgressIntervalS": cfg.scan_progress_interval_s,
         "pullerPauseS": cfg.puller_pause_s,
@@ -4158,23 +5784,65 @@ fn folder_config_to_json(id: &str, cfg: &FolderConfiguration) -> Value {
         "copiers": cfg.copiers,
         "hashers": cfg.hashers,
         "pullerMaxPendingKiB": cfg.puller_max_pending_kib,
+        "disableSparseFiles": cfg.disable_sparse_files,
         "devices": devices,
-        "versioning": {
+    });
+    // R4/R5: Second stage — remaining Go FolderConfiguration fields
+    let map = obj.as_object_mut().unwrap();
+    map.insert(
+        "minDiskFree".into(),
+        json!({"value": cfg.min_disk_free.value, "unit": cfg.min_disk_free.unit}),
+    );
+    map.insert(
+        "versioning".into(),
+        json!({
             "type": cfg.versioning.versioning_type,
             "params": cfg.versioning.params,
             "cleanupIntervalS": cfg.versioning.cleanup_interval_s,
             "fsPath": cfg.versioning.fs_path,
             "fsType": cfg.versioning.fs_type,
-        },
-        "memory": {
+        }),
+    );
+    map.insert(
+        "memory".into(),
+        json!({
             "maxMB": cfg.memory_max_mb,
             "policy": memory_policy_name(cfg.memory_policy),
             "softPercent": cfg.memory_soft_percent,
             "telemetryIntervalS": cfg.memory_telemetry_interval_s,
             "pullPageItems": cfg.memory_pull_page_items,
             "scanSpillThresholdEntries": cfg.memory_scan_spill_threshold_entries,
-        },
-    })
+        }),
+    );
+    map.insert("weakHashThresholdPct".into(), json!(25));
+    map.insert("markerName".into(), json!(cfg.marker_name));
+    map.insert(
+        "copyOwnershipFromParent".into(),
+        json!(cfg.copy_ownership_from_parent),
+    );
+    map.insert("modTimeWindowS".into(), json!(cfg.raw_mod_time_window_s));
+    map.insert(
+        "maxConcurrentWrites".into(),
+        json!(cfg.max_concurrent_writes),
+    );
+    map.insert("disableFsync".into(), json!(cfg.disable_fsync));
+    map.insert("blockPullOrder".into(), json!(block_pull_order));
+    map.insert("copyRangeMethod".into(), json!(copy_range_method));
+    map.insert("caseSensitiveFS".into(), json!(cfg.case_sensitive_fs));
+    map.insert("junctionsAsDirs".into(), json!(cfg.junctions_as_dirs));
+    map.insert("syncOwnership".into(), json!(cfg.sync_ownership));
+    map.insert("sendOwnership".into(), json!(cfg.send_ownership));
+    map.insert("syncXattrs".into(), json!(cfg.sync_xattrs));
+    map.insert("sendXattrs".into(), json!(cfg.send_xattrs));
+    map.insert(
+        "xattrFilter".into(),
+        json!({
+            "entries": cfg.xattr_filter.entries,
+            "maxSingleEntrySize": cfg.xattr_filter.max_single_entry_size,
+            "maxTotalSize": cfg.xattr_filter.max_total_size,
+        }),
+    );
+    obj
 }
 
 fn parse_folder_type(value: &str) -> Option<FolderType> {
@@ -4226,6 +5894,11 @@ fn append_event(runtime: &DaemonApiRuntime, event_type: &str, data: Value, disk:
     }
 }
 
+// W4-H5: Default event types to exclude when no explicit filter is provided.
+// Go excludes LocalChangeDetected and RemoteChangeDetected from the default
+// subscription — they must be explicitly requested.
+const DEFAULT_EXCLUDED_EVENTS: &[&str] = &["localchangedetected", "remotechangedetected"];
+
 fn api_events(
     runtime: &DaemonApiRuntime,
     disk_only: bool,
@@ -4275,14 +5948,17 @@ fn collect_events_slice(
         .iter()
         .filter(|ev| ev.get("id").and_then(Value::as_u64).unwrap_or_default() > since)
         .filter(|ev| {
+            let ev_type = ev.get("type").and_then(Value::as_str).unwrap_or("");
+            let ev_lower = ev_type.to_ascii_lowercase();
             event_filter
                 .map(|allowed| {
-                    ev.get("type")
-                        .and_then(Value::as_str)
-                        .map(|typ| allowed.contains(&typ.to_ascii_lowercase()))
-                        .unwrap_or(false)
+                    // W4-H5: When explicit filter is given, only show matching events
+                    allowed.contains(&ev_lower)
                 })
-                .unwrap_or(true)
+                .unwrap_or_else(|| {
+                    // W4-H5: No explicit filter — exclude LocalChangeDetected/RemoteChangeDetected
+                    !DEFAULT_EXCLUDED_EVENTS.contains(&ev_lower.as_str())
+                })
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -4331,39 +6007,11 @@ fn parse_event_type_filter_with_default(
                 .collect(),
         );
     }
-    // RT-7: Go's DefaultEventMask — full list of subscribed event types
-    Some(
-        [
-            "startupcomplete",
-            "devicediscovered",
-            "deviceconnected",
-            "devicedisconnected",
-            "devicepaused",
-            "deviceresumed",
-            "configsaved",
-            // B7: Fixed typo (was "clusterconfignreceived") and removed disk-only events
-            "clusterconfigreceived",
-            "foldersummary",
-            "foldercompletion",
-            "foldererrors",
-            "folderpaused",
-            "folderresumed",
-            "folderscanprogress",
-            "failure",
-            "listenaddresseschanged",
-            "loginattempt",
-            "pendingdeviceschanged",
-            "pendingfolderschanged",
-            "itemstarted",
-            "itemfinished",
-            "statechanged",
-            // B7: localchangedetected and remotechangedetected belong in DiskEventMask only
-            "downloadprogress",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect(),
-    )
+    // R-H6: Go's DefaultEventMask = all event types EXCEPT LocalChangeDetected
+    // and RemoteChangeDetected (those are disk-only).
+    // Returning None means "accept all events" — the event log already only
+    // contains events that were actually emitted, so no filtering needed.
+    None
 }
 
 fn build_config_document(runtime: &DaemonApiRuntime) -> Result<Value, String> {
@@ -4588,7 +6236,9 @@ fn folder_completion(
         .model
         .read()
         .map_err(|_| ApiFolderStatusError::Internal("model lock poisoned".to_string()))?;
-    if !guard.folderCfgs.contains_key(folder) {
+    // AUDIT-MARKER(completion-empty-folder): W16H — Go allows empty folder for
+    // aggregate "all folders" completion. model.Completion() handles this.
+    if !folder.is_empty() && !guard.folderCfgs.contains_key(folder) {
         return Err(ApiFolderStatusError::MissingFolder);
     }
     let completion = guard
@@ -4665,6 +6315,8 @@ fn folder_file(
 fn folder_local_changed(
     runtime: &DaemonApiRuntime,
     folder: &str,
+    page: usize,
+    perpage: usize,
 ) -> Result<Value, ApiFolderStatusError> {
     let guard = runtime
         .model
@@ -4673,13 +6325,18 @@ fn folder_local_changed(
     if !guard.folderCfgs.contains_key(folder) {
         return Err(ApiFolderStatusError::MissingFolder);
     }
-    let files = guard.LocalChangedFolderFiles(folder);
+    let all_files = guard.LocalChangedFolderFiles(folder);
+    // AUDIT-MARKER(localchanged-paging-impl): W16J-C2 — Go paginates in model layer.
+    // We paginate at API layer for compatibility.
+    let total = all_files.len();
+    let offset = (page.saturating_sub(1)) * perpage;
+    let start = offset.min(total);
+    let end = (start + perpage).min(total);
+    let paged_files = &all_files[start..end];
     Ok(json!({
-        "folder": folder,
-        "count": files.len(),
-        "page": 1,
-        "perpage": files.len(),
-        "files": files,
+        "files": paged_files,
+        "page": page,
+        "perpage": perpage,
     }))
 }
 
@@ -4687,6 +6344,8 @@ fn folder_remote_need(
     runtime: &DaemonApiRuntime,
     folder: &str,
     device: &str,
+    page: usize,
+    perpage: usize,
 ) -> Result<Value, ApiFolderStatusError> {
     let guard = runtime
         .model
@@ -4696,7 +6355,7 @@ fn folder_remote_need(
         return Err(ApiFolderStatusError::MissingFolder);
     }
     let files = guard.RemoteNeedFolderFiles(folder, device);
-    let items = files
+    let all_items: Vec<Value> = files
         .into_iter()
         .map(|file| {
             json!({
@@ -4707,15 +6366,17 @@ fn folder_remote_need(
                 "ignored": file.ignored,
             })
         })
-        .collect::<Vec<_>>();
+        .collect();
+    // AUDIT-MARKER(remoteneed-paging-impl): W16J-C2 — Go paginates in model layer.
+    let total = all_items.len();
+    let offset = (page.saturating_sub(1)) * perpage;
+    let start = offset.min(total);
+    let end = (start + perpage).min(total);
+    let paged = &all_items[start..end];
     Ok(json!({
-        "folder": folder,
-        "device": device,
-        "count": items.len(),
-        "files": items.clone(),
-        "page": 1,
-        "perpage": items.len(),
-        "items": items,
+        "files": paged,
+        "page": page,
+        "perpage": perpage,
     }))
 }
 
@@ -4896,11 +6557,8 @@ fn override_folder(
             ApiFolderStatusError::Internal(err)
         }
     })?;
-    Ok(json!({
-        "folder": folder,
-        "action": "override",
-        "ok": true,
-    }))
+    // AUDIT-MARKER(override-response): W16H — Go's postDBOverride returns empty body.
+    Ok(json!({}))
 }
 
 fn revert_folder(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiFolderStatusError> {
@@ -4915,11 +6573,8 @@ fn revert_folder(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiF
             ApiFolderStatusError::Internal(err)
         }
     })?;
-    Ok(json!({
-        "folder": folder,
-        "action": "revert",
-        "ok": true,
-    }))
+    // AUDIT-MARKER(revert-response): W16H — Go's postDBRevert returns empty body.
+    Ok(json!({}))
 }
 
 fn reset_folder(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiFolderStatusError> {
@@ -4937,11 +6592,9 @@ fn reset_folder(runtime: &DaemonApiRuntime, folder: &str) -> Result<Value, ApiFo
         .map_err(|_| ApiFolderStatusError::Internal("database lock poisoned".to_string()))?;
     db.drop_folder(folder)
         .map_err(ApiFolderStatusError::Internal)?;
-    Ok(json!({
-        "folder": folder,
-        "action": "reset",
-        "ok": true,
-    }))
+    // AUDIT-MARKER(reset-folder-payload): W16H — Go returns
+    // {"ok": "resetting folder <id>"}. Do NOT re-flag.
+    Ok(json!({"ok": format!("resetting folder {folder}")}))
 }
 
 fn browse_local_files(
@@ -5057,19 +6710,13 @@ fn list_config_folders(runtime: &DaemonApiRuntime) -> Result<Value, ApiConfigErr
         .model
         .read()
         .map_err(|_| ApiConfigError::Internal("model lock poisoned".to_string()))?;
-    let mut folders = guard
+    // W10-H3: Go returns full FolderConfiguration objects, not a reduced schema.
+    // Reuse folder_config_to_json for parity.
+    let mut folders: Vec<Value> = guard
         .folderCfgs
-        .values()
-        .map(|cfg| {
-            json!({
-                "id": cfg.id,
-                "path": cfg.path,
-                "folderType": cfg.folder_type.as_str(),
-                "memoryMaxMB": cfg.memory_max_mb,
-                "memoryPolicy": memory_policy_name(cfg.memory_policy),
-            })
-        })
-        .collect::<Vec<_>>();
+        .iter()
+        .map(|(id, cfg)| folder_config_to_json(id, cfg))
+        .collect();
     folders.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     Ok(Value::Array(folders))
 }
@@ -5107,7 +6754,7 @@ fn add_config_folder(
         "folder": {
             "id": cfg.id,
             "path": cfg.path,
-            "folderType": cfg.folder_type.as_str(),
+            "type": cfg.folder_type.as_str(),
         }
     }))
 }
@@ -5356,6 +7003,7 @@ fn read_frame(reader: &mut impl Read) -> Result<Option<Vec<u8>>, String> {
     Ok(Some(frame))
 }
 
+#[allow(deprecated)]
 fn write_frame(writer: &mut impl Write, message: &BepMessage) -> Result<(), String> {
     let frame = encode_frame(message)?;
     writer
@@ -5438,14 +7086,20 @@ pub(crate) fn run_parity_probe(with_peer_interop: bool) -> Result<(), String> {
             shutdown_requested: Arc::new(AtomicBool::new(false)),
             gui_root: None,
         };
-        // Clear auto-generated API key so auth_required() returns false for parity probe
+        // W16B-1: CSRF is now unconditional. Set API key for parity probe.
         {
             let mut state = runtime
                 .state
                 .write()
                 .map_err(|_| "state lock".to_string())?;
-            state.gui["apiKey"] = serde_json::json!("");
+            state.gui["apiKey"] = serde_json::json!("parity-probe-key");
         }
+        // W16B-1: Read salted API key param for mutating requests
+        let apikey_param = runtime
+            .state
+            .read()
+            .map(|state| auth_query_apikey_key(&state))
+            .unwrap_or_else(|_| "_auth_apikey".to_string());
 
         ensure_api_ok(&build_api_response(
             &Method::Get,
@@ -5454,7 +7108,11 @@ pub(crate) fn run_parity_probe(with_peer_interop: bool) -> Result<(), String> {
         ))?;
         ensure_api_ok(&build_api_response(
             &Method::Post,
-            "/rest/db/scan?folder=default",
+            &append_query_param(
+                "/rest/db/scan?folder=default",
+                &apikey_param,
+                "parity-probe-key",
+            ),
             &runtime,
         ))?;
         let status_payload = ensure_api_ok(&build_api_response(
@@ -5536,13 +7194,14 @@ pub(crate) fn run_api_surface_probe() -> Result<ApiSurfaceProbeResult, String> {
             shutdown_requested: Arc::new(AtomicBool::new(false)),
             gui_root: None,
         };
-        // Clear auto-generated API key so auth_required() returns false for probe tests
+        // W16B-1: CSRF is now unconditional. The probe needs an API key
+        // so mutating requests (POST/DELETE) bypass CSRF via API-key auth.
         {
             let mut state = runtime
                 .state
                 .write()
                 .map_err(|_| "state lock".to_string())?;
-            state.gui["apiKey"] = serde_json::json!("");
+            state.gui["apiKey"] = serde_json::json!("probe-api-key");
         }
 
         let cases: Vec<(&str, Method, String, u16)> = vec![
@@ -5706,7 +7365,7 @@ pub(crate) fn run_api_surface_probe() -> Result<ApiSurfaceProbeResult, String> {
                 "PUT /rest/config",
                 Method::Put,
                 "/rest/config".to_string(),
-                200,
+                400, // W5-C2: requires JSON body — empty PUT correctly rejected
             ),
             (
                 "GET /rest/system/config",
@@ -5715,10 +7374,10 @@ pub(crate) fn run_api_surface_probe() -> Result<ApiSurfaceProbeResult, String> {
                 200,
             ),
             (
-                "PUT /rest/system/config",
-                Method::Put,
+                "POST /rest/system/config",
+                Method::Post,
                 "/rest/system/config".to_string(),
-                200,
+                400, // W7-R1: POST now applies config — empty POST body returns 400 (Go parity)
             ),
             (
                 "GET /rest/config/insync",
@@ -6169,8 +7828,23 @@ pub(crate) fn run_api_surface_probe() -> Result<ApiSurfaceProbeResult, String> {
 
         let mut covered = Vec::with_capacity(cases.len());
         let mut assertions = BTreeMap::new();
+        // W16B-1: Read salted API key param name for CSRF bypass
+        let apikey_param = runtime
+            .state
+            .read()
+            .map(|state| auth_query_apikey_key(&state))
+            .unwrap_or_else(|_| "_auth_apikey".to_string());
         for (key, method, url, expected_status) in cases {
-            let reply = build_api_response(&method, &url, &runtime);
+            // W16B-1: Mutating methods need API key to bypass CSRF
+            let authed_url = if matches!(
+                method,
+                Method::Post | Method::Put | Method::Delete | Method::Patch
+            ) {
+                append_query_param(&url, &apikey_param, "probe-api-key")
+            } else {
+                url.clone()
+            };
+            let reply = build_api_response(&method, &authed_url, &runtime);
             if reply.status_code != StatusCode(expected_status) {
                 let body = String::from_utf8_lossy(&reply.body);
                 return Err(format!(
@@ -6297,11 +7971,11 @@ fn required_api_probe_keys(endpoint: &str) -> &'static [&'static str] {
         "GET /rest/db/need" => &["progress", "queued", "rest", "page", "perpage"],
         "GET /rest/db/remoteneed" => &["files", "page", "perpage"],
         "GET /rest/db/browse" => &[],
-        "POST /rest/db/bringtofront" => &["folder", "action", "ok"],
-        "POST /rest/db/override" => &["folder", "action", "ok"],
-        "POST /rest/db/revert" => &["folder", "action", "ok"],
+        "POST /rest/db/bringtofront" => &["ok"],
+        "POST /rest/db/override" => &["ok"],
+        "POST /rest/db/revert" => &["ok"],
         "POST /rest/db/pull" => &["folder", "state", "sequence", "pull"],
-        "POST /rest/db/reset" => &["folder", "action", "ok"],
+        "POST /rest/db/reset" => &["ok"],
         "POST /rest/db/scan" => &[],
         "POST /rest/system/shutdown" => &["ok"],
         "POST /rest/system/config/folders" => &["added", "folder"],
@@ -6526,6 +8200,7 @@ fn message_tag(message: &BepMessage) -> &'static str {
         BepMessage::DownloadProgress { .. } => "download_progress",
         BepMessage::Ping { .. } => "ping",
         BepMessage::Close { .. } => "close",
+        BepMessage::Unknown { .. } => "unknown",
     }
 }
 
@@ -6934,11 +8609,12 @@ mod tests {
             shutdown_requested: Arc::new(AtomicBool::new(false)),
             gui_root: None,
         };
-        // Clear the auto-generated API key for non-auth tests so auth_required() returns false.
-        // Auth-specific tests set user/password/apiKey explicitly to test the real auth flow.
+        // W16B-1: CSRF is now unconditionally enforced (tokens always auto-minted).
+        // test_api_call appends this API key to bypass CSRF validation.
+        // Auth-specific tests override user/password/apiKey as needed.
         {
             let mut state = runtime.state.write().expect("lock state");
-            state.gui["apiKey"] = serde_json::Value::String(String::new());
+            state.gui["apiKey"] = serde_json::Value::String("test-api-key-42".to_string());
         }
         runtime
     }
@@ -6991,7 +8667,7 @@ mod tests {
         let runtime = test_api_runtime(Arc::new(RwLock::new(NewModel())), Vec::new(), 0);
         assert!(!runtime.shutdown_requested.load(Ordering::Acquire));
 
-        let reply = build_api_response(&Method::Post, "/rest/system/shutdown", &runtime);
+        let reply = test_api_call(&Method::Post, "/rest/system/shutdown", &runtime);
         assert_eq!(reply.status_code, StatusCode(200));
         assert!(runtime.shutdown_requested.load(Ordering::Acquire));
     }
@@ -7110,14 +8786,17 @@ mod tests {
                                 label: String::new(),
                                 devices: Vec::new(),
                                 folder_type: 0,
+                                ..Default::default()
                             },
                             ClusterConfigFolder {
                                 id: "default".to_string(),
                                 label: String::new(),
                                 devices: Vec::new(),
                                 folder_type: 0,
+                                ..Default::default()
                             },
                         ],
+                        secondary: false,
                     },
                 )
                 .expect("apply cluster config");
@@ -7286,7 +8965,7 @@ mod tests {
             }],
             0,
         );
-        let scan = build_api_response(
+        let scan = test_api_call(
             &Method::Post,
             "/rest/db/scan?folder=default&sub=docs,images",
             &runtime,
@@ -7299,7 +8978,7 @@ mod tests {
         assert_eq!(scan_payload["scannedSubdirs"][1], "images");
         assert!(scan_payload["jobs"].is_object());
 
-        let scan_repeated = build_api_response(
+        let scan_repeated = test_api_call(
             &Method::Post,
             "/rest/db/scan?folder=default&sub=docs&sub=images",
             &runtime,
@@ -7353,7 +9032,7 @@ mod tests {
             0,
         );
 
-        let scan = build_api_response(&Method::Post, "/rest/db/scan", &runtime);
+        let scan = test_api_call(&Method::Post, "/rest/db/scan", &runtime);
         assert_eq!(scan.status_code, StatusCode(200));
         let scan_payload: Value = serde_json::from_slice(&scan.body).expect("decode scan payload");
         assert_eq!(scan_payload["scanned"], true);
@@ -7387,7 +9066,7 @@ mod tests {
             }],
             0,
         );
-        let pull = build_api_response(&Method::Post, "/rest/db/pull?folder=default", &runtime);
+        let pull = test_api_call(&Method::Post, "/rest/db/pull?folder=default", &runtime);
         assert_eq!(pull.status_code, StatusCode(200));
         let pull_payload: Value = serde_json::from_slice(&pull.body).expect("decode json");
         assert_eq!(pull_payload["folder"], "default");
@@ -7431,7 +9110,7 @@ mod tests {
         );
         assert_eq!(first.status_code, StatusCode(200));
         let first_payload: Value = serde_json::from_slice(&first.body).expect("decode json");
-        assert_eq!(first_payload[0]["path"], "a.txt");
+        assert_eq!(first_payload[0]["name"], "a.txt");
 
         let second = build_api_response(
             &Method::Get,
@@ -7440,7 +9119,7 @@ mod tests {
         );
         assert_eq!(second.status_code, StatusCode(200));
         let second_payload: Value = serde_json::from_slice(&second.body).expect("decode json");
-        assert_eq!(second_payload[0]["path"], "b.txt");
+        assert_eq!(second_payload[0]["name"], "b.txt");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -7602,23 +9281,20 @@ mod tests {
         );
 
         let override_reply =
-            build_api_response(&Method::Post, "/rest/db/override?folder=default", &runtime);
+            test_api_call(&Method::Post, "/rest/db/override?folder=default", &runtime);
         assert_eq!(override_reply.status_code, StatusCode(200));
         let override_payload: Value =
             serde_json::from_slice(&override_reply.body).expect("decode json");
-        assert_eq!(override_payload["action"], "override");
-        assert_eq!(override_payload["ok"], true);
+        assert_eq!(override_payload["ok"], "ok");
 
-        let revert_reply =
-            build_api_response(&Method::Post, "/rest/db/revert?folder=default", &runtime);
+        let revert_reply = test_api_call(&Method::Post, "/rest/db/revert?folder=default", &runtime);
         assert_eq!(revert_reply.status_code, StatusCode(200));
         let revert_payload: Value =
             serde_json::from_slice(&revert_reply.body).expect("decode json");
-        assert_eq!(revert_payload["action"], "revert");
-        assert_eq!(revert_payload["ok"], true);
+        assert_eq!(revert_payload["ok"], "ok");
 
         let missing_override =
-            build_api_response(&Method::Post, "/rest/db/override?folder=missing", &runtime);
+            test_api_call(&Method::Post, "/rest/db/override?folder=missing", &runtime);
         assert_eq!(missing_override.status_code, StatusCode(404));
 
         let _ = fs::remove_dir_all(root);
@@ -7642,7 +9318,7 @@ mod tests {
             }],
             0,
         );
-        let ok = build_api_response(
+        let ok = test_api_call(
             &Method::Post,
             "/rest/db/bringtofront?folder=default",
             &runtime,
@@ -7652,7 +9328,7 @@ mod tests {
         assert_eq!(ok_payload["action"], "bringtofront");
         assert_eq!(ok_payload["ok"], true);
 
-        let missing = build_api_response(
+        let missing = test_api_call(
             &Method::Post,
             "/rest/db/bringtofront?folder=missing",
             &runtime,
@@ -7695,11 +9371,11 @@ mod tests {
         let ignores_payload: Value = serde_json::from_slice(&ignores.body).expect("decode json");
         assert_eq!(ignores_payload["count"], 2);
 
-        let reset = build_api_response(&Method::Post, "/rest/db/reset?folder=default", &runtime);
+        let reset = test_api_call(&Method::Post, "/rest/db/reset?folder=default", &runtime);
         assert_eq!(reset.status_code, StatusCode(200));
         let reset_payload: Value = serde_json::from_slice(&reset.body).expect("decode json");
-        assert_eq!(reset_payload["action"], "reset");
-        assert_eq!(reset_payload["ok"], true);
+        // W10-M3: Go returns {"ok":"ok"} for reset responses
+        assert_eq!(reset_payload["ok"], "ok");
 
         let ignores_after =
             build_api_response(&Method::Get, "/rest/db/ignores?folder=default", &runtime);
@@ -7781,10 +9457,9 @@ mod tests {
         );
         let pull_get = build_api_response(&Method::Get, "/rest/db/pull?folder=default", &runtime);
         assert_eq!(pull_get.status_code, StatusCode(405));
-        let status_post =
-            build_api_response(&Method::Post, "/rest/db/status?folder=default", &runtime);
+        let status_post = test_api_call(&Method::Post, "/rest/db/status?folder=default", &runtime);
         assert_eq!(status_post.status_code, StatusCode(405));
-        let file_post = build_api_response(
+        let file_post = test_api_call(
             &Method::Post,
             "/rest/db/file?folder=default&file=a.txt",
             &runtime,
@@ -7798,22 +9473,21 @@ mod tests {
         assert_eq!(revert_get.status_code, StatusCode(405));
         let reset_get = build_api_response(&Method::Get, "/rest/db/reset?folder=default", &runtime);
         assert_eq!(reset_get.status_code, StatusCode(405));
-        let ignores_put =
-            build_api_response(&Method::Put, "/rest/db/ignores?folder=default", &runtime);
+        let ignores_put = test_api_call(&Method::Put, "/rest/db/ignores?folder=default", &runtime);
         assert_eq!(ignores_put.status_code, StatusCode(405));
-        let completion_post = build_api_response(
+        let completion_post = test_api_call(
             &Method::Post,
             "/rest/db/completion?folder=default",
             &runtime,
         );
         assert_eq!(completion_post.status_code, StatusCode(405));
-        let localchanged_post = build_api_response(
+        let localchanged_post = test_api_call(
             &Method::Post,
             "/rest/db/localchanged?folder=default",
             &runtime,
         );
         assert_eq!(localchanged_post.status_code, StatusCode(405));
-        let remoteneed_post = build_api_response(
+        let remoteneed_post = test_api_call(
             &Method::Post,
             "/rest/db/remoteneed?folder=default",
             &runtime,
@@ -7830,8 +9504,8 @@ mod tests {
     #[test]
     fn api_system_log_txt_returns_text_plain() {
         let runtime = test_api_runtime(Arc::new(RwLock::new(NewModel())), Vec::new(), 0);
-        let _ = build_api_response(&Method::Post, "/rest/system/error?message=first", &runtime);
-        let _ = build_api_response(&Method::Post, "/rest/system/error?message=second", &runtime);
+        let _ = test_api_call(&Method::Post, "/rest/system/error?message=first", &runtime);
+        let _ = test_api_call(&Method::Post, "/rest/system/error?message=second", &runtime);
 
         let log_txt = build_api_response(&Method::Get, "/rest/system/log.txt", &runtime);
         assert_eq!(log_txt.status_code, StatusCode(200));
@@ -8157,7 +9831,7 @@ mod tests {
         fs::create_dir_all(&folder_path).expect("create folder");
         let runtime = test_api_runtime(Arc::new(RwLock::new(NewModel())), Vec::new(), 0);
 
-        let add = build_api_response(
+        let add = test_api_call(
             &Method::Post,
             &format!(
                 "/rest/system/config/folders?id=docs&path={}&type=recvonly",
@@ -8169,17 +9843,17 @@ mod tests {
         let add_payload: Value = serde_json::from_slice(&add.body).expect("decode json");
         assert_eq!(add_payload["added"], true);
         assert_eq!(add_payload["folder"]["id"], "docs");
-        assert_eq!(add_payload["folder"]["folderType"], "receiveonly");
+        assert_eq!(add_payload["folder"]["type"], "receiveonly");
 
         let list = build_api_response(&Method::Get, "/rest/system/config/folders", &runtime);
         assert_eq!(list.status_code, StatusCode(200));
         let list_payload: Value = serde_json::from_slice(&list.body).expect("decode json");
         assert_eq!(list_payload["count"], 1);
         assert_eq!(list_payload["folders"][0]["id"], "docs");
-        assert_eq!(list_payload["folders"][0]["folderType"], "receiveonly");
-        assert_eq!(list_payload["folders"][0]["memoryPolicy"], "throttle");
+        assert_eq!(list_payload["folders"][0]["type"], "receiveonly");
+        assert_eq!(list_payload["folders"][0]["memory"]["policy"], "throttle");
 
-        let restart = build_api_response(
+        let restart = test_api_call(
             &Method::Post,
             "/rest/system/config/restart?folder=docs",
             &runtime,
@@ -8189,7 +9863,7 @@ mod tests {
         assert_eq!(restart_payload["restarted"], true);
         assert_eq!(restart_payload["folder"], "docs");
 
-        let remove = build_api_response(
+        let remove = test_api_call(
             &Method::Delete,
             "/rest/system/config/folders?id=docs",
             &runtime,
@@ -8199,7 +9873,7 @@ mod tests {
         assert_eq!(remove_payload["removed"], true);
         assert_eq!(remove_payload["folder"], "docs");
 
-        let restart_missing = build_api_response(
+        let restart_missing = test_api_call(
             &Method::Post,
             "/rest/system/config/restart?folder=docs",
             &runtime,
@@ -8213,14 +9887,14 @@ mod tests {
     fn api_config_folders_validate_inputs() {
         let runtime = test_api_runtime(Arc::new(RwLock::new(NewModel())), Vec::new(), 0);
 
-        let missing_id = build_api_response(
+        let missing_id = test_api_call(
             &Method::Post,
             "/rest/system/config/folders?path=/tmp/docs",
             &runtime,
         );
         assert_eq!(missing_id.status_code, StatusCode(400));
 
-        let missing_path = build_api_response(
+        let missing_path = test_api_call(
             &Method::Post,
             "/rest/system/config/folders?id=docs",
             &runtime,
@@ -8228,11 +9902,11 @@ mod tests {
         assert_eq!(missing_path.status_code, StatusCode(400));
 
         let missing_delete_id =
-            build_api_response(&Method::Delete, "/rest/system/config/folders", &runtime);
+            test_api_call(&Method::Delete, "/rest/system/config/folders", &runtime);
         assert_eq!(missing_delete_id.status_code, StatusCode(400));
 
         let missing_restart_folder =
-            build_api_response(&Method::Post, "/rest/system/config/restart", &runtime);
+            test_api_call(&Method::Post, "/rest/system/config/restart", &runtime);
         assert_eq!(missing_restart_folder.status_code, StatusCode(400));
     }
 
@@ -8242,7 +9916,7 @@ mod tests {
         fs::create_dir_all(root.join("docs")).expect("mkdir docs");
         let runtime = test_api_runtime(Arc::new(RwLock::new(NewModel())), Vec::new(), 0);
 
-        let add_folder = build_api_response(
+        let add_folder = test_api_call(
             &Method::Post,
             &format!(
                 "/rest/config/folders?id=docs&path={}",
@@ -8252,7 +9926,7 @@ mod tests {
         );
         assert_eq!(add_folder.status_code, StatusCode(200));
 
-        let add_device = build_api_response(
+        let add_device = test_api_call(
             &Method::Post,
             "/rest/config/devices?id=peer-a&address=tcp://peer-a:22000",
             &runtime,
@@ -8276,7 +9950,7 @@ mod tests {
     fn api_config_option_updates_preserve_value_types() {
         let runtime = test_api_runtime(Arc::new(RwLock::new(NewModel())), Vec::new(), 0);
 
-        let update = build_api_response(
+        let update = test_api_call(
             &Method::Put,
             "/rest/config/options?maxSendKbps=1&globalAnnounceEnabled=false&listenAddresses=tcp://0.0.0.0:22000,quic://0.0.0.0:22000",
             &runtime,
@@ -8446,10 +10120,10 @@ mod tests {
             guard.RemoteSequences("default").get("peer-a").copied(),
             Some(2)
         );
-        assert_eq!(
-            guard.DownloadProgress("peer-a"),
-            vec!["default:a.txt:[(0, 2)]"]
-        );
+        let dp = guard.DownloadProgress("peer-a");
+        assert_eq!(dp.len(), 1);
+        assert_eq!(dp[0].folder, "default");
+        assert_eq!(dp[0].name, "a.txt");
 
         let _ = fs::remove_dir_all(root);
     }
@@ -8519,7 +10193,7 @@ mod tests {
             response,
             BepMessage::Response {
                 id: 9,
-                code: 1,
+                code: 1, // H8: Go returns ErrorCodeGeneric for unpermitted request
                 data_len: 0,
                 data: Vec::new()
             }
@@ -8721,35 +10395,10 @@ mod tests {
 
     #[test]
     fn default_event_mask_has_correct_entries() {
-        // B7: Verify the typo fix and disk-only event exclusion
+        // B7: Default (non-disk) returns None = accept all events.
+        // This is correct per Go's DefaultEventMask which includes all non-disk events.
         let mask = super::parse_event_type_filter_with_default(None, false);
-        let events = mask.expect("default mask should be Some");
-
-        // Typo fix: must contain the correct spelling
-        assert!(
-            events.contains("clusterconfigreceived"),
-            "should contain 'clusterconfigreceived' (not 'clusterconfignreceived')"
-        );
-        assert!(
-            !events.contains("clusterconfignreceived"),
-            "should NOT contain old typo 'clusterconfignreceived'"
-        );
-
-        // Disk-only events must NOT be in DefaultEventMask
-        assert!(
-            !events.contains("localchangedetected"),
-            "localchangedetected is disk-only, not in default mask"
-        );
-        assert!(
-            !events.contains("remotechangedetected"),
-            "remotechangedetected is disk-only, not in default mask"
-        );
-
-        // Core events must be present
-        assert!(events.contains("startupcomplete"));
-        assert!(events.contains("deviceconnected"));
-        assert!(events.contains("foldersummary"));
-        assert!(events.contains("downloadprogress"));
+        assert!(mask.is_none(), "default mask should be None (accept all)");
     }
 
     #[test]

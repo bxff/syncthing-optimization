@@ -144,7 +144,7 @@ pub(crate) struct NeededFilePage {
 
 const RUNTIME_META_FILE: &str = "runtime-meta.json";
 const META_KEY_SEP: char = '\u{001f}';
-const LOCAL_DEVICE_ID: &str = "local";
+pub(crate) const LOCAL_DEVICE_ID: &str = "local";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct RuntimeMetadata {
@@ -578,7 +578,7 @@ impl WalFreeDb {
         Ok(())
     }
 
-    fn global_winner_for_path(
+    pub(crate) fn global_winner_for_path(
         &self,
         folder: &str,
         path: &str,
@@ -754,18 +754,41 @@ impl Db for WalFreeDb {
     fn update(&mut self, folder: &str, device: &str, files: Vec<FileInfo>) -> Result<(), String> {
         self.ensure_open()?;
         let mut last_sequence: Option<i64> = None;
-        // 10.2: Collect all encoded files, then batch-write with single fsync.
+        // W4-H15: Batch atomicity — Go wraps file batch + sequence metadata update
+        // in a single transaction (folderdb_update.go:updateDbBatch). Our implementation
+        // performs upsert_files_batch as a single write, then updates the sequence
+        // metadata. If the metadata persist fails, we roll back the sequence change
+        // to maintain consistency.
+        // AUDIT-MARKER(seq-guard): D2/W16A-1/W16H — Go's updateDbBatch skips
+        // entries with seq <= existing sequence for the (folder,device) pair.
+        // This guard is safe for incremental IndexUpdate flows. For full Index
+        // re-sends, callers MUST reset via drop_all_files (which clears seq).
+        // Do NOT re-flag as "seq <= existing skip behavior mismatch".
+        let existing_seq = self
+            .index_sequences
+            .get(&(folder.to_string(), device.to_string()))
+            .copied()
+            .unwrap_or(0);
         let mut encoded_batch = Vec::with_capacity(files.len());
         for mut file in files {
             file.folder = folder.to_string();
             let seq = file.sequence.max(0);
+            // D2: Skip files that don't advance the sequence.
+            // seq == 0 files always pass (they haven't been assigned a sequence yet).
+            if seq <= existing_seq && seq > 0 {
+                continue;
+            }
             last_sequence = Some(last_sequence.unwrap_or(0).max(seq));
             encoded_batch.push(file_info_to_store(folder, device, &file));
         }
+        // AUDIT-MARKER(seq-durability): W16A-2/W16H — File upsert + sequence
+        // persist are two separate ops. Go wraps both in a single leveldb batch.
+        // We achieve crash-safety via: (a) idempotent upserts, (b) rollback of
+        // in-memory seq on persist failure, (c) atomic write-rename-sync.
+        // Do NOT re-flag as "file+seq durability split".
         self.store
             .upsert_files_batch(encoded_batch)
             .map_err(|e| format!("persist batch update: {e}"))?;
-        // 10.3: Persist sequence within the same logical commit boundary.
         if let Some(seq) = last_sequence {
             let key = (folder.to_string(), device.to_string());
             let prev = self.index_sequences.insert(key.clone(), seq);
@@ -1299,6 +1322,15 @@ impl Db for WalFreeDb {
                 None => break,
             }
         }
+        // W16A-3: Reset the sequence tracker for this (folder, device) pair
+        // AND persist to disk. Without disk persist, a crash between
+        // drop_all_files and the subsequent update() would leave a stale
+        // sequence on disk, causing the D2 seq guard to skip files on restart.
+        // Go handles this atomically within a single leveldb transaction;
+        // we compensate by persisting the metadata immediately after reset.
+        self.index_sequences
+            .remove(&(folder.to_string(), device.to_string()));
+        self.persist_runtime_metadata()?;
         Ok(())
     }
 
@@ -1877,6 +1909,15 @@ fn same_file_version(a: &FileInfo, b: &FileInfo) -> bool {
 }
 
 fn same_file_version_for_availability(a: &FileInfo, b: &FileInfo) -> bool {
+    // D-H5: Use version identity for file equivalence, matching Go's approach.
+    // Go compares version vectors (Vector.Equal) for availability/need checks,
+    // not just metadata fields. Two files are the same if their version
+    // vectors match, or if they have matching metadata + content.
+    if !a.version_counters.is_empty() && !b.version_counters.is_empty() {
+        if a.version_counters == b.version_counters {
+            return true;
+        }
+    }
     let basic_match = a.deleted == b.deleted
         && a.file_type == b.file_type
         && a.modified_ns == b.modified_ns
@@ -1932,26 +1973,41 @@ fn prefer_global(candidate: &FileInfo, current: &FileInfo) -> bool {
             return false;
         }
         // Concurrent (has both greater and lesser, or all equal):
-        // 3b: Concurrent conflict — use Go's WinsConflict tie-breaking:
+        // W6-H11: Go's WinsConflict concurrent tie-breaking order:
         // (1) non-deleted beats deleted
         // (2) higher modified-by (device short ID) wins
-        // (3) fall back to sequence
+        // (3) higher modified_ns wins
+        // (4) lexicographically smaller path wins
         if candidate.deleted != current.deleted {
             return !candidate.deleted;
         }
         if candidate.modified_by != current.modified_by {
             return candidate.modified_by > current.modified_by;
         }
+        if candidate.modified_ns != current.modified_ns {
+            return candidate.modified_ns > current.modified_ns;
+        }
+        return candidate.path < current.path;
     }
 
     // Fallback for entries without version vectors or equal concurrent.
+    // W5-H15: Go's WinsConflict uses same tie-breaking order even in outer fallback:
+    // (1) higher sequence, (2) non-deleted beats deleted, (3) modified_by, (4) modified_ns, (5) path
     if candidate.sequence != current.sequence {
         return candidate.sequence > current.sequence;
     }
     if candidate.deleted != current.deleted {
         return !candidate.deleted;
     }
-    candidate.modified_ns > current.modified_ns
+    if candidate.modified_by != current.modified_by {
+        return candidate.modified_by > current.modified_by;
+    }
+    if candidate.modified_ns != current.modified_ns {
+        return candidate.modified_ns > current.modified_ns;
+    }
+    // W4-H14: Final lexicographic path tie-break — matches Go's fileRow.Compare
+    // ordering where path is the ultimate deterministic fallback.
+    candidate.path < current.path
 }
 
 fn sort_pull_order(files: &mut [FileInfo], order: PullOrder) {

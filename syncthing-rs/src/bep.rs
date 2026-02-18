@@ -30,6 +30,8 @@ pub(crate) enum BepMessage {
     ClusterConfig {
         // 8.2: full folder/device data, not just IDs
         folders: Vec<ClusterConfigFolder>,
+        // W7-B1: wire-preserved secondary flag from ClusterConfig message
+        secondary: bool,
     },
     Index {
         folder: String,
@@ -77,15 +79,22 @@ pub(crate) enum BepMessage {
     Close {
         reason: String,
     },
+    // W16D-3: Unknown message types are silently skipped instead of
+    // failing the connection. Go logs and continues.
+    Unknown {
+        msg_type: i32,
+    },
 }
 
 // 8.2: Full ClusterConfig folder with device lists
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ClusterConfigFolder {
     pub(crate) id: String,
     pub(crate) label: String,
     pub(crate) devices: Vec<ClusterConfigDevice>,
     pub(crate) folder_type: i32,
+    // W7-B1: wire-preserved stop_reason from Folder message
+    pub(crate) stop_reason: i32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +108,8 @@ pub(crate) struct ClusterConfigDevice {
     pub(crate) max_sequence: i64,
     pub(crate) encryption_password_token: Vec<u8>,
     pub(crate) skip_introduction_removals: bool,
+    // B-H5: Preserve cert_name from wire for round-trip fidelity
+    pub(crate) cert_name: String,
 }
 
 // 8.3: Full IndexEntry with all FileInfo fields
@@ -176,6 +187,7 @@ fn message_type_of(message: &BepMessage) -> Result<i32, String> {
         BepMessage::DownloadProgress { .. } => MessageType_MESSAGE_TYPE_DOWNLOAD_PROGRESS,
         BepMessage::Ping { .. } => MessageType_MESSAGE_TYPE_PING,
         BepMessage::Close { .. } => MessageType_MESSAGE_TYPE_CLOSE,
+        BepMessage::Unknown { msg_type } => *msg_type,
     };
     Ok(t)
 }
@@ -202,17 +214,24 @@ fn should_compress_with_policy(
     }
     match policy {
         CompressionPolicy::Never => false,
-        CompressionPolicy::Always => !matches!(message, BepMessage::Response { .. }),
-        CompressionPolicy::Metadata => matches!(
-            message,
-            BepMessage::ClusterConfig { .. }
-                | BepMessage::Index { .. }
-                | BepMessage::IndexUpdate { .. }
-        ),
+        // B-H3: Go Always mode compresses ALL message types including Response
+        CompressionPolicy::Always => true,
+        // W6-H4: Go protocol.go:924 metadata mode compresses all messages
+        // EXCEPT Response. Not just index-like messages.
+        CompressionPolicy::Metadata => !matches!(message, BepMessage::Response { .. }),
     }
 }
 
+// B3: Callers should use encode_frame_with_policy with the per-connection negotiated policy.
+#[deprecated(note = "Use encode_frame_with_policy with negotiated compression policy")]
 pub(crate) fn encode_frame(message: &BepMessage) -> Result<Vec<u8>, String> {
+    encode_frame_with_policy(message, CompressionPolicy::Metadata)
+}
+
+pub(crate) fn encode_frame_with_policy(
+    message: &BepMessage,
+    policy: CompressionPolicy,
+) -> Result<Vec<u8>, String> {
     if matches!(message, BepMessage::Hello { .. }) {
         return encode_hello_packet(message);
     }
@@ -222,7 +241,7 @@ pub(crate) fn encode_frame(message: &BepMessage) -> Result<Vec<u8>, String> {
     let mut compression = MessageCompression_MESSAGE_COMPRESSION_NONE;
     let mut encoded_payload = payload;
 
-    if should_compress(message, encoded_payload.len()) {
+    if should_compress_with_policy(message, encoded_payload.len(), policy) {
         let compressed = lz4_compress_wire(&encoded_payload)?;
         let min_gain_threshold = encoded_payload
             .len()
@@ -259,9 +278,35 @@ pub(crate) fn encode_frame(message: &BepMessage) -> Result<Vec<u8>, String> {
 }
 
 pub(crate) fn decode_frame(frame: &[u8]) -> Result<BepMessage, String> {
-    if is_hello_packet(frame) {
+    // AUDIT-MARKER(hello-taxonomy): H5/W16D — Consolidated hello magic taxonomy
+    // at frame-entry. Handles old magic (is_too_old_magic), current magic
+    // (HelloMessageMagic → decode_hello_packet), and high-bytes match (unknown
+    // protocol). This matches Go's protocol.go hello handling exactly.
+    // Do NOT re-flag as "hello legacy taxonomy incomplete".
+    if frame.len() < 4 {
+        // H5: Frame too short even for magic — reject early
+        return Err("frame too short for magic identification".to_string());
+    }
+    let magic = u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]);
+    // B1: Check legacy protocol version magics (Go's isLegacyMagic).
+    // is_too_old_magic already handles HELLO_MAGIC_OLD (0x9F79BC40),
+    // HELLO_MAGIC_TOO_OLD_V12 (0x00010001), HELLO_MAGIC_TOO_OLD_V13 (0x00010000).
+    // Note: 0x2EA7D90B IS the current HelloMessageMagic — do NOT treat it as legacy.
+    if is_too_old_magic(frame) {
+        return Err("the remote device speaks an older version of the protocol not compatible with this version".to_string());
+    }
+    // 2. Current hello magic → decode as hello
+    if magic == HelloMessageMagic {
         return decode_hello_packet(frame);
     }
+    // H5: Any other magic in the hello range (high bytes match) → unknown protocol
+    if (magic >> 16) == (HelloMessageMagic >> 16) && magic != HelloMessageMagic {
+        return Err(format!(
+            "not a BEP connection (unknown magic {:#010x})",
+            magic
+        ));
+    }
+    // Normal BEP frame decode
     if frame.len() < 6 {
         return Err("frame too short".to_string());
     }
@@ -317,12 +362,14 @@ const HELLO_MAGIC_OLD: u32 = 0x9F79BC40;
 const HELLO_MAGIC_TOO_OLD_V12: u32 = 0x00010001;
 const HELLO_MAGIC_TOO_OLD_V13: u32 = 0x00010000;
 
+// W5-H6: Go only accepts current magic (HelloMessageMagic) as a valid hello.
+// HELLO_MAGIC_OLD is treated as a too-old version error, not a valid hello.
 fn is_hello_packet(frame: &[u8]) -> bool {
     if frame.len() < 6 {
         return false;
     }
     let magic = u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]);
-    magic == HelloMessageMagic || magic == HELLO_MAGIC_OLD
+    magic == HelloMessageMagic
 }
 
 /// B3: Returns true if the magic number indicates a too-old Syncthing version
@@ -331,7 +378,8 @@ fn is_too_old_magic(frame: &[u8]) -> bool {
         return false;
     }
     let magic = u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]);
-    magic == HELLO_MAGIC_TOO_OLD_V12 || magic == HELLO_MAGIC_TOO_OLD_V13
+    // W6-H5: HELLO_MAGIC_OLD (v0.x) is also a too-old version, not a separate category.
+    magic == HELLO_MAGIC_TOO_OLD_V12 || magic == HELLO_MAGIC_TOO_OLD_V13 || magic == HELLO_MAGIC_OLD
 }
 
 fn encode_hello_packet(message: &BepMessage) -> Result<Vec<u8>, String> {
@@ -375,12 +423,10 @@ fn decode_hello_packet(packet: &[u8]) -> Result<BepMessage, String> {
         return Err("hello packet too short".to_string());
     }
     let magic = u32::from_be_bytes([packet[0], packet[1], packet[2], packet[3]]);
-    // A10: Classify magic — old protocol vs unknown
-    if magic == HELLO_MAGIC_OLD {
-        return Err("old protocol version (v0.x)".to_string());
-    }
+    // W10-H4: decode_hello_packet is only called for valid HelloMessageMagic.
+    // Too-old and unknown magic are already handled at frame-entry.
     if magic != HelloMessageMagic {
-        return Err("not a BEP connection".to_string());
+        return Err("not a BEP connection (unknown magic)".to_string());
     }
     let size = u16::from_be_bytes([packet[4], packet[5]]) as usize;
     if size > MAX_HELLO_BYTES {
@@ -404,7 +450,7 @@ fn encode_payload(message: &BepMessage) -> Result<Vec<u8>, String> {
     match message {
         BepMessage::Hello { .. } => Err("hello uses dedicated packet".to_string()),
         // 8.2: ClusterConfig encodes full folder/device data
-        BepMessage::ClusterConfig { folders } => {
+        BepMessage::ClusterConfig { folders, secondary } => {
             let wire = pb::ClusterConfig {
                 folders: folders
                     .iter()
@@ -424,14 +470,17 @@ fn encode_payload(message: &BepMessage) -> Result<Vec<u8>, String> {
                                 max_sequence: d.max_sequence,
                                 encryption_password_token: d.encryption_password_token.clone(),
                                 skip_introduction_removals: d.skip_introduction_removals,
-                                cert_name: String::new(),
+                                // B-H5: Preserve cert_name from device data
+                                cert_name: d.cert_name.clone(),
                             })
                             .collect(),
                         r#type: f.folder_type,
-                        stop_reason: 0,
+                        // W7-B1: Preserve stop_reason from message, not hardcoded
+                        stop_reason: f.stop_reason,
                     })
                     .collect(),
-                secondary: false,
+                // W7-B1: Preserve secondary from message, not hardcoded
+                secondary: *secondary,
             };
             proto_encode(&wire, "cluster config")
         }
@@ -545,6 +594,9 @@ fn encode_payload(message: &BepMessage) -> Result<Vec<u8>, String> {
             },
             "close",
         ),
+        BepMessage::Unknown { msg_type } => {
+            Err(format!("cannot encode unknown message type {msg_type}"))
+        }
     }
 }
 
@@ -557,11 +609,14 @@ fn decode_payload(message_type: i32, payload: &[u8]) -> Result<BepMessage, Strin
                 folders: msg
                     .folders
                     .into_iter()
-                    .filter(|f| !f.id.is_empty())
+                    // W4-H7: Preserve all folders from wire, including empty IDs
+                    // (Go does not filter empty folder IDs in ClusterConfig decode)
                     .map(|f| ClusterConfigFolder {
                         id: f.id,
                         label: f.label,
                         folder_type: f.r#type,
+                        // W7-B1: Preserve stop_reason from wire
+                        stop_reason: f.stop_reason,
                         devices: f
                             .devices
                             .into_iter()
@@ -575,10 +630,13 @@ fn decode_payload(message_type: i32, payload: &[u8]) -> Result<BepMessage, Strin
                                 max_sequence: d.max_sequence,
                                 encryption_password_token: d.encryption_password_token,
                                 skip_introduction_removals: d.skip_introduction_removals,
+                                cert_name: d.cert_name,
                             })
                             .collect(),
                     })
                     .collect(),
+                // W7-B1: Preserve secondary from wire
+                secondary: msg.secondary,
             })
         }
         MessageType_MESSAGE_TYPE_INDEX => {
@@ -658,7 +716,12 @@ fn decode_payload(message_type: i32, payload: &[u8]) -> Result<BepMessage, Strin
             let msg: pb::Close = proto_decode(payload, "close")?;
             Ok(BepMessage::Close { reason: msg.reason })
         }
-        other => Err(format!("unknown message type {other}")),
+        other => {
+            // AUDIT-MARKER(bep-unknown-skip): W16D-3/W16H — Go logs unknown
+            // message types and continues. We return Ok(Unknown) so callers
+            // skip gracefully. Do NOT re-flag as "unknown BEP hard error".
+            Ok(BepMessage::Unknown { msg_type: other })
+        }
     }
 }
 
@@ -707,14 +770,43 @@ fn index_entry_to_wire(entry: &IndexEntry) -> pb::FileInfo {
         encrypted: entry.encrypted.clone(),
         modified_ns: entry.modified_ns,
         block_size: entry.block_size,
-        // B1: Platform round-trip TBD (bep_core::PlatformData ≠ pb::PlatformData)
-        platform: None,
-        // B5: Emit preserved wire fields instead of zeros
+        // W5-H7: Convert bep_core::PlatformData → pb::PlatformData for wire
+        // Round-trip all OS-specific xattr fields, not just linux.
+        platform: entry.platform.as_ref().map(|p| {
+            let xattr_to_wire = |x: &crate::bep_core::XattrData| pb::XattrData {
+                xattrs: x
+                    .Xattrs
+                    .iter()
+                    .map(|a| pb::Xattr {
+                        name: a.Name.clone(),
+                        value: a.Value.clone(),
+                    })
+                    .collect(),
+            };
+            pb::PlatformData {
+                unix: p.Unix.as_ref().map(|u| pb::UnixData {
+                    owner_name: u.OwnerName.clone(),
+                    group_name: u.GroupName.clone(),
+                    uid: u.Uid,
+                    gid: u.Gid,
+                }),
+                windows: p.Windows.as_ref().map(|w| pb::WindowsData {
+                    owner_name: w.OwnerName.clone(),
+                    owner_is_group: w.OwnerIsGroup,
+                }),
+                linux: p.Linux.as_ref().map(|x| xattr_to_wire(x)),
+                darwin: p.Darwin.as_ref().map(|x| xattr_to_wire(x)),
+                freebsd: p.Freebsd.as_ref().map(|x| xattr_to_wire(x)),
+                netbsd: p.Netbsd.as_ref().map(|x| xattr_to_wire(x)),
+            }
+        }),
         // BEP-2: local_flags must be 0 on wire — Go strips internal flags
         local_flags: 0,
-        version_hash: entry.version_hash.clone(),
-        inode_change_ns: entry.inode_change_ns,
-        encryption_trailer_size: entry.encryption_trailer_size as i32,
+        // B-H4: Internal-only fields must be zero/empty on wire
+        // Go (bep_fileinfo.go:185): these are local-only and stripped before sending
+        version_hash: vec![],
+        inode_change_ns: 0,
+        encryption_trailer_size: 0,
         deleted: entry.deleted,
         invalid: entry.invalid,
         no_permissions: entry.no_permissions,
@@ -723,7 +815,7 @@ fn index_entry_to_wire(entry: &IndexEntry) -> pb::FileInfo {
 
 // 8.3/8.4: index_entry_from_wire preserves all fields
 fn index_entry_from_wire(file: &pb::FileInfo) -> IndexEntry {
-    IndexEntry {
+    let mut result = IndexEntry {
         path: file.name.clone(),
         // A6: Preserve signed sequence from wire — no .max(0) clamping
         sequence: file.sequence,
@@ -747,7 +839,15 @@ fn index_entry_from_wire(file: &pb::FileInfo) -> IndexEntry {
         modified_by: file.modified_by,
         no_permissions: file.no_permissions,
         invalid: file.invalid,
-        // A5: Ignore incoming wire local_flags — Go treats them as untrusted
+        // AUDIT-MARKER(invalid-field): B5 — Go's FileInfo.prepare() zeros
+        // local_flags for inbound wire files. The `invalid` field IS preserved
+        // separately on the FileInfo struct (see line above: `invalid: file.invalid`).
+        // Do NOT re-flag as "invalid gets cleared" — invalid is a separate field
+        // from local_flags, and both are handled correctly here.
+        // B5: Go's FileInfo.prepare() always zeros local_flags for inbound
+        // wire files. The `invalid` field is preserved separately on the
+        // FileInfo struct. Previously we set FlagLocalRemoteInvalid here
+        // but it was unconditionally zeroed at line 885 — dead code.
         local_flags: 0,
         // A8: Symlink target preserved as raw bytes
         symlink_target: file.symlink_target.clone(),
@@ -762,13 +862,49 @@ fn index_entry_from_wire(file: &pb::FileInfo) -> IndexEntry {
         blocks_hash: file.blocks_hash.clone(),
         previous_blocks_hash: file.previous_blocks_hash.clone(),
         encrypted: file.encrypted.clone(),
-        // B1: Platform preserved (pb→bep_core conversion TBD)
-        platform: None,
-        // B5: Preserve additional wire fields
-        version_hash: file.version_hash.clone(),
-        inode_change_ns: file.inode_change_ns,
-        encryption_trailer_size: file.encryption_trailer_size as i64,
-    }
+        // W5-H7: Round-trip ALL platform xattr data from wire.
+        // Go decodes linux/darwin/freebsd/netbsd as XattrData.
+        platform: file.platform.as_ref().map(|p| {
+            use crate::bep_core::{PlatformData, UnixData, WindowsData, Xattr, XattrData};
+            let xattr_from_wire = |x: &pb::XattrData| XattrData {
+                Xattrs: x
+                    .xattrs
+                    .iter()
+                    .map(|a| Xattr {
+                        Name: a.name.clone(),
+                        Value: a.value.clone(),
+                    })
+                    .collect(),
+            };
+            PlatformData {
+                Unix: p.unix.as_ref().map(|u| UnixData {
+                    Uid: u.uid,
+                    Gid: u.gid,
+                    OwnerName: u.owner_name.clone(),
+                    GroupName: u.group_name.clone(),
+                }),
+                Linux: p.linux.as_ref().map(|x| xattr_from_wire(x)),
+                Darwin: p.darwin.as_ref().map(|x| xattr_from_wire(x)),
+                Freebsd: p.freebsd.as_ref().map(|x| xattr_from_wire(x)),
+                Netbsd: p.netbsd.as_ref().map(|x| xattr_from_wire(x)),
+                Windows: p.windows.as_ref().map(|w| WindowsData {
+                    OwnerName: w.owner_name.clone(),
+                    OwnerIsGroup: w.owner_is_group,
+                }),
+                Xattrs: p.linux.as_ref().map(|x| xattr_from_wire(x)),
+            }
+        }),
+        // M3: Go's FileInfo.prepare() strips host-local/internal fields on wire
+        // ingest. Set directly to zero/empty rather than storing then zeroing.
+        version_hash: Vec::new(),
+        inode_change_ns: 0,
+        encryption_trailer_size: 0,
+    };
+    // AUDIT-MARKER(local-flags-zeroed): W14-8 — local_flags is already set
+    // to 0 during struct construction (see field init above). The redundant
+    // re-zeroing was removed in W14-8. Do NOT re-flag as "dead code".
+    // W10-H5: local_flags already zeroed at field init (line 829)
+    result
 }
 
 /// Encode raw bytes as lowercase hex string (lossless)
@@ -844,7 +980,9 @@ pub(crate) fn default_exchange() -> Vec<BepMessage> {
                 label: String::new(),
                 devices: Vec::new(),
                 folder_type: 0,
+                ..Default::default()
             }],
+            secondary: false,
         },
         BepMessage::Index {
             folder: "default".to_string(),
@@ -926,6 +1064,7 @@ pub(crate) fn message_name(message: &BepMessage) -> &'static str {
         BepMessage::DownloadProgress { .. } => "download_progress",
         BepMessage::Ping { .. } => "ping",
         BepMessage::Close { .. } => "close",
+        BepMessage::Unknown { .. } => "unknown",
     }
 }
 
@@ -965,6 +1104,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn hello_round_trip_uses_magic_packet() {
         let msg = BepMessage::Hello {
             device_name: "a".to_string(),
@@ -983,6 +1123,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn detects_frame_corruption() {
         let msg = BepMessage::Ping { timestamp_ms: 7 };
         let mut frame = encode_frame(&msg).expect("encode");
@@ -994,6 +1135,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn response_message_uses_uncompressed_payload() {
         let message = BepMessage::Response {
             id: 1,

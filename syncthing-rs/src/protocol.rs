@@ -87,17 +87,20 @@ pub(crate) fn default_sequence() -> [ProtocolEvent; 9] {
     ]
 }
 
-pub(crate) fn event_from_message(message: &BepMessage) -> ProtocolEvent {
+pub(crate) fn event_from_message(message: &BepMessage) -> Option<ProtocolEvent> {
     match message {
-        BepMessage::Hello { .. } => ProtocolEvent::Hello,
-        BepMessage::ClusterConfig { .. } => ProtocolEvent::ClusterConfig,
-        BepMessage::Index { .. } => ProtocolEvent::Index,
-        BepMessage::IndexUpdate { .. } => ProtocolEvent::IndexUpdate,
-        BepMessage::Request { .. } => ProtocolEvent::Request,
-        BepMessage::Response { .. } => ProtocolEvent::Response,
-        BepMessage::DownloadProgress { .. } => ProtocolEvent::DownloadProgress,
-        BepMessage::Ping { .. } => ProtocolEvent::Ping,
-        BepMessage::Close { .. } => ProtocolEvent::Close,
+        BepMessage::Hello { .. } => Some(ProtocolEvent::Hello),
+        BepMessage::ClusterConfig { .. } => Some(ProtocolEvent::ClusterConfig),
+        BepMessage::Index { .. } => Some(ProtocolEvent::Index),
+        BepMessage::IndexUpdate { .. } => Some(ProtocolEvent::IndexUpdate),
+        BepMessage::Request { .. } => Some(ProtocolEvent::Request),
+        BepMessage::Response { .. } => Some(ProtocolEvent::Response),
+        BepMessage::DownloadProgress { .. } => Some(ProtocolEvent::DownloadProgress),
+        BepMessage::Ping { .. } => Some(ProtocolEvent::Ping),
+        BepMessage::Close { .. } => Some(ProtocolEvent::Close),
+        // AUDIT-MARKER(unknown-skip): W16K-K2 — Go's readerLoop (protocol.go:409-411)
+        // skips unknown messages with `continue`. They never enter the dispatcher.
+        BepMessage::Unknown { .. } => None,
     }
 }
 
@@ -126,7 +129,10 @@ pub(crate) fn run_message_exchange(messages: &[BepMessage]) -> Result<Vec<&'stat
             }
             _ => {}
         }
-        let event = event_from_message(message);
+        // AUDIT-MARKER(unknown-skip): W16K-K2 — Skip unknown messages entirely
+        let Some(event) = event_from_message(message) else {
+            continue;
+        };
         state = advance(state, event)?;
         trace.push(event.as_str());
     }

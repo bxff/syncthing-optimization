@@ -377,8 +377,44 @@ pub(crate) fn run_daemon(config: DaemonConfig) -> Result<(), String> {
             shutdown_requested: shutdown_requested.clone(),
             gui_root: resolve_gui_root(),
         };
+        // Emit startup events so the GUI's EventService.start() call to
+        // /rest/events?limit=1 returns immediately instead of blocking
+        // for the full 60-second timeout.  Go's Syncthing emits these
+        // during its own initialisation sequence.
+        append_event(
+            &runtime,
+            "Starting",
+            json!({"home": std::env::var("HOME").unwrap_or_default()}),
+            false,
+        );
+        // Emit StateChanged for each configured folder so the GUI shows
+        // initial folder status.
+        if let Ok(guard) = runtime.model.read() {
+            for folder_id in guard.folderCfgs.keys() {
+                append_event(
+                    &runtime,
+                    "StateChanged",
+                    json!({
+                        "folder": folder_id,
+                        "from": "idle",
+                        "to": "idle",
+                        "duration": 0.0,
+                    }),
+                    false,
+                );
+            }
+        }
+        append_event(&runtime, "StartupCompleted", json!({}), false);
         let _api_thread = start_api_server(api_addr, runtime)?;
     }
+
+    // NOTE: Go's Syncthing scans folders on startup, but its goroutine-based
+    // model doesn't hold a global write lock during the scan.  Our scan holds
+    // model.write() for the entire duration, which blocks ALL API reads (the
+    // GUI's /rest/db/status hangs until the scan finishes).  For large folders
+    // (114k files / 26 GB) this can take minutes.
+    //
+    // Users can trigger scans via the GUI's Rescan button (POST /rest/db/scan).
 
     let listener = TcpListener::bind(&config.listen_addr)
         .map_err(|err| format!("listen {}: {err}", config.listen_addr))?;
@@ -4919,19 +4955,26 @@ fn maybe_set_csrf_cookie(
     _params: &BTreeMap<String, String>,
     runtime: &DaemonApiRuntime,
 ) {
-    // Generate a new CSRF token and set it as a cookie.
-    // In Go, this checks if an existing valid CSRF cookie is present and only
-    // issues a new one if not. We always issue here since the Rust request
-    // pipeline doesn't carry cookie state through params for CSRF cookies.
+    // R-CSRF: Reuse an existing CSRF token if one is already stored, to
+    // prevent race conditions where parallel static-file requests each
+    // minted a new token and invalidated the one the browser already
+    // received.  Go's csrfManager likewise keeps a stable token per
+    // session cookie rather than minting a fresh one on every response.
     let csrf_cookie_name = csrf_cookie_name(runtime);
-    let csrf_token = mint_csrf_token("gui");
-    if let Ok(mut state) = runtime.state.write() {
-        // Store the token so it can be validated later
+    let csrf_token = if let Ok(state) = runtime.state.read() {
         let gui_token_key = format!("_gui_csrf_{}", state.auth_param_salt);
-        state
-            .active_auth_csrf
-            .insert(gui_token_key, csrf_token.clone());
-    }
+        state.active_auth_csrf.get(&gui_token_key).cloned()
+    } else {
+        None
+    };
+    let csrf_token = csrf_token.unwrap_or_else(|| {
+        let token = mint_csrf_token("gui");
+        if let Ok(mut state) = runtime.state.write() {
+            let gui_token_key = format!("_gui_csrf_{}", state.auth_param_salt);
+            state.active_auth_csrf.insert(gui_token_key, token.clone());
+        }
+        token
+    });
     let secure_attr = runtime
         .state
         .read()

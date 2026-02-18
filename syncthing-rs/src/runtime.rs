@@ -74,6 +74,9 @@ struct SyncthingConfigBootstrap {
     gui_address: Option<String>,
     gui_theme: Option<String>,
     gui_use_tls: Option<bool>,
+    gui_apikey: Option<String>,
+    gui_user: Option<String>,
+    gui_password: Option<String>,
 }
 
 pub(crate) fn parse_daemon_args(args: &[String]) -> Result<DaemonConfig, String> {
@@ -644,6 +647,24 @@ fn parse_syncthing_config_bootstrap(raw: &str) -> SyncthingConfigBootstrap {
                     out.gui_theme = Some(decoded);
                 }
             }
+            if let Some(value) = extract_xml_tag_value(trimmed, "apikey") {
+                let decoded = decode_xml_value(value.trim());
+                if !decoded.is_empty() {
+                    out.gui_apikey = Some(decoded);
+                }
+            }
+            if let Some(value) = extract_xml_tag_value(trimmed, "user") {
+                let decoded = decode_xml_value(value.trim());
+                if !decoded.is_empty() {
+                    out.gui_user = Some(decoded);
+                }
+            }
+            if let Some(value) = extract_xml_tag_value(trimmed, "password") {
+                let decoded = decode_xml_value(value.trim());
+                if !decoded.is_empty() {
+                    out.gui_password = Some(decoded);
+                }
+            }
             continue;
         }
 
@@ -838,6 +859,20 @@ fn apply_syncthing_bootstrap_to_api_state(
         .cloned()
         .unwrap_or_else(|| api_addr.to_string());
     state.gui["address"] = json!(gui_address);
+    // Transfer GUI auth fields from config.xml bootstrap
+    if let Some(apikey) = bootstrap
+        .gui_apikey
+        .as_ref()
+        .filter(|k| !k.trim().is_empty())
+    {
+        state.gui["apiKey"] = json!(apikey);
+    }
+    if let Some(user) = bootstrap.gui_user.as_ref().filter(|u| !u.trim().is_empty()) {
+        state.gui["user"] = json!(user);
+    }
+    if let Some(password) = bootstrap.gui_password.as_ref().filter(|p| !p.is_empty()) {
+        state.gui["password"] = json!(password);
+    }
 
     if state
         .default_folder
